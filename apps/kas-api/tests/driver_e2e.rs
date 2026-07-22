@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 use kas_api::app;
+use kas_auth::{
+    CreateRole, CreateRoleBinding, CreateUser, IssuedCredential, Role, RoleBinding, Rule, Subject,
+    SubjectKind, User, SYSTEM_ADMIN_ROLE,
+};
 use kas_core::{
     Action, CreateManifest, CreateResource, CreateRun, DriverState, FinishRun, RunResult, RunStatus,
 };
@@ -8,7 +12,7 @@ use kas_core::{Driver, Manifest, Resource, Run};
 use kas_driver::DriverRuntime;
 use kas_store::Store;
 use kas_test_driver::TestDriver;
-use reqwest::Client;
+use reqwest::{header, Client};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -38,10 +42,129 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
     kas_store::migrate(&database)?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let application = app(Store::open(&database)?);
+    let mut store = Store::open(&database)?;
+    let admin = store.bootstrap_admin("admin")?;
+    let application = app(store);
     let server = tokio::spawn(async move { axum::serve(listener, application).await });
     let api = format!("http://{address}");
-    let client = Client::new();
+    let unauthorized = Client::new().get(format!("{api}/resources")).send().await?;
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", admin.token).parse()?,
+    );
+    let client = Client::builder().default_headers(headers).build()?;
+
+    let reader: User = client
+        .post(format!("{api}/users"))
+        .json(&CreateUser {
+            name: "reader".into(),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let reader_role: Role = client
+        .post(format!("{api}/roles"))
+        .json(&CreateRole {
+            name: "resource-reader".into(),
+            description: "Can list resources".into(),
+            rules: vec![Rule {
+                resources: vec!["resources".into()],
+                verbs: vec!["list".into()],
+            }],
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    client
+        .post(format!("{api}/role-bindings"))
+        .json(&CreateRoleBinding {
+            name: "reader".into(),
+            role_id: reader_role.id,
+            subjects: vec![Subject {
+                kind: SubjectKind::User,
+                id: reader.id,
+            }],
+        })
+        .send()
+        .await?
+        .error_for_status()?;
+    let reader_credential: IssuedCredential = client
+        .post(format!("{api}/users/{}/credentials", reader.id))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let reader_client = Client::builder()
+        .default_headers({
+            let mut headers = header::HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {}", reader_credential.token).parse()?,
+            );
+            headers
+        })
+        .build()?;
+    assert!(reader_client
+        .get(format!("{api}/resources"))
+        .send()
+        .await?
+        .status()
+        .is_success());
+    assert_eq!(
+        reader_client
+            .post(format!("{api}/manifests"))
+            .json(&CreateManifest {
+                name: "forbidden".into(),
+                version: 1,
+                description: "Forbidden".into(),
+                resource_schema: json!({ "type": "object" }),
+                actions: vec![],
+                driver: "forbidden-driver".into(),
+            })
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .patch(format!("{api}/roles/{SYSTEM_ADMIN_ROLE}"))
+            .json(&CreateRole {
+                name: "changed".into(),
+                description: "changed".into(),
+                rules: vec![]
+            })
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    let bindings: Vec<RoleBinding> = client
+        .get(format!("{api}/role-bindings"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let bootstrap = bindings
+        .iter()
+        .find(|binding| binding.name == "system:bootstrap-admin")
+        .unwrap();
+    assert_eq!(
+        client
+            .delete(format!("{api}/role-bindings/{}", bootstrap.id))
+            .send()
+            .await?
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
 
     let manifest: Manifest = client
         .post(format!("{api}/manifests"))
@@ -110,8 +233,21 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .json()
         .await?;
 
-    let runtime = DriverRuntime::new(&api, driver.id, starting.generation, TestDriver)
-        .with_poll_interval(Duration::from_millis(10));
+    let credential: IssuedCredential = client
+        .post(format!("{api}/drivers/{}/credentials", driver.id))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let runtime = DriverRuntime::new(
+        &api,
+        driver.id,
+        starting.generation,
+        credential.token,
+        TestDriver,
+    )
+    .with_poll_interval(Duration::from_millis(10));
     let driver_process = tokio::spawn(runtime.run());
     let first = wait_for_finished_run(&client, &api, first.id).await?;
     assert_eq!(first.status, RunStatus::Succeeded);

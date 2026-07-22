@@ -80,8 +80,10 @@ Stopped → Starting → Ready → Stopping → Stopped
 
 ```text
 crates/kas-core    核心数据结构
+crates/kas-auth    数据库驱动的认证与 RBAC 模型
 crates/kas-store   SQLite 持久化
 crates/kas-driver  Driver 通用接口与持续运行的 Runtime
+apps/kas-admin     初始管理员工具
 apps/kas-migrate   独立数据库 Migration
 apps/kas-api       最小控制面 API
 apps/kas-test-driver 可执行的端到端测试 Driver
@@ -91,10 +93,20 @@ apps/kas-test-driver 可执行的端到端测试 Driver
 
 ```bash
 cargo run -p kas-migrate
+cargo run -p kas-admin -- bootstrap admin
 cargo run -p kas-api
 ```
 
 `kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
+`kas-admin bootstrap` 只允许执行一次，并把初始管理员 Bearer token 输出到终端。
+
+## 权限
+
+权限规则直接保存在 SQLite 中，不从配置文件加载。当前模型包含 User、ServiceAccount、Role、RoleBinding 和 Credential。所有 API 默认拒绝，`/health` 除外。
+
+内置的 `system:admin`、`system:editor`、`system:viewer`、`system:driver` Role 以及系统自动创建的 Binding 不允许通过 API 修改或删除。用户创建的 Role 和 RoleBinding 可以由管理员维护。
+
+每个 Driver 自动拥有一个 ServiceAccount。Driver 每次启动都需要签发绑定当前 generation 的短期 token，旧 token 会被撤销。
 
 ## 测试
 
@@ -124,6 +136,7 @@ cargo test --workspace
 KAS_API=http://127.0.0.1:3000 \
 KAS_DRIVER_ID=<driver-id> \
 KAS_DRIVER_GENERATION=<generation> \
+KAS_DRIVER_TOKEN=<driver-token> \
 cargo run -p kas-test-driver
 ```
 

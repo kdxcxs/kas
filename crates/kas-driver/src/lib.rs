@@ -39,6 +39,7 @@ pub struct DriverRuntime<D> {
     api: String,
     driver_id: Uuid,
     generation: u64,
+    token: String,
     implementation: D,
     client: Client,
     poll_interval: Duration,
@@ -49,12 +50,14 @@ impl<D: Driver> DriverRuntime<D> {
         api: impl Into<String>,
         driver_id: Uuid,
         generation: u64,
+        token: impl Into<String>,
         implementation: D,
     ) -> Self {
         Self {
             api: api.into().trim_end_matches('/').to_owned(),
             driver_id,
             generation,
+            token: token.into(),
             implementation,
             client: Client::new(),
             poll_interval: Duration::from_millis(100),
@@ -103,6 +106,7 @@ impl<D: Driver> DriverRuntime<D> {
         Ok(self
             .client
             .get(format!("{}/drivers/{}", self.api, self.driver_id))
+            .bearer_auth(&self.token)
             .send()
             .await?
             .error_for_status()?
@@ -114,6 +118,7 @@ impl<D: Driver> DriverRuntime<D> {
         Ok(self
             .client
             .patch(format!("{}/drivers/{}", self.api, self.driver_id))
+            .bearer_auth(&self.token)
             .json(&json!({
                 "state": "ready",
                 "generation": self.generation,
@@ -131,6 +136,7 @@ impl<D: Driver> DriverRuntime<D> {
         Ok(self
             .client
             .patch(format!("{}/drivers/{}", self.api, self.driver_id))
+            .bearer_auth(&self.token)
             .json(&json!({
                 "state": "stopped",
                 "generation": self.generation
@@ -146,6 +152,7 @@ impl<D: Driver> DriverRuntime<D> {
         let work: Option<DriverWork> = self
             .client
             .post(format!("{}/drivers/{}/claim", self.api, self.driver_id))
+            .bearer_auth(&self.token)
             .json(&json!({ "generation": self.generation }))
             .send()
             .await?
@@ -171,6 +178,7 @@ impl<D: Driver> DriverRuntime<D> {
         };
         self.client
             .put(format!("{}/resources/{}/status", self.api, resource.id))
+            .bearer_auth(&self.token)
             .json(&UpdateResourceStatus {
                 driver_id: self.driver_id,
                 driver_generation: self.generation,
@@ -193,6 +201,7 @@ impl<D: Driver> DriverRuntime<D> {
         let finished = self
             .client
             .put(format!("{}/runs/{}/result", self.api, run.id))
+            .bearer_auth(&self.token)
             .json(&FinishRun {
                 driver_generation: self.generation,
                 result,
