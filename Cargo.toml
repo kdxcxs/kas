@@ -2,6 +2,7 @@
 members = [
     "apps/kas-api",
     "apps/kas-migrate",
+    "apps/kas-test-driver",
     "crates/kas-core",
     "crates/kas-driver",
     "crates/kas-store",
@@ -21,9 +22,10 @@ kas-core = { path = "crates/kas-core" }
 kas-driver = { path = "crates/kas-driver" }
 kas-store = { path = "crates/kas-store" }
 jsonschema = { version = "0.48.5", default-features = false }
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -143,6 +143,14 @@ pub struct CreateResource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateResourceStatus {
+    pub driver_id: Uuid,
+    pub driver_generation: u64,
+    pub observed_revision: u64,
+    pub status: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRun {
     pub request_id: Uuid,
     pub resource_id: Uuid,
@@ -150,18 +158,25 @@ pub struct CreateRun {
     pub input: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FinishRun {
     pub driver_generation: u64,
     #[serde(flatten)]
     pub result: RunResult,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RunResult {
     Succeeded { output: Value },
     Failed { error: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DriverWork {
+    Reconcile { resource: Resource, revision: u64 },
+    Run { run: Box<Run>, resource: Resource },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

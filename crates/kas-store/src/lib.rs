@@ -2,8 +2,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use kas_core::{
-    Action, CreateManifest, CreateResource, CreateRun, Driver, DriverReady, DriverState, FinishRun,
-    Manifest, Resource, Run, RunResult, RunStatus,
+    Action, CreateManifest, CreateResource, CreateRun, Driver, DriverReady, DriverState,
+    DriverWork, FinishRun, Manifest, Resource, Run, RunResult, RunStatus, UpdateResourceStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde_json::Value;
@@ -28,9 +28,12 @@ pub enum StoreError {
     UnsupportedSchema { current: u32, latest: u32 },
 }
 
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
-const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (2, include_str!("../migrations/0002_reconciliations.sql")),
+];
 
 pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
     let mut connection = Connection::open(path)?;
@@ -141,6 +144,64 @@ impl Store {
         let rows = statement.query_map([], resource_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    pub fn get_resource(&self, resource_id: Uuid) -> Result<Resource, StoreError> {
+        self.connection
+            .query_row(
+                RESOURCE_SELECT_BY_ID,
+                [resource_id.to_string()],
+                resource_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("Resource {resource_id}")))
+    }
+
+    pub fn update_resource_status(
+        &mut self,
+        resource_id: Uuid,
+        input: UpdateResourceStatus,
+    ) -> Result<Resource, StoreError> {
+        let now = Utc::now();
+        let status_json = serde_json::to_string(&input.status)?;
+        let changed = self.connection.execute(
+            "UPDATE resources SET status_json=?,observed_revision=?,claimed_revision=NULL,
+             claim_driver_generation=NULL,updated_at=?
+             WHERE id=? AND revision=? AND claimed_revision=? AND claim_driver_generation=?
+             AND EXISTS(
+                SELECT 1 FROM drivers d
+                WHERE d.id=? AND d.manifest_id=resources.manifest_id
+                AND d.generation=? AND d.state='ready'
+             )",
+            params![
+                status_json,
+                input.observed_revision,
+                stamp(now),
+                resource_id.to_string(),
+                input.observed_revision,
+                input.observed_revision,
+                input.driver_generation,
+                input.driver_id.to_string(),
+                input.driver_generation,
+            ],
+        )?;
+        if changed != 1 {
+            let resource = self.get_resource(resource_id)?;
+            let observed_revision: i64 = self.connection.query_row(
+                "SELECT observed_revision FROM resources WHERE id=?",
+                [resource_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if observed_revision == input.observed_revision as i64
+                && resource.status == input.status
+            {
+                return Ok(resource);
+            }
+            return Err(StoreError::Conflict(
+                "Reconciliation claim, Resource revision, or Driver generation is stale".into(),
+            ));
+        }
+        self.get_resource(resource_id)
     }
 
     pub fn driver_for_manifest(&self, manifest_id: Uuid) -> Result<Driver, StoreError> {
@@ -350,7 +411,88 @@ impl Store {
         Ok(Some(self.get_run(parse_uuid(&run_id, 0)?)?))
     }
 
+    pub fn claim_driver_work(
+        &mut self,
+        driver_id: Uuid,
+        generation: u64,
+    ) -> Result<Option<DriverWork>, StoreError> {
+        if let Some(resource) = self.claim_reconciliation(driver_id, generation)? {
+            return Ok(Some(DriverWork::Reconcile {
+                revision: resource.revision,
+                resource,
+            }));
+        }
+        let Some(run) = self.claim_run(driver_id, generation)? else {
+            return Ok(None);
+        };
+        let resource = self.get_resource(run.resource_id)?;
+        Ok(Some(DriverWork::Run {
+            run: Box::new(run),
+            resource,
+        }))
+    }
+
+    fn claim_reconciliation(
+        &mut self,
+        driver_id: Uuid,
+        generation: u64,
+    ) -> Result<Option<Resource>, StoreError> {
+        let tx = self.connection.transaction()?;
+        let manifest_id: Option<String> = tx
+            .query_row(
+                "SELECT manifest_id FROM drivers WHERE id=? AND generation=? AND state='ready'",
+                params![driver_id.to_string(), generation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(manifest_id) = manifest_id else {
+            return Err(StoreError::Conflict("Driver is stale or not ready".into()));
+        };
+        let resource: Option<(String, u64)> = tx
+            .query_row(
+                 "SELECT id,revision FROM resources
+                 WHERE manifest_id=? AND observed_revision < revision
+                 AND (claimed_revision IS NULL OR claimed_revision != revision OR claim_driver_generation != ?)
+                 ORDER BY created_at,id LIMIT 1",
+                params![manifest_id, generation],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((resource_id, revision)) = resource else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE resources SET claimed_revision=?,claim_driver_generation=? WHERE id=?",
+            params![revision, generation, resource_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(self.get_resource(parse_uuid(&resource_id, 0)?)?))
+    }
+
     pub fn finish_run(&mut self, run_id: Uuid, input: FinishRun) -> Result<Run, StoreError> {
+        let existing = self.get_run(run_id)?;
+        if existing.status != RunStatus::Running {
+            let same_result = existing.driver_generation == Some(input.driver_generation)
+                && match &input.result {
+                    RunResult::Succeeded { output } => {
+                        existing.status == RunStatus::Succeeded
+                            && existing.output.as_ref() == Some(output)
+                            && existing.error.is_none()
+                    }
+                    RunResult::Failed { error } => {
+                        existing.status == RunStatus::Failed
+                            && existing.error.as_ref() == Some(error)
+                            && existing.output.is_none()
+                    }
+                };
+            if same_result {
+                return Ok(existing);
+            }
+            return Err(StoreError::Conflict(
+                "Run already has a different result".into(),
+            ));
+        }
         let tx = self.connection.transaction()?;
         let now = Utc::now();
         let (status, output, error, event_kind, event_data) = match input.result {
@@ -421,6 +563,7 @@ fn append_event(
 
 const DRIVER_SELECT_BY_ID: &str = "SELECT id,manifest_id,name,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at FROM drivers WHERE id=?";
 const DRIVER_SELECT_BY_MANIFEST: &str = "SELECT id,manifest_id,name,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at FROM drivers WHERE manifest_id=?";
+const RESOURCE_SELECT_BY_ID: &str = "SELECT id,manifest_id,name,spec_json,status_json,revision,created_at,updated_at FROM resources WHERE id=?";
 const RUN_SELECT_BY_ID: &str = "SELECT id,request_id,resource_id,driver_id,driver_generation,action,input_json,status,output_json,error,created_at,started_at,finished_at FROM runs WHERE id=?";
 const RUN_SELECT_BY_REQUEST: &str = "SELECT id,request_id,resource_id,driver_id,driver_generation,action,input_json,status,output_json,error,created_at,started_at,finished_at FROM runs WHERE request_id=?";
 
@@ -668,10 +811,27 @@ mod tests {
             error,
             StoreError::MigrationRequired {
                 current: 0,
-                latest: 1
+                latest: 2
             }
         ));
-        assert_eq!(migrate(&path).unwrap(), 1);
+        assert_eq!(migrate(&path).unwrap(), 2);
+        Store::open(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_upgrades_a_version_one_database() {
+        let path = std::env::temp_dir().join(format!("kas-store-v1-{}.db", Uuid::new_v4()));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0001_initial.sql"))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 1_u32)
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(migrate(&path).unwrap(), 2);
         Store::open(&path).unwrap();
         std::fs::remove_file(path).unwrap();
     }
@@ -699,6 +859,74 @@ mod tests {
                 .unwrap();
             assert_eq!(run.driver_id, driver.id);
         }
+    }
+
+    #[test]
+    fn driver_claim_is_scoped_and_generation_fenced() {
+        let mut store = Store::memory().unwrap();
+        let first_manifest = store.create_manifest(manifest()).unwrap();
+        let mut second_declaration = manifest();
+        second_declaration.name = "other".into();
+        let second_manifest = store.create_manifest(second_declaration).unwrap();
+        let first_resource = store
+            .create_resource(CreateResource {
+                manifest_id: first_manifest.id,
+                name: "first".into(),
+                spec: json!({}),
+            })
+            .unwrap();
+        store
+            .create_resource(CreateResource {
+                manifest_id: second_manifest.id,
+                name: "second".into(),
+                spec: json!({}),
+            })
+            .unwrap();
+        let driver = store.driver_for_manifest(first_manifest.id).unwrap();
+        let starting = store.start_driver(driver.id).unwrap();
+        let ready = store
+            .mark_driver_ready(
+                driver.id,
+                DriverReady {
+                    generation: starting.generation,
+                    process_id: 123,
+                    metadata: json!({}),
+                },
+            )
+            .unwrap();
+
+        let work = store
+            .claim_driver_work(driver.id, ready.generation)
+            .unwrap()
+            .unwrap();
+        let claimed_resource = match work {
+            DriverWork::Reconcile {
+                resource,
+                revision: 0,
+            } => resource,
+            other => panic!("unexpected work: {other:?}"),
+        };
+        assert_eq!(claimed_resource.id, first_resource.id);
+        let status = UpdateResourceStatus {
+            driver_id: driver.id,
+            driver_generation: ready.generation,
+            observed_revision: claimed_resource.revision,
+            status: json!({ "ready": true }),
+        };
+        let first_update = store
+            .update_resource_status(claimed_resource.id, status.clone())
+            .unwrap();
+        let repeated_update = store
+            .update_resource_status(claimed_resource.id, status)
+            .unwrap();
+        assert_eq!(first_update, repeated_update);
+        assert!(store
+            .claim_driver_work(driver.id, ready.generation)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .claim_driver_work(driver.id, ready.generation + 1)
+            .is_err());
     }
 
     #[test]
@@ -795,21 +1023,15 @@ mod tests {
             store.get_run(running.id).unwrap().status,
             RunStatus::Running
         );
-        assert_eq!(
-            store
-                .finish_run(
-                    running.id,
-                    FinishRun {
-                        driver_generation: ready.generation,
-                        result: RunResult::Succeeded {
-                            output: json!({"ok":true}),
-                        },
-                    },
-                )
-                .unwrap()
-                .status,
-            RunStatus::Succeeded
-        );
+        let result = FinishRun {
+            driver_generation: ready.generation,
+            result: RunResult::Succeeded {
+                output: json!({"ok":true}),
+            },
+        };
+        let completed = store.finish_run(running.id, result.clone()).unwrap();
+        assert_eq!(completed.status, RunStatus::Succeeded);
+        assert_eq!(store.finish_run(running.id, result).unwrap(), completed);
     }
 
     #[test]

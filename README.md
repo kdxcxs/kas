@@ -81,9 +81,10 @@ Stopped → Starting → Ready → Stopping → Stopped
 ```text
 crates/kas-core    核心数据结构
 crates/kas-store   SQLite 持久化
-crates/kas-driver  Driver 通用接口
+crates/kas-driver  Driver 通用接口与持续运行的 Runtime
 apps/kas-migrate   独立数据库 Migration
 apps/kas-api       最小控制面 API
+apps/kas-test-driver 可执行的端到端测试 Driver
 ```
 
 启动顺序：
@@ -94,3 +95,36 @@ cargo run -p kas-api
 ```
 
 `kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
+
+## 测试
+
+运行全部测试：
+
+```bash
+cargo test --workspace
+```
+
+端到端测试会创建临时数据库并启动真实 HTTP 服务，然后使用 `kas-test-driver` 完成以下流程：
+
+```text
+创建 Manifest 和 Resource
+  → 启动 singleton Driver
+  → 创建 Run
+  → Driver ready 并领取 Run
+  → Driver reconcile Resource 并上报 status
+  → Driver 读取 Resource 并执行 echo Action
+  → Driver 上报结果后继续运行
+  → 创建并完成第二条 Run
+  → 通过 API 查询并验证最终状态
+```
+
+`kas-test-driver` 也可以单独运行。控制面将 Driver 切换到 `starting` 后，把对应信息传给进程：
+
+```bash
+KAS_API=http://127.0.0.1:3000 \
+KAS_DRIVER_ID=<driver-id> \
+KAS_DRIVER_GENERATION=<generation> \
+cargo run -p kas-test-driver
+```
+
+入口只需要构造具体 Driver 并调用 `DriverRuntime::run()`。Runtime 会持续执行 reconciliation、领取 Run 和上报结果，不会在完成一条 Run 后退出。

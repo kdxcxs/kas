@@ -13,3 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+kas-driver.workspace = true
+kas-test-driver = { path = "../kas-test-driver" }
+reqwest.workspace = true
+tempfile = "3.27.0"
