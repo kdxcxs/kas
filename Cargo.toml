@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "apps/kas-api",
+    "apps/kas-migrate",
+    "crates/kas-core",
+    "crates/kas-driver",
+    "crates/kas-store",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+kas-core = { path = "crates/kas-core" }
+kas-driver = { path = "crates/kas-driver" }
+kas-store = { path = "crates/kas-store" }
+jsonschema = { version = "0.48.5", default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+uuid = { version = "1", features = ["v4", "serde"] }

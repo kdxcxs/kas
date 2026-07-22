@@ -61,3 +61,36 @@ Resource
 ```
 
 这些概念只构成通用底层。具体业务对象和业务流程后续再定义。
+
+## MVP 约束
+
+- 每个 Manifest 在创建时同时创建一个稳定的 singleton Driver。
+- 同一 Manifest 的所有 Resource 共享这个 Driver 进程。
+- Driver 重启不会创建新的逻辑 Driver，但会递增 `generation`。
+- Run 记录执行它的 Driver 和 generation，旧进程不能完成新一代 Run。
+
+Driver 生命周期：
+
+```text
+Stopped → Starting → Ready → Stopping → Stopped
+                    └──────→ Failed → Starting
+```
+
+## Monorepo
+
+```text
+crates/kas-core    核心数据结构
+crates/kas-store   SQLite 持久化
+crates/kas-driver  Driver 通用接口
+apps/kas-migrate   独立数据库 Migration
+apps/kas-api       最小控制面 API
+```
+
+启动顺序：
+
+```bash
+cargo run -p kas-migrate
+cargo run -p kas-api
+```
+
+`kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
