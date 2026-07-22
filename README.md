@@ -1,0 +1,63 @@
+# 基础概念
+
+KAS 先只保留几个最基础的概念：
+
+## Resource
+
+系统里可以被描述、保存和引用的对象。
+
+例如一台机器、一个 Agent、一段对话或一个文件，后续都可以是不同类型的 Resource。
+
+## Manifest
+
+一类 Resource 的声明，用来说明这类 Resource 有哪些数据、可以执行哪些 Action，以及由哪个 Driver 负责。
+
+## Action
+
+可以对 Resource 发起的一次操作。
+
+Action 只描述“要做什么”，实际执行由 Driver 负责。
+
+## Driver
+
+负责管理某类 Resource，并执行它的 Action。
+
+Driver 是系统与真实运行环境之间的适配层。
+
+## Run
+
+一次 Action 的实际执行记录。
+
+它保存输入、执行状态、结果和错误，便于查询一次操作最终发生了什么。
+
+## Event
+
+Run 执行过程中产生的事实记录。
+
+例如开始执行、产生中间结果、完成或失败。
+
+## Link
+
+两个对象之间的有方向关系。
+
+例如：
+
+- Resource `contains` Resource
+- Resource `uses` Resource
+- Run `produces` Resource
+- Resource `derived_from` Resource
+
+## 基本关系
+
+```text
+Manifest
+  ├─ 定义 Action
+  └─ 由 Driver 管理
+
+Resource
+  └─ 发起 Action → Run
+                    ├─ 产生 Event
+                    └─ 通过 Link 关联输入、输出和其他对象
+```
+
+这些概念只构成通用底层。具体业务对象和业务流程后续再定义。
