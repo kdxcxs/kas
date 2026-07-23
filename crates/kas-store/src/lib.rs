@@ -3,17 +3,22 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use kas_auth::{
     AuthContext, CreateRole, CreateRoleBinding, CreateServiceAccount, CreateUser, IssuedCredential,
-    Role, RoleBinding, Rule, ServiceAccount, Subject, SubjectKind, User, SYSTEM_ADMIN_ROLE,
+    Role, RoleBinding, Rule, ServiceAccount, Subject, SubjectKind, User,
 };
 use kas_core::{
-    Action, CreateLink, CreateManifest, CreateResource, CreateRun, DeliveryStatus, Driver,
-    DriverDelivery, DriverReady, DriverState, DriverWork, Event, EventFilter, EventType, FinishRun,
-    Link, LinkFilter, Manifest, Mutation, ObjectKind, ObjectRef, Resource, Run, RunResult,
-    RunStatus, UpdateResource, UpdateResourceStatus,
+    Action, Cardinality, CreateLink, CreateManifest, CreateResource, CreateRun, DeliveryStatus,
+    Driver, DriverDefinition, DriverDelivery, DriverDesiredState, DriverReady, DriverRuntime,
+    DriverState, DriverWork, Event, EventFilter, EventType, FinishRun, KindSelector, Link,
+    LinkDirection, LinkFilter, Manifest, ManifestDefinition, ManifestRbac, Mutation, ObjectKind,
+    ObjectRef, ObjectSelector, PlannedLink, RbacRuleDefinition, RbacSubjectDefinition,
+    RbacSubjectKind, Relation, RelationRole, Resource, RestartPolicy, RoleBindingDefinition,
+    RoleDefinition, Run, RunResult, RunStatus, ServiceAccountDefinition, SystemRole,
+    UpdateResource, UpdateResourceStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -35,7 +40,7 @@ pub enum StoreError {
     UnsupportedSchema { current: u32, latest: u32 },
 }
 
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -47,7 +52,14 @@ const MIGRATIONS: &[(u32, &str)] = &[
     ),
     (5, include_str!("../migrations/0005_paths.sql")),
     (6, include_str!("../migrations/0006_link_endpoint_rbac.sql")),
+    (
+        7,
+        include_str!("../migrations/0007_manifest_packages_and_relations.sql"),
+    ),
 ];
+
+const CORE_BUILTIN: &str = include_str!("../../../builtins/core/manifest.json");
+const AUTH_BUILTIN: &str = include_str!("../../../builtins/auth/manifest.json");
 
 pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
     let mut connection = Connection::open(path)?;
@@ -59,12 +71,22 @@ pub struct Store {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverLaunchConfig {
+    pub package_digest: String,
+    pub entrypoint: String,
+    pub args: Vec<String>,
+    pub restart: RestartPolicy,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let connection = Connection::open(path)?;
         configure(&connection)?;
         require_current_schema(&connection)?;
-        Ok(Self { connection })
+        let mut store = Self { connection };
+        store.ensure_builtins()?;
+        Ok(store)
     }
 
     pub fn memory() -> Result<Self, StoreError> {
@@ -72,20 +94,40 @@ impl Store {
         configure(&connection)?;
         let mut store = Self { connection };
         migrate_connection(&mut store.connection)?;
+        store.ensure_builtins()?;
         Ok(store)
     }
 
-    pub fn create_manifest(&mut self, input: CreateManifest) -> Result<Manifest, StoreError> {
+    fn ensure_builtins(&mut self) -> Result<(), StoreError> {
+        for raw in [CORE_BUILTIN, AUTH_BUILTIN] {
+            let hex = Sha256::digest(raw.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let digest = format!("sha256:{hex}");
+            let definition: ManifestDefinition = serde_json::from_str(raw)?;
+            let manifest = definition.resolve(digest).map_err(|error| {
+                StoreError::Invalid(format!("invalid built-in Manifest: {error}"))
+            })?;
+            self.install_manifest(manifest, raw.len() as u64)?;
+        }
+        Ok(())
+    }
+
+    pub fn install_manifest(
+        &mut self,
+        input: CreateManifest,
+        package_size: u64,
+    ) -> Result<Manifest, StoreError> {
         validate_name("Manifest name", &input.name)?;
         validate_permission_segment("Manifest name", &input.name)?;
-        if let Some(driver) = &input.driver {
-            validate_name("Driver name", driver)?;
-        } else if !input.actions.is_empty() {
+        if input.driver.is_none() && !input.actions.is_empty() {
             return Err(StoreError::Invalid(
                 "A Manifest that declares Actions must also declare a Driver".into(),
             ));
         }
         validate_manifest_contract(&input.resource_schema)?;
+        validate_package_digest(&input.package_digest)?;
         if input.version == 0 {
             return Err(StoreError::Invalid(
                 "Manifest version must start at 1".into(),
@@ -94,100 +136,569 @@ impl Store {
         let now = Utc::now();
         validate_object_path("Manifest path", &input.path)?;
         let manifest_path = input.path.clone();
-        let actions_json = serde_json::to_string(&input.actions)?;
+        let managed_by = format!("package:{manifest_path}");
+        let existing: Option<(String, u64)> = self
+            .connection
+            .query_row(
+                "SELECT m.package_digest,p.size_bytes FROM manifests m
+                 JOIN packages p ON p.digest=m.package_digest WHERE m.id=?",
+                [&manifest_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((digest, size)) = existing {
+            if digest == input.package_digest && size == package_size {
+                return self.get_manifest(&manifest_path);
+            }
+            return Err(StoreError::Conflict(format!(
+                "Manifest {manifest_path} is already installed from package {digest}"
+            )));
+        }
         let schema_json = serde_json::to_string(&input.resource_schema)?;
         let tx = self.connection.transaction()?;
         tx.execute(
-            "INSERT INTO manifests(id,name,version,description,resource_schema_json,actions_json,driver_name,created_at)
-             VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO packages(digest,size_bytes,installed_at) VALUES (?,?,?)
+             ON CONFLICT(digest) DO NOTHING",
+            params![input.package_digest, package_size, stamp(now)],
+        )?;
+        let stored_size: u64 = tx.query_row(
+            "SELECT size_bytes FROM packages WHERE digest=?",
+            [&input.package_digest],
+            |row| row.get(0),
+        )?;
+        if stored_size != package_size {
+            return Err(StoreError::Conflict(format!(
+                "Package {} was already registered with a different size",
+                input.package_digest
+            )));
+        }
+        tx.execute(
+            "INSERT INTO manifests(id,name,version,description,resource_schema_json,package_digest,created_at)
+             VALUES (?,?,?,?,?,?,?)",
             params![
                 manifest_path.to_string(), input.name, input.version, input.description,
-                schema_json, actions_json, input.driver.as_deref(), stamp(now)
+                schema_json, input.package_digest, stamp(now)
             ],
         )
         .map_err(|error| constraint(error, "Manifest name and version already exist"))?;
-        if let Some(driver_name) = &input.driver {
-            let driver_path = format!("/drivers/{}", input.name);
+
+        let mut members = Vec::new();
+        for action in &input.actions {
+            validate_manifest_member_path(&manifest_path, "actions", &action.path)?;
+            validate_name("Action name", &action.name)?;
+            validate_json_schema_contract("Action input schema", &action.input_schema)?;
+            validate_json_schema_contract("Action output schema", &action.output_schema)?;
             tx.execute(
-            "INSERT INTO drivers(id,manifest_path,name,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at)
-             VALUES (?,?,?,'stopped',0,NULL,'{}',NULL,NULL,?,NULL,?,?)",
-            params![driver_path.to_string(), manifest_path.to_string(), driver_name, stamp(now), stamp(now), stamp(now)],
-            )?;
-            let service_account_path = format!("{driver_path}/service-account");
-            let role_path = format!("/roles/system/drivers/{}", input.name);
-            let role_binding_path = format!("/role-bindings/system/drivers/{}", input.name);
-            let identity_name = format!("system:driver:{driver_path}");
-            tx.execute(
-            "INSERT INTO service_accounts(id,name,driver_path,managed_by,created_at) VALUES (?,?,?,'system',?)",
-            params![service_account_path.to_string(), identity_name, driver_path.to_string(), stamp(now)],
-            )?;
-            tx.execute(
-                "INSERT INTO roles(id,name,description,rules_json,managed_by,created_at,updated_at)
-             VALUES (?,?,?,?,'system',?,?)",
+                "INSERT INTO actions(id,manifest_path,name,description,input_schema_json,output_schema_json,created_at)
+                 VALUES (?,?,?,?,?,?,?)",
                 params![
-                    role_path.to_string(),
-                    format!("system:driver-role:{driver_path}"),
-                    "Driver runtime access",
-                    serde_json::to_string(&driver_rules())?,
+                    action.path,
+                    manifest_path,
+                    action.name,
+                    action.description,
+                    serde_json::to_string(&action.input_schema)?,
+                    serde_json::to_string(&action.output_schema)?,
+                    stamp(now)
+                ],
+            )?;
+            members.push(ObjectRef {
+                kind: ObjectKind::Action,
+                path: action.path.clone(),
+            });
+        }
+        for relation in &input.relations {
+            validate_manifest_member_path(&manifest_path, "relations", &relation.path)?;
+            validate_relation_definition(relation)?;
+            let metadata_schema = if relation.metadata_schema.is_null() {
+                serde_json::json!({})
+            } else {
+                relation.metadata_schema.clone()
+            };
+            tx.execute(
+                "INSERT INTO relations(id,manifest_path,name,role,inverse_name,sources_json,targets_json,
+                 cardinality_json,metadata_schema_json,protected,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    relation.path,
+                    manifest_path,
+                    relation.name,
+                    relation.role.map(relation_role),
+                    relation.inverse_name,
+                    serde_json::to_string(&relation.sources)?,
+                    serde_json::to_string(&relation.targets)?,
+                    serde_json::to_string(&relation.cardinality)?,
+                    serde_json::to_string(&metadata_schema)?,
+                    relation.role.is_some(),
+                    stamp(now)
+                ],
+            )?;
+            members.push(ObjectRef {
+                kind: ObjectKind::Relation,
+                path: relation.path.clone(),
+            });
+        }
+
+        for account in &input.rbac.service_accounts {
+            validate_manifest_member_path(&manifest_path, "service-accounts", &account.path)?;
+            validate_name("ServiceAccount name", &account.name)?;
+            tx.execute(
+                "INSERT INTO service_accounts(id,name,managed_by,created_at) VALUES (?,?,?,?)",
+                params![account.path, account.name, managed_by, stamp(now)],
+            )?;
+            members.push(ObjectRef {
+                kind: ObjectKind::ServiceAccount,
+                path: account.path.clone(),
+            });
+        }
+        for role in &input.rbac.roles {
+            validate_manifest_member_path(&manifest_path, "roles", &role.path)?;
+            validate_name("Role name", &role.name)?;
+            let rules = role
+                .rules
+                .iter()
+                .map(|rule| Rule {
+                    resources: rule.resources.clone(),
+                    verbs: rule.verbs.clone(),
+                    paths: rule.paths.clone(),
+                })
+                .collect::<Vec<_>>();
+            validate_rules(&rules)?;
+            tx.execute(
+                "INSERT INTO roles(id,name,description,rules_json,system_role,managed_by,created_at,updated_at)
+                 VALUES (?,?,?,?,?,?,?,?)",
+                params![
+                    role.path,
+                    role.name,
+                    role.description,
+                    serde_json::to_string(&rules)?,
+                    role.system_role.map(system_role),
+                    managed_by,
+                    stamp(now),
+                    stamp(now)
+                ],
+            )?;
+            members.push(ObjectRef {
+                kind: ObjectKind::Role,
+                path: role.path.clone(),
+            });
+        }
+        for binding in &input.rbac.role_bindings {
+            validate_manifest_member_path(&manifest_path, "role-bindings", &binding.path)?;
+            validate_name("RoleBinding name", &binding.name)?;
+            tx.execute(
+                "INSERT INTO role_bindings(id,name,managed_by,created_at) VALUES (?,?,?,?)",
+                params![binding.path, binding.name, managed_by, stamp(now)],
+            )?;
+            members.push(ObjectRef {
+                kind: ObjectKind::RoleBinding,
+                path: binding.path.clone(),
+            });
+        }
+
+        if let Some(driver) = &input.driver {
+            let expected_driver_path = format!("{manifest_path}/driver");
+            if driver.path != expected_driver_path {
+                return Err(StoreError::Invalid(format!(
+                    "Driver path must be {expected_driver_path}"
+                )));
+            }
+            validate_package_entrypoint(&driver.entrypoint)?;
+            tx.execute(
+                "INSERT INTO drivers(id,package_digest,runtime,entrypoint,args_json,restart_policy,
+                 desired_state,state,generation,process_id,metadata_json,started_at,heartbeat_at,
+                 stopped_at,error,created_at,updated_at)
+                 VALUES (?,?,'process',?,?,?,'running','stopped',0,NULL,'{}',NULL,NULL,NULL,NULL,?,?)",
+                params![
+                    driver.path,
+                    input.package_digest,
+                    driver.entrypoint,
+                    serde_json::to_string(&driver.args)?,
+                    restart_policy(driver.restart),
                     stamp(now),
                     stamp(now)
                 ],
             )?;
             tx.execute(
-            "INSERT INTO role_bindings(id,name,role_path,managed_by,created_at) VALUES (?,?,?,'system',?)",
-            params![role_binding_path.to_string(), format!("system:driver:{driver_path}"), role_path.to_string(), stamp(now)],
+                "INSERT INTO driver_manifest_index(driver_path,manifest_path) VALUES (?,?)",
+                params![driver.path, manifest_path],
             )?;
-            tx.execute(
-            "INSERT INTO role_binding_subjects(role_binding_path,subject_kind,subject_path) VALUES (?,'service_account',?)",
-            params![role_binding_path.to_string(), service_account_path.to_string()],
+            members.push(ObjectRef {
+                kind: ObjectKind::Driver,
+                path: driver.path.clone(),
+            });
+        }
+
+        let manifest_ref = ObjectRef {
+            kind: ObjectKind::Manifest,
+            path: manifest_path.clone(),
+        };
+        for member in members {
+            let link_path = format!("{}/links/manifest", member.path);
+            insert_protected_link_for_role(
+                &tx,
+                RelationRole::ManifestMember,
+                &link_path,
+                manifest_ref.clone(),
+                member,
+                now,
             )?;
         }
+        if let Some(driver) = &input.driver {
+            let link_path = format!("{}/links/service-account", driver.path);
+            insert_protected_link_for_role(
+                &tx,
+                RelationRole::DriverServiceAccount,
+                &link_path,
+                ObjectRef {
+                    kind: ObjectKind::Driver,
+                    path: driver.path.clone(),
+                },
+                ObjectRef {
+                    kind: ObjectKind::ServiceAccount,
+                    path: driver.service_account.clone(),
+                },
+                now,
+            )?;
+            tx.execute(
+                "INSERT INTO driver_service_account_index(driver_path,service_account_path,link_path)
+                 VALUES (?,?,?)",
+                params![driver.path, driver.service_account, link_path],
+            )?;
+        }
+        for binding in &input.rbac.role_bindings {
+            let role_link_path = format!("{}/links/role", binding.path);
+            insert_protected_link_for_role(
+                &tx,
+                RelationRole::RoleBindingRole,
+                &role_link_path,
+                ObjectRef {
+                    kind: ObjectKind::RoleBinding,
+                    path: binding.path.clone(),
+                },
+                ObjectRef {
+                    kind: ObjectKind::Role,
+                    path: binding.role_path.clone(),
+                },
+                now,
+            )?;
+            tx.execute(
+                "INSERT INTO role_binding_role_index(role_binding_path,role_path,link_path)
+                 VALUES (?,?,?)",
+                params![binding.path, binding.role_path, role_link_path],
+            )?;
+            for (index, subject) in binding.subjects.iter().enumerate() {
+                let subject_link_path = format!("{}/links/subjects/{index}", binding.path);
+                let subject_kind = match subject.kind {
+                    RbacSubjectKind::User => ObjectKind::User,
+                    RbacSubjectKind::ServiceAccount => ObjectKind::ServiceAccount,
+                };
+                insert_protected_link_for_role(
+                    &tx,
+                    RelationRole::RoleBindingSubject,
+                    &subject_link_path,
+                    ObjectRef {
+                        kind: ObjectKind::RoleBinding,
+                        path: binding.path.clone(),
+                    },
+                    ObjectRef {
+                        kind: subject_kind,
+                        path: subject.path.clone(),
+                    },
+                    now,
+                )?;
+                tx.execute(
+                    "INSERT INTO role_binding_subjects(
+                        role_binding_path,subject_kind,subject_path,link_path
+                     ) VALUES (?,?,?,?)",
+                    params![
+                        binding.path,
+                        rbac_subject_kind(subject.kind),
+                        subject.path,
+                        subject_link_path
+                    ],
+                )?;
+            }
+        }
         tx.commit()?;
-        Ok(Manifest {
-            path: manifest_path,
-            name: input.name,
-            version: input.version,
-            description: input.description,
-            resource_schema: input.resource_schema,
-            actions: input.actions,
-            driver: input.driver,
-            created_at: now,
-        })
+        self.get_manifest(&manifest_path)
     }
 
     pub fn list_manifests(&self) -> Result<Vec<Manifest>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id,name,version,description,resource_schema_json,actions_json,driver_name,created_at
+            "SELECT id,name,version,description,resource_schema_json,package_digest,created_at
              FROM manifests ORDER BY name,version",
         )?;
-        let rows = statement.query_map([], manifest_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        paths
+            .iter()
+            .map(|path| self.get_manifest(path))
+            .collect::<Result<Vec<_>, _>>()
     }
 
     pub fn get_manifest(&self, path: &str) -> Result<Manifest, StoreError> {
-        self.connection
+        let (path, name, version, description, schema, package_digest, created_at): (
+            String,
+            String,
+            u32,
+            String,
+            String,
+            String,
+            String,
+        ) = self
+            .connection
             .query_row(
-                "SELECT id,name,version,description,resource_schema_json,actions_json,driver_name,created_at FROM manifests WHERE id=?",
+                "SELECT id,name,version,description,resource_schema_json,package_digest,created_at
+                 FROM manifests WHERE id=?",
                 [path],
-                manifest_from_row,
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .optional()?
-            .ok_or_else(|| StoreError::NotFound(format!("Manifest {path}")))
+            .ok_or_else(|| StoreError::NotFound(format!("Manifest {path}")))?;
+        let actions = self.list_actions_for_manifest(&path)?;
+        let relations = self.list_relations_for_manifest(&path)?;
+        let driver = self.driver_definition_for_manifest(&path)?;
+        let rbac = self.manifest_rbac(&path)?;
+        Ok(Manifest {
+            path,
+            name,
+            version,
+            description,
+            resource_schema: serde_json::from_str(&schema)?,
+            actions,
+            relations,
+            driver,
+            rbac,
+            package_digest,
+            created_at: parse_stamp(&created_at)?,
+        })
+    }
+
+    pub fn get_action(&self, path: &str) -> Result<Action, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id,name,description,input_schema_json,output_schema_json
+                 FROM actions WHERE id=?",
+                [path],
+                action_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("Action {path}")))
+    }
+
+    pub fn get_relation(&self, path: &str) -> Result<Relation, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id,name,role,inverse_name,sources_json,targets_json,
+                 cardinality_json,metadata_schema_json FROM relations WHERE id=?",
+                [path],
+                relation_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("Relation {path}")))
+    }
+
+    pub fn driver_launch_config(
+        &self,
+        driver_path: &str,
+    ) -> Result<DriverLaunchConfig, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT package_digest,entrypoint,args_json,restart_policy FROM drivers WHERE id=?",
+                [driver_path],
+                |row| {
+                    let restart: String = row.get(3)?;
+                    Ok(DriverLaunchConfig {
+                        package_digest: row.get(0)?,
+                        entrypoint: row.get(1)?,
+                        args: json_from_row(row, 2)?,
+                        restart: restart_policy_from_str(&restart, 3)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("Driver {driver_path}")))
+    }
+
+    fn list_actions_for_manifest(&self, manifest_path: &str) -> Result<Vec<Action>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,name,description,input_schema_json,output_schema_json
+             FROM actions WHERE manifest_path=? ORDER BY id",
+        )?;
+        let actions = statement
+            .query_map([manifest_path], action_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        Ok(actions)
+    }
+
+    fn list_relations_for_manifest(
+        &self,
+        manifest_path: &str,
+    ) -> Result<Vec<Relation>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,name,role,inverse_name,sources_json,targets_json,
+             cardinality_json,metadata_schema_json
+             FROM relations WHERE manifest_path=? ORDER BY id",
+        )?;
+        let relations = statement
+            .query_map([manifest_path], relation_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        Ok(relations)
+    }
+
+    fn driver_definition_for_manifest(
+        &self,
+        manifest_path: &str,
+    ) -> Result<Option<DriverDefinition>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT d.id,d.runtime,d.entrypoint,d.args_json,d.restart_policy,
+                 s.service_account_path
+                 FROM drivers d JOIN driver_manifest_index i ON i.driver_path=d.id
+                 JOIN driver_service_account_index s ON s.driver_path=d.id
+                 WHERE i.manifest_path=?",
+                [manifest_path],
+                |row| {
+                    let runtime: String = row.get(1)?;
+                    let restart: String = row.get(4)?;
+                    Ok(DriverDefinition {
+                        path: row.get(0)?,
+                        runtime: driver_runtime_from_str(&runtime, 1)?,
+                        entrypoint: row.get(2)?,
+                        service_account: row.get(5)?,
+                        args: json_from_row(row, 3)?,
+                        restart: restart_policy_from_str(&restart, 4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    fn manifest_rbac(&self, manifest_path: &str) -> Result<ManifestRbac, StoreError> {
+        let managed_by = format!("package:{manifest_path}");
+        let service_accounts = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id,name FROM service_accounts WHERE managed_by=? ORDER BY id")?;
+            let values = statement
+                .query_map([&managed_by], |row| {
+                    Ok(ServiceAccountDefinition {
+                        path: row.get(0)?,
+                        name: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            values
+        };
+        let roles = {
+            let mut statement = self.connection.prepare(
+                "SELECT id,name,description,rules_json,system_role
+                 FROM roles WHERE managed_by=? ORDER BY id",
+            )?;
+            let values = statement
+                .query_map([&managed_by], |row| {
+                    let rules: Vec<Rule> = json_from_row(row, 3)?;
+                    let system_role: Option<String> = row.get(4)?;
+                    Ok(RoleDefinition {
+                        path: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        rules: rules
+                            .into_iter()
+                            .map(|rule| RbacRuleDefinition {
+                                resources: rule.resources,
+                                verbs: rule.verbs,
+                                paths: rule.paths,
+                            })
+                            .collect(),
+                        system_role: system_role
+                            .as_deref()
+                            .map(|value| system_role_from_str(value, 4))
+                            .transpose()?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            values
+        };
+        let binding_paths = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id,name FROM role_bindings WHERE managed_by=? ORDER BY id")?;
+            let values = statement
+                .query_map([&managed_by], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            values
+        };
+        let mut role_bindings = Vec::new();
+        for (path, name) in binding_paths {
+            let role_path = self.connection.query_row(
+                "SELECT role_path FROM role_binding_role_index WHERE role_binding_path=?",
+                [&path],
+                |row| row.get(0),
+            )?;
+            let mut statement = self.connection.prepare(
+                "SELECT subject_kind,subject_path FROM role_binding_subjects
+                 WHERE role_binding_path=? ORDER BY subject_kind,subject_path",
+            )?;
+            let subjects = statement
+                .query_map([&path], |row| {
+                    let kind: String = row.get(0)?;
+                    Ok(RbacSubjectDefinition {
+                        kind: match kind.as_str() {
+                            "user" => RbacSubjectKind::User,
+                            "service_account" => RbacSubjectKind::ServiceAccount,
+                            other => {
+                                return Err(from_sql(0, format!("invalid subject kind {other}")));
+                            }
+                        },
+                        path: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            role_bindings.push(RoleBindingDefinition {
+                path,
+                name,
+                role_path,
+                subjects,
+            });
+        }
+        Ok(ManifestRbac {
+            service_accounts,
+            roles,
+            role_bindings,
+        })
     }
 
     pub fn create_resource(&mut self, input: CreateResource) -> Result<Resource, StoreError> {
         validate_object_path("Resource path", &input.path)?;
         validate_name("Resource name", &input.name)?;
+        validate_object_path("Manifest path", &input.manifest)?;
+        let manifest_path = input.manifest.clone();
         let schema: String = self
             .connection
             .query_row(
                 "SELECT resource_schema_json FROM manifests WHERE id=?",
-                [input.manifest_path.to_string()],
+                [&manifest_path],
                 |row| row.get(0),
             )
             .optional()?
-            .ok_or_else(|| StoreError::NotFound(format!("Manifest {}", input.manifest_path)))?;
+            .ok_or_else(|| StoreError::NotFound(format!("Manifest {manifest_path}")))?;
         validate_json_schema(
             "Resource spec",
             &serde_json::from_str(&schema)?,
@@ -198,14 +709,36 @@ impl Store {
         let spec = serde_json::to_string(&input.spec)?;
         let tx = self.connection.transaction()?;
         tx.execute(
-                "INSERT INTO resources(id,manifest_path,name,spec_json,status_json,revision,created_at,updated_at)
-                 VALUES (?,?,?,?,'{}',0,?,?)",
-                params![path, input.manifest_path, input.name, spec, stamp(now), stamp(now)],
-            )
-            .map_err(|error| constraint(error, "Manifest does not exist"))?;
+            "INSERT INTO resources(id,name,spec_json,status_json,revision,created_at,updated_at)
+                 VALUES (?,?,?,'{}',0,?,?)",
+            params![path, input.name, spec, stamp(now), stamp(now)],
+        )
+        .map_err(|error| constraint(error, "Resource already exists"))?;
+        for link in &input.links {
+            insert_link(&tx, link, false, now)?;
+        }
+        let membership_path = format!("{path}/links/manifest");
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::ResourceManifest,
+            &membership_path,
+            ObjectRef {
+                kind: ObjectKind::Resource,
+                path: path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::Manifest,
+                path: manifest_path.clone(),
+            },
+            now,
+        )?;
+        tx.execute(
+            "INSERT INTO resource_manifest_index(resource_path,manifest_path,link_path)
+             VALUES (?,?,?)",
+            params![path, manifest_path, membership_path],
+        )?;
         let resource = Resource {
             path: path.clone(),
-            manifest_path: input.manifest_path,
             name: input.name,
             spec: input.spec,
             status: Value::Object(Default::default()),
@@ -218,7 +751,6 @@ impl Store {
             EventType::Created,
             ObjectKind::Resource,
             &path,
-            Some(resource.manifest_path.clone()),
             Some(resource.revision),
             &resource,
             now,
@@ -235,7 +767,8 @@ impl Store {
         let schema: String = self
             .connection
             .query_row(
-                "SELECT m.resource_schema_json FROM resources r JOIN manifests m ON m.id=r.manifest_path WHERE r.id=?",
+                "SELECT m.resource_schema_json FROM resource_manifest_index i
+                 JOIN manifests m ON m.id=i.manifest_path WHERE i.resource_path=?",
                 [resource_path.to_string()],
                 |row| row.get(0),
             )
@@ -272,7 +805,6 @@ impl Store {
             EventType::Updated,
             ObjectKind::Resource,
             resource_path,
-            Some(resource.manifest_path.clone()),
             Some(resource.revision),
             &resource,
             now,
@@ -283,7 +815,7 @@ impl Store {
 
     pub fn list_resources(&self) -> Result<Vec<Resource>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id,manifest_path,name,spec_json,status_json,revision,created_at,updated_at
+            "SELECT id,name,spec_json,status_json,revision,created_at,updated_at
              FROM resources ORDER BY created_at,id",
         )?;
         let rows = statement.query_map([], resource_from_row)?;
@@ -302,6 +834,97 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound(format!("Resource {resource_path}")))
     }
 
+    pub fn manifest_path_for_resource(&self, resource_path: &str) -> Result<String, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT manifest_path FROM resource_manifest_index WHERE resource_path=?",
+                [resource_path],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("Resource {resource_path}")))
+    }
+
+    pub fn object_matches_selector(
+        &self,
+        object: &ObjectRef,
+        selector: &ObjectSelector,
+    ) -> Result<bool, StoreError> {
+        selector_matches(&self.connection, selector, object, 0)
+    }
+
+    pub fn links_for_object(&self, object: &ObjectRef) -> Result<Vec<Link>, StoreError> {
+        ensure_object_exists(&self.connection, object)?;
+        let mut statement = self.connection.prepare(
+            "SELECT id,source_kind,source_path,relation_path,target_kind,target_path,
+             metadata_json,created_at FROM links
+             WHERE (source_kind=? AND source_path=?) OR (target_kind=? AND target_path=?)
+             ORDER BY created_at,id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                object_kind(&object.kind),
+                object.path,
+                object_kind(&object.kind),
+                object.path
+            ],
+            link_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn object_value(&self, object: &ObjectRef) -> Result<Value, StoreError> {
+        ensure_object_exists(&self.connection, object)?;
+        let value = match object.kind {
+            ObjectKind::Manifest => serde_json::to_value(self.get_manifest(&object.path)?)?,
+            ObjectKind::Action => serde_json::to_value(self.get_action(&object.path)?)?,
+            ObjectKind::Relation => serde_json::to_value(self.get_relation(&object.path)?)?,
+            ObjectKind::Resource => serde_json::to_value(self.get_resource(&object.path)?)?,
+            ObjectKind::Driver => serde_json::to_value(self.get_driver(&object.path)?)?,
+            ObjectKind::Run => serde_json::to_value(self.get_run(&object.path)?)?,
+            ObjectKind::Link => serde_json::to_value(self.get_link(&object.path)?)?,
+            ObjectKind::User => serde_json::to_value(self.get_user(&object.path)?)?,
+            ObjectKind::ServiceAccount => {
+                serde_json::to_value(self.get_service_account(&object.path)?)?
+            }
+            ObjectKind::Role => serde_json::to_value(self.get_role(&object.path)?)?,
+            ObjectKind::RoleBinding => {
+                let binding = self
+                    .list_role_bindings()?
+                    .into_iter()
+                    .find(|binding| binding.path == object.path)
+                    .ok_or_else(|| {
+                        StoreError::NotFound(format!("RoleBinding {}", object.path))
+                    })?;
+                serde_json::to_value(binding)?
+            }
+            ObjectKind::Credential => self
+                .connection
+                .query_row(
+                    "SELECT id,subject_kind,subject_path,driver_generation,expires_at,revoked_at,created_at
+                     FROM credentials WHERE id=?",
+                    [&object.path],
+                    |row| {
+                        Ok(json!({
+                            "path": row.get::<_, String>(0)?,
+                            "subject": {
+                                "kind": row.get::<_, String>(1)?,
+                                "path": row.get::<_, String>(2)?
+                            },
+                            "driver_generation": row.get::<_, Option<u64>>(3)?,
+                            "expires_at": row.get::<_, Option<String>>(4)?,
+                            "revoked_at": row.get::<_, Option<String>>(5)?,
+                            "created_at": row.get::<_, String>(6)?
+                        }))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::NotFound(format!("Credential {}", object.path)))?,
+        };
+        Ok(value)
+    }
+
     pub fn update_resource_status(
         &mut self,
         resource_path: &str,
@@ -316,7 +939,9 @@ impl Store {
              WHERE id=? AND revision=? AND claimed_revision=? AND claim_driver_generation=?
              AND EXISTS(
                 SELECT 1 FROM drivers d
-                WHERE d.id=? AND d.manifest_path=resources.manifest_path
+                JOIN driver_manifest_index di ON di.driver_path=d.id
+                JOIN resource_manifest_index ri ON ri.resource_path=resources.id
+                WHERE d.id=? AND di.manifest_path=ri.manifest_path
                 AND d.generation=? AND d.state='ready'
              )",
             params![
@@ -361,7 +986,6 @@ impl Store {
             EventType::Updated,
             ObjectKind::Resource,
             resource_path,
-            Some(resource.manifest_path.clone()),
             Some(resource.revision),
             &resource,
             now,
@@ -387,7 +1011,9 @@ impl Store {
              WHERE id=? AND revision=? AND claimed_revision=? AND claim_driver_generation=?
              AND EXISTS(
                 SELECT 1 FROM drivers d
-                WHERE d.id=? AND d.manifest_path=resources.manifest_path
+                JOIN driver_manifest_index di ON di.driver_path=d.id
+                JOIN resource_manifest_index ri ON ri.resource_path=resources.id
+                WHERE d.id=? AND di.manifest_path=ri.manifest_path
                 AND d.generation=? AND d.state='ready'
              )",
             params![
@@ -431,7 +1057,6 @@ impl Store {
                 EventType::Updated,
                 ObjectKind::Resource,
                 resource_path,
-                Some(resource.manifest_path.clone()),
                 Some(resource.revision),
                 &resource,
                 now,
@@ -472,11 +1097,33 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound(format!("Driver {driver_path}")))
     }
 
+    pub fn list_drivers(&self) -> Result<Vec<Driver>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id,desired_state,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at FROM drivers ORDER BY id")?;
+        let drivers = statement
+            .query_map([], driver_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        Ok(drivers)
+    }
+
     pub fn start_driver(&mut self, driver_path: &str) -> Result<Driver, StoreError> {
+        let current = self.get_driver(driver_path)?;
+        if current.desired_state == DriverDesiredState::Running
+            && matches!(current.state, DriverState::Starting | DriverState::Ready)
+        {
+            return Ok(current);
+        }
+        if current.state == DriverState::Stopping {
+            return Err(StoreError::Conflict(
+                "Driver cannot start while it is stopping".into(),
+            ));
+        }
         let now = Utc::now();
         let tx = self.connection.transaction()?;
         let changed = tx.execute(
-            "UPDATE drivers SET state='starting',generation=generation+1,process_id=NULL,
+            "UPDATE drivers SET desired_state='running',state='starting',generation=generation+1,process_id=NULL,
              metadata_json='{}',started_at=?,heartbeat_at=NULL,stopped_at=NULL,error=NULL,updated_at=?
              WHERE id=? AND state IN ('stopped','failed')",
             params![stamp(now), stamp(now), driver_path.to_string()],
@@ -487,8 +1134,10 @@ impl Store {
             ));
         }
         let running_ids = {
-            let mut statement =
-                tx.prepare("SELECT id FROM runs WHERE driver_path=? AND status='running'")?;
+            let mut statement = tx.prepare(
+                "SELECT r.id FROM runs r JOIN run_relation_index i ON i.run_path=r.id
+                 WHERE i.driver_path=? AND r.status='running'",
+            )?;
             let rows = statement
                 .query_map([driver_path.to_string()], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -496,18 +1145,17 @@ impl Store {
         };
         tx.execute(
             "UPDATE runs SET status='queued',driver_generation=NULL,started_at=NULL
-             WHERE driver_path=? AND status='running'",
+             WHERE id IN (SELECT run_path FROM run_relation_index WHERE driver_path=?)
+             AND status='running'",
             [driver_path.to_string()],
         )?;
         for id in running_ids {
             let run = tx.query_row(RUN_SELECT_BY_ID, [&id], run_from_row)?;
-            let manifest_path = manifest_path_for_run(&tx, &id)?;
             append_lifecycle_event(
                 &tx,
                 EventType::Updated,
                 ObjectKind::Run,
                 &id,
-                Some(manifest_path),
                 None,
                 &run,
                 now,
@@ -564,13 +1212,35 @@ impl Store {
     pub fn stop_driver(&mut self, driver_path: &str) -> Result<Driver, StoreError> {
         let now = Utc::now();
         let changed = self.connection.execute(
-            "UPDATE drivers SET state='stopping',updated_at=?
-             WHERE id=? AND state IN ('starting','ready')",
+            "UPDATE drivers SET desired_state='stopped',
+             state=CASE WHEN state IN ('starting','ready') THEN 'stopping' ELSE 'stopped' END,
+             process_id=CASE WHEN state IN ('starting','ready') THEN process_id ELSE NULL END,
+             heartbeat_at=CASE WHEN state IN ('starting','ready') THEN heartbeat_at ELSE NULL END,
+             updated_at=?
+             WHERE id=?",
             params![stamp(now), driver_path.to_string()],
         )?;
         if changed != 1 {
+            return Err(StoreError::NotFound(format!("Driver {driver_path}")));
+        }
+        self.get_driver(driver_path)
+    }
+
+    pub fn mark_driver_failed(
+        &mut self,
+        driver_path: &str,
+        generation: u64,
+        error: &str,
+    ) -> Result<Driver, StoreError> {
+        let now = Utc::now();
+        let changed = self.connection.execute(
+            "UPDATE drivers SET state='failed',process_id=NULL,heartbeat_at=NULL,error=?,stopped_at=?,updated_at=?
+             WHERE id=? AND generation=? AND state IN ('starting','ready','stopping')",
+            params![error, stamp(now), stamp(now), driver_path, generation],
+        )?;
+        if changed != 1 {
             return Err(StoreError::Conflict(
-                "Driver can only stop from starting or ready".into(),
+                "Driver generation is stale or already terminal".into(),
             ));
         }
         self.get_driver(driver_path)
@@ -596,7 +1266,7 @@ impl Store {
     }
 
     pub fn enqueue_run(&mut self, input: CreateRun) -> Result<Run, StoreError> {
-        let expected_path = format!("{}/runs/{}", input.resource_path, input.request_id);
+        let expected_path = format!("{}/runs/{}", input.resource, input.request_id);
         if input.path != expected_path {
             return Err(StoreError::Invalid(format!(
                 "Run path must be {expected_path}"
@@ -614,26 +1284,32 @@ impl Store {
         if let Some(existing) = existing {
             return Ok(existing);
         }
-        let (driver_path, actions_json): (String, String) = self
+        let action: Action = self
             .connection
             .query_row(
-                "SELECT d.id,m.actions_json FROM resources r
-                 JOIN manifests m ON m.id=r.manifest_path
-                 JOIN drivers d ON d.manifest_path=m.id WHERE r.id=?",
-                [input.resource_path.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT id,name,description,input_schema_json,output_schema_json
+                 FROM actions WHERE id=?",
+                [&input.action],
+                action_from_row,
             )
             .optional()?
-            .ok_or_else(|| StoreError::NotFound(format!("Resource {}", input.resource_path)))?;
-        let actions: Vec<Action> = serde_json::from_str(&actions_json)?;
-        let action = actions
-            .iter()
-            .find(|action| action.name == input.action)
+            .ok_or_else(|| StoreError::NotFound(format!("Action {}", input.action)))?;
+        let driver_path: String = self
+            .connection
+            .query_row(
+                "SELECT di.driver_path
+                 FROM resource_manifest_index ri
+                 JOIN actions a ON a.manifest_path=ri.manifest_path
+                 JOIN driver_manifest_index di ON di.manifest_path=ri.manifest_path
+                 WHERE ri.resource_path=? AND a.id=?",
+                params![input.resource, input.action],
+                |row| row.get(0),
+            )
+            .optional()?
             .ok_or_else(|| {
-                StoreError::Invalid(format!(
-                    "Action {} is not declared by the Manifest",
-                    input.action
-                ))
+                StoreError::Invalid(
+                    "Run Resource and Action must belong to one driver-backed Manifest".into(),
+                )
             })?;
         let validator = jsonschema::validator_for(&action.input_schema).map_err(|error| {
             StoreError::Invalid(format!(
@@ -651,18 +1327,79 @@ impl Store {
         let path = input.path.clone();
         let tx = self.connection.transaction()?;
         tx.execute(
-            "INSERT INTO runs(id,request_id,resource_path,driver_path,driver_generation,action,input_json,status,output_json,error,created_at,started_at,finished_at)
-             VALUES (?,?,?,?,NULL,?,?,'queued',NULL,NULL,?,NULL,NULL)",
-            params![path, input.request_id.to_string(), input.resource_path, driver_path, input.action, serde_json::to_string(&input.input)?, stamp(now)],
+            "INSERT INTO runs(id,request_id,driver_generation,input_json,status,output_json,error,created_at,started_at,finished_at)
+             VALUES (?,?,NULL,?,'queued',NULL,NULL,?,NULL,NULL)",
+            params![path, input.request_id.to_string(), serde_json::to_string(&input.input)?, stamp(now)],
+        )?;
+        for link in &input.links {
+            insert_link(&tx, link, false, now)?;
+        }
+        let resource_link_path = format!("{path}/links/resource");
+        let action_link_path = format!("{path}/links/action");
+        let driver_link_path = format!("{path}/links/driver");
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::RunResource,
+            &resource_link_path,
+            ObjectRef {
+                kind: ObjectKind::Run,
+                path: path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::Resource,
+                path: input.resource.clone(),
+            },
+            now,
+        )?;
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::RunAction,
+            &action_link_path,
+            ObjectRef {
+                kind: ObjectKind::Run,
+                path: path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::Action,
+                path: input.action.clone(),
+            },
+            now,
+        )?;
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::RunDriver,
+            &driver_link_path,
+            ObjectRef {
+                kind: ObjectKind::Run,
+                path: path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::Driver,
+                path: driver_path.clone(),
+            },
+            now,
+        )?;
+        tx.execute(
+            "INSERT INTO run_relation_index(
+                run_path,resource_path,action_path,driver_path,
+                resource_link_path,action_link_path,driver_link_path
+             ) VALUES (?,?,?,?,?,?,?)",
+            params![
+                path,
+                input.resource,
+                input.action,
+                driver_path,
+                resource_link_path,
+                action_link_path,
+                driver_link_path
+            ],
         )?;
         let run = tx.query_row(RUN_SELECT_BY_ID, [&path], run_from_row)?;
-        let manifest_path = manifest_path_for_run(&tx, &path)?;
         append_lifecycle_event(
             &tx,
             EventType::Created,
             ObjectKind::Run,
             &path,
-            Some(manifest_path),
             None,
             &run,
             now,
@@ -687,7 +1424,8 @@ impl Store {
         }
         let run_path: Option<String> = tx
             .query_row(
-                "SELECT id FROM runs WHERE driver_path=? AND status='queued' ORDER BY created_at,id LIMIT 1",
+                "SELECT r.id FROM runs r JOIN run_relation_index i ON i.run_path=r.id
+                 WHERE i.driver_path=? AND r.status='queued' ORDER BY r.created_at,r.id LIMIT 1",
                 [driver_path.to_string()],
                 |row| row.get(0),
             )
@@ -702,13 +1440,11 @@ impl Store {
             params![generation, stamp(now), run_path],
         )?;
         let run = tx.query_row(RUN_SELECT_BY_ID, [&run_path], run_from_row)?;
-        let manifest_path = manifest_path_for_run(&tx, &run_path)?;
         append_lifecycle_event(
             &tx,
             EventType::Updated,
             ObjectKind::Run,
             &run_path,
-            Some(manifest_path),
             None,
             &run,
             now,
@@ -731,10 +1467,17 @@ impl Store {
         let Some(run) = self.claim_run(driver_path, generation)? else {
             return Ok(None);
         };
-        let resource = self.get_resource(&run.resource_path)?;
+        let (resource_path, action_path): (String, String) = self.connection.query_row(
+            "SELECT resource_path,action_path FROM run_relation_index WHERE run_path=?",
+            [&run.path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let resource = self.get_resource(&resource_path)?;
+        let action = self.get_action(&action_path)?;
         Ok(Some(DriverWork::Run {
             run: Box::new(run),
             resource,
+            action,
         }))
     }
 
@@ -746,7 +1489,9 @@ impl Store {
         let tx = self.connection.transaction()?;
         let manifest_path: Option<String> = tx
             .query_row(
-                "SELECT manifest_path FROM drivers WHERE id=? AND generation=? AND state='ready'",
+                "SELECT i.manifest_path FROM drivers d
+                 JOIN driver_manifest_index i ON i.driver_path=d.id
+                 WHERE d.id=? AND d.generation=? AND d.state='ready'",
                 params![driver_path.to_string(), generation],
                 |row| row.get(0),
             )
@@ -756,10 +1501,11 @@ impl Store {
         };
         let resource: Option<(String, u64)> = tx
             .query_row(
-                 "SELECT id,revision FROM resources
-                 WHERE manifest_path=? AND observed_revision < revision
-                 AND (claimed_revision IS NULL OR claimed_revision != revision OR claim_driver_generation != ?)
-                 ORDER BY created_at,id LIMIT 1",
+                 "SELECT r.id,r.revision FROM resources r
+                 JOIN resource_manifest_index i ON i.resource_path=r.id
+                 WHERE i.manifest_path=? AND r.observed_revision < r.revision
+                 AND (r.claimed_revision IS NULL OR r.claimed_revision != r.revision OR r.claim_driver_generation != ?)
+                 ORDER BY r.created_at,r.id LIMIT 1",
                 params![manifest_path, generation],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -855,8 +1601,20 @@ impl Store {
         let changed = tx.execute(
             "UPDATE runs SET status=?,output_json=?,error=?,finished_at=?
              WHERE id=? AND status='running' AND driver_generation=?
-             AND EXISTS(SELECT 1 FROM drivers d WHERE d.id=runs.driver_path AND d.generation=? AND d.state='ready')",
-            params![status, output, error, stamp(now), run_path.to_string(), input.driver_generation, input.driver_generation],
+             AND EXISTS(
+                SELECT 1 FROM run_relation_index i
+                JOIN drivers d ON d.id=i.driver_path
+                WHERE i.run_path=runs.id AND d.generation=? AND d.state='ready'
+             )",
+            params![
+                status,
+                output,
+                error,
+                stamp(now),
+                run_path.to_string(),
+                input.driver_generation,
+                input.driver_generation
+            ],
         )?;
         if changed != 1 {
             return Err(StoreError::Conflict(
@@ -869,7 +1627,6 @@ impl Store {
             EventType::Updated,
             ObjectKind::Run,
             run_path,
-            Some(manifest_path_for_run(&tx, run_path)?),
             None,
             &run,
             now,
@@ -890,33 +1647,23 @@ impl Store {
 
     pub fn create_link(&mut self, input: CreateLink) -> Result<Link, StoreError> {
         validate_object_path("Link path", &input.path)?;
-        validate_name("Link relation", &input.relation)?;
-        ensure_object_exists(&self.connection, &input.source)?;
-        ensure_object_exists(&self.connection, &input.target)?;
         let path = input.path.clone();
         let now = Utc::now();
         let tx = self.connection.transaction()?;
-        tx.execute(
-                "INSERT INTO links(id,source_kind,source_path,relation,target_kind,target_path,metadata_json,created_at)
-                 VALUES (?,?,?,?,?,?,?,?)",
-                params![
-                    path,
-                    object_kind(&input.source.kind),
-                    input.source.path.to_string(),
-                    input.relation,
-                    object_kind(&input.target.kind),
-                    input.target.path.to_string(),
-                    serde_json::to_string(&input.metadata)?,
-                    stamp(now)
-                ],
-            )
-            .map_err(|error| constraint(error, "Link already exists"))?;
-        let link = Link {
-            path: path.clone(),
+        let planned = kas_core::PlannedLink {
+            path: input.path,
             source: input.source,
-            relation: input.relation,
+            relation_path: input.relation_path,
             target: input.target,
             metadata: input.metadata,
+        };
+        insert_link(&tx, &planned, false, now)?;
+        let link = Link {
+            path: path.clone(),
+            source: planned.source,
+            relation_path: planned.relation_path,
+            target: planned.target,
+            metadata: planned.metadata,
             created_at: now,
         };
         append_lifecycle_event(
@@ -924,7 +1671,6 @@ impl Store {
             EventType::Created,
             ObjectKind::Link,
             &path,
-            object_manifest_path(&tx, &link.source)?,
             None,
             &link,
             now,
@@ -942,7 +1688,7 @@ impl Store {
 
     pub fn list_links(&self, filter: LinkFilter) -> Result<Vec<Link>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id,source_kind,source_path,relation,target_kind,target_path,metadata_json,created_at
+            "SELECT id,source_kind,source_path,relation_path,target_kind,target_path,metadata_json,created_at
              FROM links ORDER BY created_at,id",
         )?;
         let rows = statement.query_map([], link_from_row)?;
@@ -955,9 +1701,9 @@ impl Store {
                     .as_ref()
                     .is_none_or(|value| value == &link.source)
                     && filter
-                        .relation
+                        .relation_path
                         .as_ref()
-                        .is_none_or(|value| value == &link.relation)
+                        .is_none_or(|value| value == &link.relation_path)
                     && filter
                         .target
                         .as_ref()
@@ -972,6 +1718,15 @@ impl Store {
             .query_row(LINK_SELECT_BY_ID, [path], link_from_row)
             .optional()?
             .ok_or_else(|| StoreError::NotFound(format!("Link {path}")))?;
+        let protected: bool =
+            tx.query_row("SELECT protected FROM links WHERE id=?", [path], |row| {
+                row.get(0)
+            })?;
+        if protected {
+            return Err(StoreError::Invalid(format!(
+                "System Link {path} cannot be deleted independently"
+            )));
+        }
         if tx.execute("DELETE FROM links WHERE id=?", [path])? != 1 {
             return Err(StoreError::NotFound(format!("Link {path}")));
         }
@@ -980,7 +1735,6 @@ impl Store {
             EventType::Deleted,
             ObjectKind::Link,
             path,
-            object_manifest_path(&tx, &link.source)?,
             None,
             &link,
             Utc::now(),
@@ -1011,16 +1765,15 @@ impl Store {
 
     pub fn list_events_filtered(&self, filter: EventFilter) -> Result<Vec<Event>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT sequence,event_type,object_kind,object_path,manifest_path,revision,value_json,created_at
+            "SELECT sequence,event_type,object_kind,object_path,revision,value_json,created_at
              FROM events WHERE (?1 IS NULL OR object_kind=?1)
-             AND (?2 IS NULL OR object_path=?2) AND (?3 IS NULL OR manifest_path=?3)
-             AND sequence>?4 ORDER BY sequence LIMIT ?5",
+             AND (?2 IS NULL OR object_path=?2)
+             AND sequence>?3 ORDER BY sequence LIMIT ?4",
         )?;
         let rows = statement.query_map(
             params![
                 filter.object_kind.as_ref().map(object_kind),
                 filter.object_path.map(|id| id.to_string()),
-                filter.manifest_path.map(|id| id.to_string()),
                 filter.after_sequence.unwrap_or(0),
                 filter.limit.unwrap_or(100).clamp(1, 1000)
             ],
@@ -1170,6 +1923,15 @@ impl Store {
         let user_path = format!("/users/{name}");
         validate_object_path("Bootstrap User path", &user_path)?;
         let binding_path = "/role-bindings/system/bootstrap-admin".to_string();
+        let admin_role_path: String = self
+            .connection
+            .query_row(
+                "SELECT id FROM roles WHERE system_role='admin'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::Invalid("built-in admin Role is not installed".into()))?;
         let token = kas_auth::issue_token();
         let credential_path = format!("{user_path}/credentials/{}", Uuid::new_v4());
         let tx = self.connection.transaction()?;
@@ -1178,12 +1940,49 @@ impl Store {
             params![user_path.to_string(), name, stamp(now)],
         )?;
         tx.execute(
-            "INSERT INTO role_bindings(id,name,role_path,managed_by,created_at) VALUES (?,?,?,'system',?)",
-            params![binding_path.to_string(), "system:bootstrap-admin", SYSTEM_ADMIN_ROLE, stamp(now)],
+            "INSERT INTO role_bindings(id,name,managed_by,created_at) VALUES (?,?,'user',?)",
+            params![binding_path, "system:bootstrap-admin", stamp(now)],
+        )?;
+        let role_link_path = format!("{binding_path}/links/role");
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::RoleBindingRole,
+            &role_link_path,
+            ObjectRef {
+                kind: ObjectKind::RoleBinding,
+                path: binding_path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::Role,
+                path: admin_role_path.clone(),
+            },
+            now,
         )?;
         tx.execute(
-            "INSERT INTO role_binding_subjects(role_binding_path,subject_kind,subject_path) VALUES (?,'user',?)",
-            params![binding_path.to_string(), user_path.to_string()],
+            "INSERT INTO role_binding_role_index(role_binding_path,role_path,link_path)
+             VALUES (?,?,?)",
+            params![binding_path, admin_role_path, role_link_path],
+        )?;
+        let subject_link_path = format!("{binding_path}/links/subjects/0");
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::RoleBindingSubject,
+            &subject_link_path,
+            ObjectRef {
+                kind: ObjectKind::RoleBinding,
+                path: binding_path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::User,
+                path: user_path.clone(),
+            },
+            now,
+        )?;
+        tx.execute(
+            "INSERT INTO role_binding_subjects(
+                role_binding_path,subject_kind,subject_path,link_path
+             ) VALUES (?,'user',?,?)",
+            params![binding_path, user_path, subject_link_path],
         )?;
         tx.execute(
             "INSERT INTO credentials(id,subject_kind,subject_path,token_hash,driver_generation,expires_at,revoked_at,created_at)
@@ -1203,10 +2002,11 @@ impl Store {
         let now = stamp(Utc::now());
         let row: Option<(String, String, Option<u64>, Option<String>)> = self.connection
             .query_row(
-                "SELECT c.subject_kind,c.subject_path,c.driver_generation,sa.driver_path
+                "SELECT c.subject_kind,c.subject_path,c.driver_generation,dsi.driver_path
                  FROM credentials c
                  LEFT JOIN users u ON c.subject_kind='user' AND u.id=c.subject_path
                  LEFT JOIN service_accounts sa ON c.subject_kind='service_account' AND sa.id=c.subject_path
+                 LEFT JOIN driver_service_account_index dsi ON dsi.service_account_path=sa.id
                  WHERE c.token_hash=? AND c.revoked_at IS NULL
                  AND (c.expires_at IS NULL OR c.expires_at>?)
                  AND ((c.subject_kind='user' AND u.disabled=0) OR (c.subject_kind='service_account' AND sa.id IS NOT NULL))",
@@ -1228,7 +2028,8 @@ impl Store {
         }
         let mut statement = self.connection.prepare(
             "SELECT r.rules_json FROM roles r
-             JOIN role_bindings rb ON rb.role_path=r.id
+             JOIN role_binding_role_index rbri ON rbri.role_path=r.id
+             JOIN role_bindings rb ON rb.id=rbri.role_binding_path
              JOIN role_binding_subjects rbs ON rbs.role_binding_path=rb.id
              WHERE rbs.subject_kind=? AND rbs.subject_path=?",
         )?;
@@ -1262,7 +2063,7 @@ impl Store {
             ));
         }
         let service_account_path: String = self.connection.query_row(
-            "SELECT id FROM service_accounts WHERE driver_path=? AND managed_by='system'",
+            "SELECT service_account_path FROM driver_service_account_index WHERE driver_path=?",
             [driver_path.to_string()],
             |row| row.get(0),
         )?;
@@ -1297,18 +2098,17 @@ impl Store {
         &mut self,
         service_account_path: &str,
     ) -> Result<IssuedCredential, StoreError> {
-        let driver_path: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT driver_path FROM service_accounts WHERE id=?",
-                [service_account_path.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| {
-                StoreError::NotFound(format!("ServiceAccount {service_account_path}"))
-            })?;
-        if driver_path.is_some() {
+        let is_driver: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                    SELECT 1 FROM service_accounts sa
+                    LEFT JOIN driver_service_account_index dsi ON dsi.service_account_path=sa.id
+                    WHERE sa.id=? AND dsi.driver_path IS NOT NULL
+                 )",
+            [service_account_path.to_string()],
+            |row| row.get(0),
+        )?;
+        self.get_service_account(service_account_path)?;
+        if is_driver {
             return Err(StoreError::Conflict(
                 "Driver credentials must be issued through the Driver endpoint".into(),
             ));
@@ -1399,10 +2199,12 @@ impl Store {
         validate_name("ServiceAccount name", &input.name)?;
         validate_object_path("ServiceAccount path", &input.path)?;
         let now = Utc::now();
-        self.connection.execute(
-            "INSERT INTO service_accounts(id,name,driver_path,managed_by,created_at) VALUES (?,?,NULL,'user',?)",
-            params![input.path, input.name, stamp(now)],
-        ).map_err(|error| constraint(error, "ServiceAccount name already exists"))?;
+        self.connection
+            .execute(
+                "INSERT INTO service_accounts(id,name,managed_by,created_at) VALUES (?,?,'user',?)",
+                params![input.path, input.name, stamp(now)],
+            )
+            .map_err(|error| constraint(error, "ServiceAccount name already exists"))?;
         Ok(ServiceAccount {
             path: input.path,
             name: input.name,
@@ -1414,7 +2216,10 @@ impl Store {
 
     pub fn list_service_accounts(&self) -> Result<Vec<ServiceAccount>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id,name,driver_path,managed_by,created_at FROM service_accounts ORDER BY name",
+            "SELECT sa.id,sa.name,dsi.driver_path,sa.managed_by,sa.created_at
+             FROM service_accounts sa
+             LEFT JOIN driver_service_account_index dsi ON dsi.service_account_path=sa.id
+             ORDER BY sa.name",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(ServiceAccount {
@@ -1432,8 +2237,10 @@ impl Store {
     pub fn get_service_account(&self, path: &str) -> Result<ServiceAccount, StoreError> {
         self.connection
             .query_row(
-                "SELECT id,name,driver_path,managed_by,created_at
-                 FROM service_accounts WHERE id=?",
+                "SELECT sa.id,sa.name,dsi.driver_path,sa.managed_by,sa.created_at
+                 FROM service_accounts sa
+                 LEFT JOIN driver_service_account_index dsi ON dsi.service_account_path=sa.id
+                 WHERE sa.id=?",
                 [path],
                 |row| {
                     Ok(ServiceAccount {
@@ -1455,7 +2262,8 @@ impl Store {
         validate_rules(&input.rules)?;
         let now = Utc::now();
         self.connection.execute(
-            "INSERT INTO roles(id,name,description,rules_json,managed_by,created_at,updated_at) VALUES (?,?,?,?,'user',?,?)",
+            "INSERT INTO roles(id,name,description,rules_json,system_role,managed_by,created_at,updated_at)
+             VALUES (?,?,?,?,NULL,'user',?,?)",
             params![input.path, input.name, input.description, serde_json::to_string(&input.rules)?, stamp(now), stamp(now)],
         ).map_err(|error| constraint(error, "Role name already exists"))?;
         Ok(Role {
@@ -1535,14 +2343,55 @@ impl Store {
         let now = Utc::now();
         let tx = self.connection.transaction()?;
         tx.execute(
-            "INSERT INTO role_bindings(id,name,role_path,managed_by,created_at) VALUES (?,?,?,'user',?)",
-            params![path, input.name, input.role_path, stamp(now)],
-        ).map_err(|error| constraint(error, "Role or RoleBinding is invalid"))?;
-        for subject in &input.subjects {
+            "INSERT INTO role_bindings(id,name,managed_by,created_at) VALUES (?,?,'user',?)",
+            params![path, input.name, stamp(now)],
+        )
+        .map_err(|error| constraint(error, "Role or RoleBinding is invalid"))?;
+        let role_link_path = format!("{path}/links/role");
+        insert_protected_link_for_role(
+            &tx,
+            RelationRole::RoleBindingRole,
+            &role_link_path,
+            ObjectRef {
+                kind: ObjectKind::RoleBinding,
+                path: path.clone(),
+            },
+            ObjectRef {
+                kind: ObjectKind::Role,
+                path: input.role_path.clone(),
+            },
+            now,
+        )?;
+        tx.execute(
+            "INSERT INTO role_binding_role_index(role_binding_path,role_path,link_path)
+             VALUES (?,?,?)",
+            params![path, input.role_path, role_link_path],
+        )?;
+        for (index, subject) in input.subjects.iter().enumerate() {
             ensure_subject_exists(&tx, subject)?;
+            let subject_link_path = format!("{path}/links/subjects/{index}");
+            insert_protected_link_for_role(
+                &tx,
+                RelationRole::RoleBindingSubject,
+                &subject_link_path,
+                ObjectRef {
+                    kind: ObjectKind::RoleBinding,
+                    path: path.clone(),
+                },
+                ObjectRef {
+                    kind: match subject.kind {
+                        SubjectKind::User => ObjectKind::User,
+                        SubjectKind::ServiceAccount => ObjectKind::ServiceAccount,
+                    },
+                    path: subject.path.clone(),
+                },
+                now,
+            )?;
             tx.execute(
-                "INSERT INTO role_binding_subjects(role_binding_path,subject_kind,subject_path) VALUES (?,?,?)",
-                params![path, subject.kind.as_str(), subject.path],
+                "INSERT INTO role_binding_subjects(
+                    role_binding_path,subject_kind,subject_path,link_path
+                 ) VALUES (?,?,?,?)",
+                params![path, subject.kind.as_str(), subject.path, subject_link_path],
             )?;
         }
         tx.commit()?;
@@ -1558,7 +2407,9 @@ impl Store {
 
     pub fn list_role_bindings(&self) -> Result<Vec<RoleBinding>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id,name,role_path,managed_by,created_at FROM role_bindings ORDER BY name",
+            "SELECT rb.id,rb.name,i.role_path,rb.managed_by,rb.created_at
+             FROM role_bindings rb JOIN role_binding_role_index i ON i.role_binding_path=rb.id
+             ORDER BY rb.name",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -1602,15 +2453,43 @@ impl Store {
     }
 
     pub fn delete_role_binding(&mut self, path: &str) -> Result<(), StoreError> {
-        let changed = self.connection.execute(
-            "DELETE FROM role_bindings WHERE id=? AND managed_by='user'",
-            [path],
-        )?;
-        if changed != 1 {
+        let tx = self.connection.transaction()?;
+        let managed_by: Option<String> = tx
+            .query_row(
+                "SELECT managed_by FROM role_bindings WHERE id=?",
+                [path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if managed_by.as_deref() != Some("user") {
             return Err(StoreError::Conflict(
                 "System RoleBinding cannot be deleted".into(),
             ));
         }
+        let link_paths = {
+            let mut statement = tx.prepare(
+                "SELECT link_path FROM role_binding_subjects WHERE role_binding_path=?
+                 UNION ALL
+                 SELECT link_path FROM role_binding_role_index WHERE role_binding_path=?",
+            )?;
+            let values = statement
+                .query_map(params![path, path], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            values
+        };
+        tx.execute(
+            "DELETE FROM role_binding_subjects WHERE role_binding_path=?",
+            [path],
+        )?;
+        tx.execute(
+            "DELETE FROM role_binding_role_index WHERE role_binding_path=?",
+            [path],
+        )?;
+        for link_path in link_paths {
+            tx.execute("DELETE FROM links WHERE id=?", [link_path])?;
+        }
+        tx.execute("DELETE FROM role_bindings WHERE id=?", [path])?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -1621,16 +2500,16 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
             Mutation::CreateResource { resource } => {
                 validate_name("Resource name", &resource.name)?;
                 validate_object_path("Mutation Resource path", &resource.path)?;
+                validate_object_path("Manifest path", &resource.manifest)?;
+                let manifest_path = resource.manifest.clone();
                 let schema: String = tx
                     .query_row(
                         "SELECT resource_schema_json FROM manifests WHERE id=?",
-                        [resource.manifest_path.to_string()],
+                        [&manifest_path],
                         |row| row.get(0),
                     )
                     .optional()?
-                    .ok_or_else(|| {
-                        StoreError::NotFound(format!("Manifest {}", resource.manifest_path))
-                    })?;
+                    .ok_or_else(|| StoreError::NotFound(format!("Manifest {manifest_path}")))?;
                 validate_json_schema(
                     "Resource spec",
                     &serde_json::from_str::<Value>(&schema)?,
@@ -1638,11 +2517,10 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
                 )?;
                 let now = Utc::now();
                 tx.execute(
-                    "INSERT INTO resources(id,manifest_path,name,spec_json,status_json,revision,created_at,updated_at)
-                     VALUES (?,?,?,?,'{}',0,?,?)",
+                    "INSERT INTO resources(id,name,spec_json,status_json,revision,created_at,updated_at)
+                     VALUES (?,?,?,'{}',0,?,?)",
                     params![
                         resource.path.to_string(),
-                        resource.manifest_path.to_string(),
                         resource.name,
                         serde_json::to_string(&resource.spec)?,
                         stamp(now),
@@ -1650,6 +2528,29 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
                     ],
                 )
                 .map_err(|error| constraint(error, "Mutation Resource already exists"))?;
+                for link in &resource.links {
+                    insert_link(tx, link, false, now)?;
+                }
+                let membership_path = format!("{}/links/manifest", resource.path);
+                insert_protected_link_for_role(
+                    tx,
+                    RelationRole::ResourceManifest,
+                    &membership_path,
+                    ObjectRef {
+                        kind: ObjectKind::Resource,
+                        path: resource.path.clone(),
+                    },
+                    ObjectRef {
+                        kind: ObjectKind::Manifest,
+                        path: manifest_path.clone(),
+                    },
+                    now,
+                )?;
+                tx.execute(
+                    "INSERT INTO resource_manifest_index(resource_path,manifest_path,link_path)
+                     VALUES (?,?,?)",
+                    params![resource.path, manifest_path, membership_path],
+                )?;
                 let created = tx.query_row(
                     RESOURCE_SELECT_BY_ID,
                     [resource.path.to_string()],
@@ -1660,7 +2561,6 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
                     EventType::Created,
                     ObjectKind::Resource,
                     &resource.path,
-                    Some(resource.manifest_path.clone()),
                     Some(0),
                     &created,
                     now,
@@ -1673,7 +2573,8 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
             } => {
                 let schema: String = tx
                     .query_row(
-                        "SELECT m.resource_schema_json FROM resources r JOIN manifests m ON m.id=r.manifest_path WHERE r.id=?",
+                        "SELECT m.resource_schema_json FROM resource_manifest_index i
+                         JOIN manifests m ON m.id=i.manifest_path WHERE i.resource_path=?",
                         [resource_path.to_string()],
                         |row| row.get(0),
                     )
@@ -1708,33 +2609,15 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
                     EventType::Updated,
                     ObjectKind::Resource,
                     resource_path,
-                    Some(updated.manifest_path.clone()),
                     Some(updated.revision),
                     &updated,
                     updated.updated_at,
                 )?;
             }
             Mutation::CreateLink { link } => {
-                validate_name("Link relation", &link.relation)?;
                 validate_object_path("Mutation Link path", &link.path)?;
-                ensure_object_exists(tx, &link.source)?;
-                ensure_object_exists(tx, &link.target)?;
                 let now = Utc::now();
-                tx.execute(
-                    "INSERT INTO links(id,source_kind,source_path,relation,target_kind,target_path,metadata_json,created_at)
-                     VALUES (?,?,?,?,?,?,?,?)",
-                    params![
-                        link.path.to_string(),
-                        object_kind(&link.source.kind),
-                        link.source.path.to_string(),
-                        link.relation,
-                        object_kind(&link.target.kind),
-                        link.target.path.to_string(),
-                        serde_json::to_string(&link.metadata)?,
-                        stamp(now)
-                    ],
-                )
-                .map_err(|error| constraint(error, "Mutation Link already exists"))?;
+                insert_link(tx, link, false, now)?;
                 let created =
                     tx.query_row(LINK_SELECT_BY_ID, [link.path.to_string()], link_from_row)?;
                 append_lifecycle_event(
@@ -1742,7 +2625,6 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
                     EventType::Created,
                     ObjectKind::Link,
                     &link.path,
-                    object_manifest_path(tx, &link.source)?,
                     None,
                     &created,
                     now,
@@ -1796,25 +2678,22 @@ fn complete_delivery_in_tx(
     Err(StoreError::Conflict("Delivery is stale".into()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_lifecycle_event(
     tx: &Transaction<'_>,
     event_type: EventType,
     object_kind_value: ObjectKind,
     object_path: &str,
-    manifest_path: Option<String>,
     revision: Option<u64>,
     value: &impl Serialize,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT INTO events(event_type,object_kind,object_path,manifest_path,revision,value_json,created_at)
-         VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO events(event_type,object_kind,object_path,revision,value_json,created_at)
+         VALUES (?,?,?,?,?,?)",
         params![
             event_type_str(event_type),
             object_kind(&object_kind_value),
             object_path.to_string(),
-            manifest_path.map(|id| id.to_string()),
             revision,
             serde_json::to_string(value)?,
             stamp(now)
@@ -1823,24 +2702,39 @@ fn append_lifecycle_event(
     Ok(())
 }
 
-const DRIVER_SELECT_BY_ID: &str = "SELECT id,manifest_path,name,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at FROM drivers WHERE id=?";
-const DRIVER_SELECT_BY_MANIFEST: &str = "SELECT id,manifest_path,name,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at FROM drivers WHERE manifest_path=?";
-const RESOURCE_SELECT_BY_ID: &str = "SELECT id,manifest_path,name,spec_json,status_json,revision,created_at,updated_at FROM resources WHERE id=?";
-const RUN_SELECT_BY_ID: &str = "SELECT id,request_id,resource_path,driver_path,driver_generation,action,input_json,status,output_json,error,created_at,started_at,finished_at FROM runs WHERE id=?";
-const RUN_SELECT_BY_REQUEST: &str = "SELECT id,request_id,resource_path,driver_path,driver_generation,action,input_json,status,output_json,error,created_at,started_at,finished_at FROM runs WHERE request_id=?";
-const LINK_SELECT_BY_ID: &str = "SELECT id,source_kind,source_path,relation,target_kind,target_path,metadata_json,created_at FROM links WHERE id=?";
+const DRIVER_SELECT_BY_ID: &str = "SELECT id,desired_state,state,generation,process_id,metadata_json,started_at,heartbeat_at,stopped_at,error,created_at,updated_at FROM drivers WHERE id=?";
+const DRIVER_SELECT_BY_MANIFEST: &str = "SELECT d.id,d.desired_state,d.state,d.generation,d.process_id,d.metadata_json,d.started_at,d.heartbeat_at,d.stopped_at,d.error,d.created_at,d.updated_at FROM drivers d JOIN driver_manifest_index i ON i.driver_path=d.id WHERE i.manifest_path=?";
+const RESOURCE_SELECT_BY_ID: &str =
+    "SELECT id,name,spec_json,status_json,revision,created_at,updated_at FROM resources WHERE id=?";
+const RUN_SELECT_BY_ID: &str = "SELECT id,request_id,driver_generation,input_json,status,output_json,error,created_at,started_at,finished_at FROM runs WHERE id=?";
+const RUN_SELECT_BY_REQUEST: &str = "SELECT id,request_id,driver_generation,input_json,status,output_json,error,created_at,started_at,finished_at FROM runs WHERE request_id=?";
+const LINK_SELECT_BY_ID: &str = "SELECT id,source_kind,source_path,relation_path,target_kind,target_path,metadata_json,created_at FROM links WHERE id=?";
 const DELIVERY_SELECT_BY_ID: &str = "SELECT id,driver_path,generation,work_json,status,created_at,acked_at,completed_at FROM driver_deliveries WHERE id=?";
 
-fn manifest_from_row(row: &Row<'_>) -> rusqlite::Result<Manifest> {
-    Ok(Manifest {
+fn action_from_row(row: &Row<'_>) -> rusqlite::Result<Action> {
+    Ok(Action {
         path: row.get(0)?,
         name: row.get(1)?,
-        version: row.get(2)?,
-        description: row.get(3)?,
-        resource_schema: json_from_row(row, 4)?,
-        actions: json_from_row(row, 5)?,
-        driver: row.get(6)?,
-        created_at: time_from_row(row, 7)?,
+        description: row.get(2)?,
+        input_schema: json_from_row(row, 3)?,
+        output_schema: json_from_row(row, 4)?,
+    })
+}
+
+fn relation_from_row(row: &Row<'_>) -> rusqlite::Result<Relation> {
+    let role: Option<String> = row.get(2)?;
+    Ok(Relation {
+        path: row.get(0)?,
+        name: row.get(1)?,
+        role: match role.as_deref() {
+            None => None,
+            Some(value) => Some(relation_role_from_str(value, 2)?),
+        },
+        inverse_name: row.get(3)?,
+        sources: json_from_row(row, 4)?,
+        targets: json_from_row(row, 5)?,
+        cardinality: json_from_row(row, 6)?,
+        metadata_schema: json_from_row(row, 7)?,
     })
 }
 
@@ -1851,7 +2745,7 @@ fn link_from_row(row: &Row<'_>) -> rusqlite::Result<Link> {
             kind: object_kind_from_str(&row.get::<_, String>(1)?, 1)?,
             path: row.get(2)?,
         },
-        relation: row.get(3)?,
+        relation_path: row.get(3)?,
         target: ObjectRef {
             kind: object_kind_from_str(&row.get::<_, String>(4)?, 4)?,
             path: row.get(5)?,
@@ -1867,10 +2761,9 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
         event_type: event_type_from_str(&row.get::<_, String>(1)?, 1)?,
         object_kind: object_kind_from_str(&row.get::<_, String>(2)?, 2)?,
         object_path: row.get(3)?,
-        manifest_path: row.get(4)?,
-        revision: row.get(5)?,
-        value: json_from_row(row, 6)?,
-        created_at: time_from_row(row, 7)?,
+        revision: row.get(4)?,
+        value: json_from_row(row, 5)?,
+        created_at: time_from_row(row, 6)?,
     })
 }
 
@@ -1895,13 +2788,12 @@ fn delivery_from_row(row: &Row<'_>) -> rusqlite::Result<DriverDelivery> {
 fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
     Ok(Resource {
         path: row.get(0)?,
-        manifest_path: row.get(1)?,
-        name: row.get(2)?,
-        spec: json_from_row(row, 3)?,
-        status: json_from_row(row, 4)?,
-        revision: row.get(5)?,
-        created_at: time_from_row(row, 6)?,
-        updated_at: time_from_row(row, 7)?,
+        name: row.get(1)?,
+        spec: json_from_row(row, 2)?,
+        status: json_from_row(row, 3)?,
+        revision: row.get(4)?,
+        created_at: time_from_row(row, 5)?,
+        updated_at: time_from_row(row, 6)?,
     })
 }
 
@@ -1958,25 +2850,28 @@ fn ensure_subject_exists(tx: &Transaction<'_>, subject: &Subject) -> Result<(), 
 fn driver_from_row(row: &Row<'_>) -> rusqlite::Result<Driver> {
     Ok(Driver {
         path: row.get(0)?,
-        manifest_path: row.get(1)?,
-        name: row.get(2)?,
-        state: match row.get::<_, String>(3)?.as_str() {
+        desired_state: match row.get::<_, String>(1)?.as_str() {
+            "stopped" => DriverDesiredState::Stopped,
+            "running" => DriverDesiredState::Running,
+            state => return Err(from_sql(1, format!("invalid desired Driver state {state}"))),
+        },
+        state: match row.get::<_, String>(2)?.as_str() {
             "stopped" => DriverState::Stopped,
             "starting" => DriverState::Starting,
             "ready" => DriverState::Ready,
             "stopping" => DriverState::Stopping,
             "failed" => DriverState::Failed,
-            state => return Err(from_sql(3, format!("invalid Driver state {state}"))),
+            state => return Err(from_sql(2, format!("invalid Driver state {state}"))),
         },
-        generation: row.get(4)?,
-        process_id: row.get(5)?,
-        metadata: json_from_row(row, 6)?,
-        started_at: optional_time_from_row(row, 7)?,
-        heartbeat_at: optional_time_from_row(row, 8)?,
-        stopped_at: optional_time_from_row(row, 9)?,
-        error: row.get(10)?,
-        created_at: time_from_row(row, 11)?,
-        updated_at: time_from_row(row, 12)?,
+        generation: row.get(3)?,
+        process_id: row.get(4)?,
+        metadata: json_from_row(row, 5)?,
+        started_at: optional_time_from_row(row, 6)?,
+        heartbeat_at: optional_time_from_row(row, 7)?,
+        stopped_at: optional_time_from_row(row, 8)?,
+        error: row.get(9)?,
+        created_at: time_from_row(row, 10)?,
+        updated_at: time_from_row(row, 11)?,
     })
 }
 
@@ -1984,50 +2879,31 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
         path: row.get(0)?,
         request_id: uuid_from_row(row, 1)?,
-        resource_path: row.get(2)?,
-        driver_path: row.get(3)?,
-        driver_generation: row.get(4)?,
-        action: row.get(5)?,
-        input: json_from_row(row, 6)?,
-        status: match row.get::<_, String>(7)?.as_str() {
+        driver_generation: row.get(2)?,
+        input: json_from_row(row, 3)?,
+        status: match row.get::<_, String>(4)?.as_str() {
             "queued" => RunStatus::Queued,
             "running" => RunStatus::Running,
             "succeeded" => RunStatus::Succeeded,
             "failed" => RunStatus::Failed,
             "cancelled" => RunStatus::Cancelled,
-            status => return Err(from_sql(7, format!("invalid Run status {status}"))),
+            status => return Err(from_sql(4, format!("invalid Run status {status}"))),
         },
-        output: optional_json_from_row(row, 8)?,
-        error: row.get(9)?,
-        created_at: time_from_row(row, 10)?,
-        started_at: optional_time_from_row(row, 11)?,
-        finished_at: optional_time_from_row(row, 12)?,
+        output: optional_json_from_row(row, 5)?,
+        error: row.get(6)?,
+        created_at: time_from_row(row, 7)?,
+        started_at: optional_time_from_row(row, 8)?,
+        finished_at: optional_time_from_row(row, 9)?,
     })
 }
 
-fn driver_rules() -> Vec<Rule> {
-    vec![
-        Rule {
-            resources: vec!["drivers".into()],
-            verbs: vec!["get".into(), "patch".into()],
-            paths: Vec::new(),
-        },
-        Rule {
-            resources: vec!["drivers/connect".into(), "drivers/claim".into()],
-            verbs: vec!["create".into()],
-            paths: Vec::new(),
-        },
-        Rule {
-            resources: vec!["resources/status".into(), "runs/result".into()],
-            verbs: vec!["update".into()],
-            paths: Vec::new(),
-        },
-    ]
+fn validate_manifest_contract(resource_schema: &Value) -> Result<(), StoreError> {
+    validate_json_schema_contract("Resource schema", resource_schema)
 }
 
-fn validate_manifest_contract(resource_schema: &Value) -> Result<(), StoreError> {
-    jsonschema::validator_for(resource_schema)
-        .map_err(|error| StoreError::Invalid(format!("Resource schema is invalid: {error}")))?;
+fn validate_json_schema_contract(label: &str, schema: &Value) -> Result<(), StoreError> {
+    jsonschema::validator_for(schema)
+        .map_err(|error| StoreError::Invalid(format!("{label} is invalid: {error}")))?;
     Ok(())
 }
 
@@ -2037,39 +2913,6 @@ fn validate_json_schema(label: &str, schema: &Value, instance: &Value) -> Result
     validator
         .validate(instance)
         .map_err(|error| StoreError::Invalid(format!("{label} does not match its schema: {error}")))
-}
-
-fn manifest_path_for_run(connection: &Connection, run_path: &str) -> Result<String, StoreError> {
-    let value: String = connection.query_row(
-        "SELECT r.manifest_path FROM runs ru JOIN resources r ON r.id=ru.resource_path WHERE ru.id=?",
-        [run_path.to_string()],
-        |row| row.get(0),
-    )?;
-    Ok(value)
-}
-
-fn object_manifest_path(
-    connection: &Connection,
-    object: &ObjectRef,
-) -> Result<Option<String>, StoreError> {
-    let value: Option<String> = match object.kind {
-        ObjectKind::Resource => connection
-            .query_row(
-                "SELECT manifest_path FROM resources WHERE id=?",
-                [object.path.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?,
-        ObjectKind::Run => connection
-            .query_row(
-                "SELECT r.manifest_path FROM runs ru JOIN resources r ON r.id=ru.resource_path WHERE ru.id=?",
-                [object.path.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?,
-        _ => None,
-    };
-    Ok(value)
 }
 
 fn event_type_str(event_type: EventType) -> &'static str {
@@ -2092,6 +2935,8 @@ fn event_type_from_str(value: &str, index: usize) -> rusqlite::Result<EventType>
 fn object_kind(kind: &ObjectKind) -> &'static str {
     match kind {
         ObjectKind::Manifest => "manifest",
+        ObjectKind::Action => "action",
+        ObjectKind::Relation => "relation",
         ObjectKind::Resource => "resource",
         ObjectKind::Driver => "driver",
         ObjectKind::Run => "run",
@@ -2104,9 +2949,62 @@ fn object_kind(kind: &ObjectKind) -> &'static str {
     }
 }
 
+fn relation_role(role: RelationRole) -> &'static str {
+    match role {
+        RelationRole::ManifestMember => "manifest_member",
+        RelationRole::ResourceManifest => "resource_manifest",
+        RelationRole::RunResource => "run_resource",
+        RelationRole::RunAction => "run_action",
+        RelationRole::RunDriver => "run_driver",
+        RelationRole::DriverServiceAccount => "driver_service_account",
+        RelationRole::RoleBindingRole => "role_binding_role",
+        RelationRole::RoleBindingSubject => "role_binding_subject",
+    }
+}
+
+fn relation_role_from_str(value: &str, index: usize) -> rusqlite::Result<RelationRole> {
+    match value {
+        "manifest_member" => Ok(RelationRole::ManifestMember),
+        "resource_manifest" => Ok(RelationRole::ResourceManifest),
+        "run_resource" => Ok(RelationRole::RunResource),
+        "run_action" => Ok(RelationRole::RunAction),
+        "run_driver" => Ok(RelationRole::RunDriver),
+        "driver_service_account" => Ok(RelationRole::DriverServiceAccount),
+        "role_binding_role" => Ok(RelationRole::RoleBindingRole),
+        "role_binding_subject" => Ok(RelationRole::RoleBindingSubject),
+        other => Err(from_sql(index, format!("invalid Relation role {other}"))),
+    }
+}
+
+fn system_role(role: SystemRole) -> &'static str {
+    match role {
+        SystemRole::Admin => "admin",
+        SystemRole::Editor => "editor",
+        SystemRole::Viewer => "viewer",
+    }
+}
+
+fn system_role_from_str(value: &str, index: usize) -> rusqlite::Result<SystemRole> {
+    match value {
+        "admin" => Ok(SystemRole::Admin),
+        "editor" => Ok(SystemRole::Editor),
+        "viewer" => Ok(SystemRole::Viewer),
+        other => Err(from_sql(index, format!("invalid system Role {other}"))),
+    }
+}
+
+fn rbac_subject_kind(kind: RbacSubjectKind) -> &'static str {
+    match kind {
+        RbacSubjectKind::User => "user",
+        RbacSubjectKind::ServiceAccount => "service_account",
+    }
+}
+
 fn object_kind_from_str(value: &str, index: usize) -> rusqlite::Result<ObjectKind> {
     match value {
         "manifest" => Ok(ObjectKind::Manifest),
+        "action" => Ok(ObjectKind::Action),
+        "relation" => Ok(ObjectKind::Relation),
         "resource" => Ok(ObjectKind::Resource),
         "driver" => Ok(ObjectKind::Driver),
         "run" => Ok(ObjectKind::Run),
@@ -2124,6 +3022,8 @@ fn ensure_object_exists(connection: &Connection, object: &ObjectRef) -> Result<(
     validate_object_path("Object reference path", &object.path)?;
     let table = match object.kind {
         ObjectKind::Manifest => "manifests",
+        ObjectKind::Action => "actions",
+        ObjectKind::Relation => "relations",
         ObjectKind::Resource => "resources",
         ObjectKind::Driver => "drivers",
         ObjectKind::Run => "runs",
@@ -2147,6 +3047,425 @@ fn ensure_object_exists(connection: &Connection, object: &ObjectRef) -> Result<(
         )));
     }
     Ok(())
+}
+
+fn relation_path_by_role(
+    connection: &Connection,
+    role: RelationRole,
+) -> Result<String, StoreError> {
+    connection
+        .query_row(
+            "SELECT id FROM relations WHERE role=?",
+            [relation_role(role)],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "required built-in Relation role {} is not installed",
+                relation_role(role)
+            ))
+        })
+}
+
+fn insert_protected_link_for_role(
+    tx: &Transaction<'_>,
+    role: RelationRole,
+    link_path: &str,
+    source: ObjectRef,
+    target: ObjectRef,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let relation_path = relation_path_by_role(tx, role)?;
+    insert_link(
+        tx,
+        &PlannedLink {
+            path: link_path.to_owned(),
+            source,
+            relation_path,
+            target,
+            metadata: json!({}),
+        },
+        true,
+        now,
+    )
+}
+
+fn insert_link(
+    tx: &Transaction<'_>,
+    link: &PlannedLink,
+    protected: bool,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    validate_object_path("Link path", &link.path)?;
+    validate_object_path("Relation path", &link.relation_path)?;
+    ensure_object_exists(tx, &link.source)?;
+    ensure_object_exists(tx, &link.target)?;
+    let (sources_json, targets_json, cardinality_json, metadata_schema_json, system): (
+        String,
+        String,
+        String,
+        String,
+        bool,
+    ) = tx
+        .query_row(
+            "SELECT sources_json,targets_json,cardinality_json,metadata_schema_json,protected
+             FROM relations WHERE id=?",
+            [&link.relation_path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound(format!("Relation {}", link.relation_path)))?;
+    if system != protected {
+        return Err(StoreError::Invalid(if system {
+            format!(
+                "System Relation {} can only be used by an atomic platform operation",
+                link.relation_path
+            )
+        } else {
+            format!("Business Link {} cannot be marked protected", link.path)
+        }));
+    }
+    let sources: Vec<ObjectSelector> = serde_json::from_str(&sources_json)?;
+    let targets: Vec<ObjectSelector> = serde_json::from_str(&targets_json)?;
+    if !selectors_match(tx, &sources, &link.source, 0)?
+        || !selectors_match(tx, &targets, &link.target, 0)?
+    {
+        return Err(StoreError::Invalid(format!(
+            "Link {} endpoints do not match Relation {}",
+            link.path, link.relation_path
+        )));
+    }
+    let metadata_schema: Value = serde_json::from_str(&metadata_schema_json)?;
+    validate_json_schema("Link metadata", &metadata_schema, &link.metadata)?;
+    let cardinality: Cardinality = serde_json::from_str(&cardinality_json)?;
+    enforce_cardinality(tx, link, &cardinality)?;
+    tx.execute(
+        "INSERT INTO links(id,source_kind,source_path,relation_path,target_kind,target_path,
+         metadata_json,protected,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        params![
+            link.path,
+            object_kind(&link.source.kind),
+            link.source.path,
+            link.relation_path,
+            object_kind(&link.target.kind),
+            link.target.path,
+            serde_json::to_string(&link.metadata)?,
+            protected,
+            stamp(now)
+        ],
+    )
+    .map_err(|error| constraint(error, "Link already exists"))?;
+    Ok(())
+}
+
+fn enforce_cardinality(
+    connection: &Connection,
+    link: &PlannedLink,
+    cardinality: &Cardinality,
+) -> Result<(), StoreError> {
+    if let Some(max) = cardinality.max_targets_per_source {
+        let count: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM links
+             WHERE source_kind=? AND source_path=? AND relation_path=?",
+            params![
+                object_kind(&link.source.kind),
+                link.source.path,
+                link.relation_path
+            ],
+            |row| row.get(0),
+        )?;
+        if count >= max {
+            return Err(StoreError::Conflict(format!(
+                "Relation {} source cardinality is exhausted",
+                link.relation_path
+            )));
+        }
+    }
+    if let Some(max) = cardinality.max_sources_per_target {
+        let count: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM links
+             WHERE target_kind=? AND target_path=? AND relation_path=?",
+            params![
+                object_kind(&link.target.kind),
+                link.target.path,
+                link.relation_path
+            ],
+            |row| row.get(0),
+        )?;
+        if count >= max {
+            return Err(StoreError::Conflict(format!(
+                "Relation {} target cardinality is exhausted",
+                link.relation_path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn selectors_match(
+    connection: &Connection,
+    selectors: &[ObjectSelector],
+    object: &ObjectRef,
+    depth: usize,
+) -> Result<bool, StoreError> {
+    for selector in selectors {
+        if selector_matches(connection, selector, object, depth)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn selector_matches(
+    connection: &Connection,
+    selector: &ObjectSelector,
+    object: &ObjectRef,
+    depth: usize,
+) -> Result<bool, StoreError> {
+    if depth > 16 {
+        return Err(StoreError::Invalid(
+            "Relation selector nesting exceeds 16 levels".into(),
+        ));
+    }
+    if selector
+        .kind
+        .as_ref()
+        .is_some_and(|kind| !kind.matches(object.kind))
+    {
+        return Ok(false);
+    }
+    if selector
+        .path
+        .as_ref()
+        .is_some_and(|pattern| !kas_auth::path_matches(pattern, &object.path))
+    {
+        return Ok(false);
+    }
+    if !selector.any_of.is_empty()
+        && !selectors_match(connection, &selector.any_of, object, depth + 1)?
+    {
+        return Ok(false);
+    }
+    for link_selector in &selector.links {
+        let (object_column, other_kind, other_path) = match link_selector.direction {
+            LinkDirection::Source => ("source", "target_kind", "target_path"),
+            LinkDirection::Target => ("target", "source_kind", "source_path"),
+            LinkDirection::Either => {
+                let source_matches = linked_object_matches(
+                    connection,
+                    "source",
+                    "target_kind",
+                    "target_path",
+                    link_selector,
+                    object,
+                    depth,
+                )?;
+                let target_matches = linked_object_matches(
+                    connection,
+                    "target",
+                    "source_kind",
+                    "source_path",
+                    link_selector,
+                    object,
+                    depth,
+                )?;
+                if !source_matches && !target_matches {
+                    return Ok(false);
+                }
+                continue;
+            }
+        };
+        if !linked_object_matches(
+            connection,
+            object_column,
+            other_kind,
+            other_path,
+            link_selector,
+            object,
+            depth,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn linked_object_matches(
+    connection: &Connection,
+    object_side: &str,
+    other_kind_column: &str,
+    other_path_column: &str,
+    selector: &kas_core::LinkSelector,
+    object: &ObjectRef,
+    depth: usize,
+) -> Result<bool, StoreError> {
+    let sql = format!(
+        "SELECT {other_kind_column},{other_path_column} FROM links
+         WHERE {object_side}_kind=? AND {object_side}_path=? AND relation_path=?"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(
+        params![
+            object_kind(&object.kind),
+            object.path,
+            selector.relation_path
+        ],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    for row in rows {
+        let (kind, path) = row?;
+        let linked = ObjectRef {
+            kind: object_kind_from_str(&kind, 0)?,
+            path,
+        };
+        if selector.object.is_none() {
+            return Ok(true);
+        }
+        if let Some(nested) = selector.object.as_ref() {
+            if selector_matches(connection, nested, &linked, depth + 1)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn validate_package_digest(digest: &str) -> Result<(), StoreError> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(StoreError::Invalid(
+            "Package digest must use the sha256:<hex> format".into(),
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(StoreError::Invalid(
+            "Package digest must contain 64 lowercase hexadecimal characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_member_path(
+    manifest_path: &str,
+    collection: &str,
+    path: &str,
+) -> Result<(), StoreError> {
+    let prefix = format!("{manifest_path}/{collection}/");
+    validate_object_path("Manifest member path", path)?;
+    if !path.starts_with(&prefix) {
+        return Err(StoreError::Invalid(format!(
+            "Manifest member path {path} must be under {manifest_path}/{collection}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_package_entrypoint(entrypoint: &str) -> Result<(), StoreError> {
+    let Some(relative) = entrypoint.strip_prefix("./") else {
+        return Err(StoreError::Invalid(
+            "Driver entrypoint must be package-relative and start with ./".into(),
+        ));
+    };
+    if relative.is_empty()
+        || relative
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(StoreError::Invalid(
+            "Driver entrypoint contains an invalid path segment".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_relation_definition(relation: &Relation) -> Result<(), StoreError> {
+    validate_name("Relation name", &relation.name)?;
+    if relation.sources.is_empty() || relation.targets.is_empty() {
+        return Err(StoreError::Invalid(
+            "Relation sources and targets cannot be empty".into(),
+        ));
+    }
+    if relation.cardinality.max_targets_per_source == Some(0)
+        || relation.cardinality.max_sources_per_target == Some(0)
+    {
+        return Err(StoreError::Invalid(
+            "Relation cardinality limits must be greater than zero".into(),
+        ));
+    }
+    for selector in relation.sources.iter().chain(&relation.targets) {
+        validate_object_selector(selector, 0)?;
+    }
+    if relation.metadata_schema.is_null() {
+        Ok(())
+    } else {
+        validate_json_schema_contract("Relation metadata schema", &relation.metadata_schema)
+    }
+}
+
+fn validate_object_selector(selector: &ObjectSelector, depth: usize) -> Result<(), StoreError> {
+    if depth > 16 {
+        return Err(StoreError::Invalid(
+            "Relation selector nesting exceeds 16 levels".into(),
+        ));
+    }
+    if let Some(KindSelector::Many(kinds)) = &selector.kind {
+        if kinds.is_empty() {
+            return Err(StoreError::Invalid(
+                "Relation kind selector cannot be an empty list".into(),
+            ));
+        }
+    }
+    if let Some(path) = &selector.path {
+        kas_auth::validate_path_pattern(path).map_err(|error| {
+            StoreError::Invalid(format!("Relation selector path {path} is invalid: {error}"))
+        })?;
+    }
+    for link in &selector.links {
+        validate_object_path("Relation selector Link path", &link.relation_path)?;
+        if let Some(object) = &link.object {
+            validate_object_selector(object, depth + 1)?;
+        }
+    }
+    for alternative in &selector.any_of {
+        validate_object_selector(alternative, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn restart_policy(value: RestartPolicy) -> &'static str {
+    match value {
+        RestartPolicy::Never => "never",
+        RestartPolicy::OnFailure => "on_failure",
+        RestartPolicy::Always => "always",
+    }
+}
+
+fn driver_runtime_from_str(value: &str, index: usize) -> rusqlite::Result<DriverRuntime> {
+    match value {
+        "process" => Ok(DriverRuntime::Process),
+        other => Err(from_sql(index, format!("invalid Driver runtime {other}"))),
+    }
+}
+
+fn restart_policy_from_str(value: &str, index: usize) -> rusqlite::Result<RestartPolicy> {
+    match value {
+        "never" => Ok(RestartPolicy::Never),
+        "on_failure" => Ok(RestartPolicy::OnFailure),
+        "always" => Ok(RestartPolicy::Always),
+        other => Err(from_sql(index, format!("invalid restart policy {other}"))),
+    }
 }
 
 fn validate_name(label: &str, value: &str) -> Result<(), StoreError> {
@@ -2183,6 +3502,12 @@ fn validate_rules(rules: &[Rule]) -> Result<(), StoreError> {
 
 fn stamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+fn parse_stamp(value: &str) -> Result<DateTime<Utc>, StoreError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| StoreError::Invalid(format!("invalid stored timestamp: {error}")))
 }
 
 fn uuid_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<Uuid> {
@@ -2316,7 +3641,11 @@ mod tests {
             description: "notes".into(),
             resource_schema: json!({"type": "object"}),
             actions: Vec::new(),
+            relations: Vec::new(),
             driver: None,
+            rbac: ManifestRbac::default(),
+            package_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         }
     }
 
@@ -2340,24 +3669,160 @@ mod tests {
         };
         assert!(columns.iter().any(|column| column == "object_path"));
         assert!(!columns.iter().any(|column| column == "object_id"));
-        let editor = store.get_role("/roles/system/editor").unwrap();
+        assert!(!columns.iter().any(|column| column == "manifest_path"));
+        for table in [
+            "packages",
+            "actions",
+            "relations",
+            "resource_manifest_index",
+            "run_relation_index",
+        ] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing table {table}");
+        }
+        let system_relations: u64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM relations WHERE protected=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(system_relations, 8);
+        let editor = store
+            .get_role("/manifests/system/auth/roles/editor")
+            .unwrap();
         assert!(editor.rules[0].verbs.iter().any(|verb| verb == "link"));
+    }
+
+    #[test]
+    fn migration_is_data_free_and_store_installs_builtins() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate_connection(&mut connection).unwrap();
+        let relation_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))
+            .unwrap();
+        let role_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM roles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((relation_count, role_count), (0, 0));
+
+        let store = Store::memory().unwrap();
+        assert!(relation_path_by_role(&store.connection, RelationRole::ResourceManifest).is_ok());
+        let admin_path: String = store
+            .connection
+            .query_row(
+                "SELECT id FROM roles WHERE system_role='admin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(admin_path, "/manifests/system/auth/roles/admin");
+    }
+
+    #[test]
+    fn bootstrap_admin_uses_builtin_role_relationships() {
+        let mut store = Store::memory().unwrap();
+        let credential = store.bootstrap_admin("root").unwrap();
+        let authenticated = store.authenticate(&credential.token).unwrap();
+        assert!(authenticated
+            .rules
+            .iter()
+            .any(|rule| rule.resources == ["*"] && rule.verbs == ["*"]));
+        let role_path: String = store
+            .connection
+            .query_row(
+                "SELECT role_path FROM role_binding_role_index
+                 WHERE role_binding_path='/role-bindings/system/bootstrap-admin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(role_path, "/manifests/system/auth/roles/admin");
+    }
+
+    #[test]
+    fn manifest_rbac_is_installed_with_protected_relationships() {
+        let mut store = Store::memory().unwrap();
+        let manifest_path = "/manifests/worker/v1";
+        let service_account_path = format!("{manifest_path}/service-accounts/runtime");
+        let role_path = format!("{manifest_path}/roles/runtime");
+        let binding_path = format!("{manifest_path}/role-bindings/runtime");
+        let mut input = manifest(manifest_path);
+        input.name = "worker".into();
+        input.rbac.service_accounts.push(ServiceAccountDefinition {
+            path: service_account_path.clone(),
+            name: "worker-runtime".into(),
+        });
+        input.rbac.roles.push(RoleDefinition {
+            path: role_path.clone(),
+            name: "worker-runtime".into(),
+            description: String::new(),
+            rules: vec![RbacRuleDefinition {
+                resources: vec!["resources/*".into()],
+                verbs: vec!["create".into()],
+                paths: Vec::new(),
+            }],
+            system_role: None,
+        });
+        input.rbac.role_bindings.push(RoleBindingDefinition {
+            path: binding_path.clone(),
+            name: "worker-runtime".into(),
+            role_path: role_path.clone(),
+            subjects: vec![RbacSubjectDefinition {
+                kind: RbacSubjectKind::ServiceAccount,
+                path: service_account_path.clone(),
+            }],
+        });
+
+        let installed = store.install_manifest(input, 123).unwrap();
+        assert_eq!(installed.rbac.service_accounts.len(), 1);
+        assert_eq!(installed.rbac.roles.len(), 1);
+        assert_eq!(installed.rbac.role_bindings.len(), 1);
+        let managed_by = format!("package:{manifest_path}");
+        assert_eq!(store.get_role(&role_path).unwrap().managed_by, managed_by);
+        let protected_links: u64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM links
+                 WHERE protected=1 AND (
+                    source_path=? OR target_path=? OR source_path=? OR target_path=?
+                 )",
+                params![
+                    binding_path,
+                    binding_path,
+                    service_account_path,
+                    service_account_path
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(protected_links >= 4);
     }
 
     #[test]
     fn objects_are_addressed_by_path_and_emit_path_events() {
         let mut store = Store::memory().unwrap();
         let created_manifest = store
-            .create_manifest(manifest("/manifests/note/v1"))
+            .install_manifest(manifest("/manifests/note/v1"), 123)
             .unwrap();
         assert_eq!(created_manifest.path, "/manifests/note/v1");
 
         let resource = store
             .create_resource(CreateResource {
                 path: "/notes/team-a/first".into(),
-                manifest_path: created_manifest.path,
+                manifest: created_manifest.path,
                 name: "first".into(),
                 spec: json!({"body": "hello"}),
+                links: Vec::new(),
             })
             .unwrap();
         assert_eq!(store.get_resource("/notes/team-a/first").unwrap(), resource);
@@ -2370,32 +3835,67 @@ mod tests {
     fn invalid_object_paths_are_rejected() {
         let mut store = Store::memory().unwrap();
         let error = store
-            .create_manifest(manifest("/manifests//note"))
+            .install_manifest(manifest("/manifests//note"), 123)
             .unwrap_err();
         assert!(matches!(error, StoreError::Invalid(_)));
+    }
+
+    #[test]
+    fn manifest_install_is_idempotent_only_for_the_same_package() {
+        let mut store = Store::memory().unwrap();
+        let input = manifest("/manifests/note/v1");
+        let first = store.install_manifest(input.clone(), 123).unwrap();
+        let second = store.install_manifest(input, 123).unwrap();
+        assert_eq!(first, second);
+
+        let mut changed = manifest("/manifests/note/v1");
+        changed.package_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        assert!(matches!(
+            store.install_manifest(changed, 123),
+            Err(StoreError::Conflict(_))
+        ));
     }
 
     #[test]
     fn driver_identity_and_credentials_use_paths() {
         let mut store = Store::memory().unwrap();
         let mut input = manifest("/manifests/note/v1");
-        input.driver = Some("note-driver".into());
-        store.create_manifest(input).unwrap();
+        let service_account = "/manifests/note/v1/service-accounts/driver";
+        input.rbac.service_accounts.push(ServiceAccountDefinition {
+            path: service_account.into(),
+            name: "note-driver".into(),
+        });
+        input.driver = Some(DriverDefinition {
+            path: "/manifests/note/v1/driver".into(),
+            runtime: DriverRuntime::Process,
+            entrypoint: "./driver/bin/note".into(),
+            service_account: service_account.into(),
+            args: Vec::new(),
+            restart: RestartPolicy::OnFailure,
+        });
+        store.install_manifest(input, 123).unwrap();
 
         let driver = store
             .driver_for_manifest("/manifests/note/v1")
             .unwrap()
             .unwrap();
-        assert_eq!(driver.path, "/drivers/note");
+        assert_eq!(driver.path, "/manifests/note/v1/driver");
         let driver = store.start_driver(&driver.path).unwrap();
         let credential = store.issue_driver_credential(&driver.path).unwrap();
         assert!(credential
             .path
-            .starts_with("/drivers/note/service-account/credentials/"));
+            .starts_with("/manifests/note/v1/service-accounts/driver/credentials/"));
 
         let authenticated = store.authenticate(&credential.token).unwrap();
-        assert_eq!(authenticated.subject.path, "/drivers/note/service-account");
-        assert_eq!(authenticated.driver_path.as_deref(), Some("/drivers/note"));
+        assert_eq!(
+            authenticated.subject.path,
+            "/manifests/note/v1/service-accounts/driver"
+        );
+        assert_eq!(
+            authenticated.driver_path.as_deref(),
+            Some("/manifests/note/v1/driver")
+        );
     }
 
     #[test]
@@ -2443,6 +3943,19 @@ mod tests {
     #[test]
     fn links_accept_identity_and_rbac_objects_as_endpoints() {
         let mut store = Store::memory().unwrap();
+        let mut input = manifest("/manifests/security/v1");
+        input.name = "security".into();
+        input.relations.push(Relation {
+            path: "/manifests/security/v1/relations/related-to".into(),
+            name: "related_to".into(),
+            role: None,
+            inverse_name: None,
+            sources: vec![ObjectSelector::default()],
+            targets: vec![ObjectSelector::default()],
+            cardinality: Cardinality::default(),
+            metadata_schema: json!({"type":"object"}),
+        });
+        store.install_manifest(input, 123).unwrap();
         let user = store
             .create_user(CreateUser {
                 path: "/users/alice".into(),
@@ -2490,7 +4003,7 @@ mod tests {
                 .create_link(CreateLink {
                     path: format!("/links/security-object-{index}"),
                     source: ObjectRef { kind, path },
-                    relation: "related_to".into(),
+                    relation_path: "/manifests/security/v1/relations/related-to".into(),
                     target: ObjectRef {
                         kind: ObjectKind::Role,
                         path: role.path.clone(),
@@ -2500,5 +4013,88 @@ mod tests {
                 .unwrap();
             assert_eq!(store.get_link(&link.path).unwrap(), link);
         }
+    }
+
+    #[test]
+    fn run_relationships_are_projected_and_action_input_is_validated() {
+        let mut store = Store::memory().unwrap();
+        let manifest_path = "/manifests/note/v1";
+        let driver_path = format!("{manifest_path}/driver");
+        let action_path = format!("{manifest_path}/actions/render");
+        let mut input = manifest(manifest_path);
+        input.actions.push(Action {
+            path: action_path.clone(),
+            name: "render".into(),
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["body"],
+                "properties": {"body": {"type": "string"}}
+            }),
+            output_schema: json!({"type":"object"}),
+        });
+        input.driver = Some(DriverDefinition {
+            path: driver_path.clone(),
+            runtime: DriverRuntime::Process,
+            entrypoint: "./driver/bin/note".into(),
+            service_account: format!("{manifest_path}/service-accounts/driver"),
+            args: Vec::new(),
+            restart: RestartPolicy::OnFailure,
+        });
+        input.rbac.service_accounts.push(ServiceAccountDefinition {
+            path: format!("{manifest_path}/service-accounts/driver"),
+            name: "note-driver".into(),
+        });
+        store.install_manifest(input, 123).unwrap();
+
+        let resource_path = "/notes/first";
+        store
+            .create_resource(CreateResource {
+                path: resource_path.into(),
+                manifest: manifest_path.into(),
+                name: "first".into(),
+                spec: json!({}),
+                links: Vec::new(),
+            })
+            .unwrap();
+        let request_id = Uuid::new_v4();
+        let run_path = format!("{resource_path}/runs/{request_id}");
+        let run = store
+            .enqueue_run(CreateRun {
+                path: run_path.clone(),
+                request_id,
+                resource: resource_path.into(),
+                action: action_path.clone(),
+                input: json!({"body":"hello"}),
+                links: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(run.path, run_path);
+        let projection: (String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT resource_path,action_path,driver_path FROM run_relation_index WHERE run_path=?",
+                [&run.path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            projection,
+            (resource_path.into(), action_path.clone(), driver_path)
+        );
+
+        let invalid_request_id = Uuid::new_v4();
+        let invalid_run_path = format!("{resource_path}/runs/{invalid_request_id}");
+        assert!(matches!(
+            store.enqueue_run(CreateRun {
+                path: invalid_run_path,
+                request_id: invalid_request_id,
+                resource: resource_path.into(),
+                action: action_path,
+                input: json!({"body": 42}),
+                links: Vec::new(),
+            }),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }

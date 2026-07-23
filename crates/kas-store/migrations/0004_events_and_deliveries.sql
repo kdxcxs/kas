@@ -38,13 +38,3 @@ CREATE TABLE driver_deliveries (
 
 CREATE INDEX driver_deliveries_replay
 ON driver_deliveries(driver_id,generation,status,created_at,id);
-
-INSERT INTO roles(id,name,description,rules_json,managed_by,created_at,updated_at)
-SELECT d.id,'system:driver-role:' || d.id,'Driver runtime access',
-       '[{"resources":["drivers"],"verbs":["get","patch"]},{"resources":["drivers/connect","drivers/claim"],"verbs":["create"]},{"resources":["resources/status","runs/result"],"verbs":["update"]}]',
-       'system',d.created_at,d.updated_at
-FROM drivers d;
-
-UPDATE role_bindings
-SET role_id=substr(name,length('system:driver:')+1)
-WHERE managed_by='system' AND name LIKE 'system:driver:%';

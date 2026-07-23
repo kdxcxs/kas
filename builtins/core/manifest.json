@@ -1,0 +1,156 @@
+{
+  "path": "/manifests/system/core",
+  "name": "core",
+  "version": 1,
+  "description": "KAS core object relationships",
+  "resource_schema": {
+    "not": {}
+  },
+  "actions": [],
+  "relations": [
+    {
+      "path": "./relations/manifest-member",
+      "name": "manifest_member",
+      "role": "manifest_member",
+      "sources": [
+        {
+          "kind": "manifest"
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "action",
+            "relation",
+            "driver",
+            "service_account",
+            "role",
+            "role_binding"
+          ]
+        }
+      ],
+      "cardinality": {},
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/resource-manifest",
+      "name": "resource_manifest",
+      "role": "resource_manifest",
+      "sources": [
+        {
+          "kind": "resource"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "manifest"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/run-resource",
+      "name": "run_resource",
+      "role": "run_resource",
+      "sources": [
+        {
+          "kind": "run"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "resource"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/run-action",
+      "name": "run_action",
+      "role": "run_action",
+      "sources": [
+        {
+          "kind": "run"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "action"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/run-driver",
+      "name": "run_driver",
+      "role": "run_driver",
+      "sources": [
+        {
+          "kind": "run"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "driver"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/driver-service-account",
+      "name": "driver_service_account",
+      "role": "driver_service_account",
+      "sources": [
+        {
+          "kind": "driver"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "service_account"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1,
+        "max_sources_per_target": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  ],
+  "driver": null,
+  "rbac": {
+    "service_accounts": [],
+    "roles": [],
+    "role_bindings": []
+  }
+}

@@ -175,8 +175,3 @@ CREATE TABLE driver_deliveries (
 
 CREATE INDEX driver_deliveries_replay
 ON driver_deliveries(driver_path,generation,status,created_at,id);
-
-INSERT INTO roles(id,name,description,rules_json,managed_by,created_at,updated_at) VALUES
-('/roles/system/admin','system:admin','Full system access','[{"resources":["*"],"verbs":["*"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-('/roles/system/editor','system:editor','Manage business objects','[{"resources":["manifests","resources/*","drivers","runs","links"],"verbs":["get","list","create","update","patch","delete","watch"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-('/roles/system/viewer','system:viewer','Read business objects','[{"resources":["manifests","resources/*","drivers","runs","links"],"verbs":["get","list","watch"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'));

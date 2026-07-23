@@ -1,0 +1,135 @@
+{
+  "path": "/manifests/system/auth",
+  "name": "auth",
+  "version": 1,
+  "description": "KAS authorization relationships and default roles",
+  "resource_schema": {
+    "not": {}
+  },
+  "actions": [],
+  "relations": [
+    {
+      "path": "./relations/role-binding-role",
+      "name": "role_binding_role",
+      "role": "role_binding_role",
+      "sources": [
+        {
+          "kind": "role_binding"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "role"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/role-binding-subject",
+      "name": "role_binding_subject",
+      "role": "role_binding_subject",
+      "sources": [
+        {
+          "kind": "role_binding"
+        }
+      ],
+      "targets": [
+        {
+          "kind": [
+            "user",
+            "service_account"
+          ]
+        }
+      ],
+      "cardinality": {},
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  ],
+  "driver": null,
+  "rbac": {
+    "service_accounts": [],
+    "roles": [
+      {
+        "path": "./roles/admin",
+        "name": "system:admin",
+        "description": "Full system access",
+        "system_role": "admin",
+        "rules": [
+          {
+            "resources": [
+              "*"
+            ],
+            "verbs": [
+              "*"
+            ]
+          }
+        ]
+      },
+      {
+        "path": "./roles/editor",
+        "name": "system:editor",
+        "description": "Manage business objects",
+        "system_role": "editor",
+        "rules": [
+          {
+            "resources": [
+              "manifests",
+              "actions",
+              "relations",
+              "resources/*",
+              "drivers",
+              "runs",
+              "links"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "update",
+              "patch",
+              "delete",
+              "watch",
+              "link",
+              "invoke",
+              "use"
+            ]
+          }
+        ]
+      },
+      {
+        "path": "./roles/viewer",
+        "name": "system:viewer",
+        "description": "Read business objects",
+        "system_role": "viewer",
+        "rules": [
+          {
+            "resources": [
+              "manifests",
+              "actions",
+              "relations",
+              "resources/*",
+              "drivers",
+              "runs",
+              "links"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "watch"
+            ]
+          }
+        ]
+      }
+    ],
+    "role_bindings": []
+  }
+}

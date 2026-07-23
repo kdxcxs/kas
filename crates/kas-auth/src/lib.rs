@@ -5,8 +5,28 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use uuid::Uuid;
 
-pub const SYSTEM_ADMIN_ROLE: &str = "/roles/system/admin";
-pub const SYSTEM_DRIVER_ROLE: &str = "/roles/system/driver";
+pub mod resources {
+    pub const MANIFESTS: &str = "manifests";
+    pub const ACTIONS: &str = "actions";
+    pub const RELATIONS: &str = "relations";
+    pub const RESOURCES: &str = "resources";
+    pub const DRIVERS: &str = "drivers";
+    pub const RUNS: &str = "runs";
+    pub const LINKS: &str = "links";
+}
+
+pub mod verbs {
+    pub const GET: &str = "get";
+    pub const LIST: &str = "list";
+    pub const CREATE: &str = "create";
+    pub const UPDATE: &str = "update";
+    pub const PATCH: &str = "patch";
+    pub const DELETE: &str = "delete";
+    pub const WATCH: &str = "watch";
+    pub const LINK: &str = "link";
+    pub const INVOKE: &str = "invoke";
+    pub const USE: &str = "use";
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -334,6 +354,19 @@ pub fn allows(rules: &[Rule], resource: &str, verb: &str, path: Option<&str>) ->
     })
 }
 
+/// Checks permission to invoke a concrete Action object.
+pub fn allows_action_invoke(rules: &[Rule], action_path: &str) -> bool {
+    allows(rules, resources::ACTIONS, verbs::INVOKE, Some(action_path))
+}
+
+/// Checks permission to create a Link using a concrete Relation object.
+///
+/// Endpoint `link` permissions are intentionally separate and must also be
+/// checked by the caller.
+pub fn allows_relation_use(rules: &[Rule], relation_path: &str) -> bool {
+    allows(rules, resources::RELATIONS, verbs::USE, Some(relation_path))
+}
+
 pub fn rules_are_subset(proposed: &[Rule], caller: &[Rule]) -> bool {
     proposed.iter().all(|proposed_rule| {
         if proposed_rule
@@ -635,5 +668,38 @@ mod tests {
         assert!(token.starts_with("kas_"));
         assert_ne!(token_hash(&token), token);
         assert_eq!(token_hash(&token), token_hash(&token));
+    }
+
+    #[test]
+    fn action_invocation_and_relation_use_are_path_scoped() {
+        let rules = vec![
+            Rule {
+                resources: vec![resources::ACTIONS.into()],
+                verbs: vec![verbs::INVOKE.into()],
+                paths: vec!["/manifests/agent/actions/*".into()],
+            },
+            Rule {
+                resources: vec![resources::RELATIONS.into()],
+                verbs: vec![verbs::USE.into()],
+                paths: vec!["/manifests/agent/relations/**".into()],
+            },
+        ];
+
+        assert!(allows_action_invoke(
+            &rules,
+            "/manifests/agent/actions/message"
+        ));
+        assert!(!allows_action_invoke(
+            &rules,
+            "/manifests/message/actions/send"
+        ));
+        assert!(allows_relation_use(
+            &rules,
+            "/manifests/agent/relations/has-thread"
+        ));
+        assert!(!allows_relation_use(
+            &rules,
+            "/relations/system/resource-manifest"
+        ));
     }
 }
