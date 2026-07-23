@@ -19,7 +19,7 @@ pub struct Manifest {
     pub description: String,
     pub resource_schema: Value,
     pub actions: Vec<Action>,
-    pub driver: String,
+    pub driver: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -91,12 +91,22 @@ pub struct Run {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Event {
-    pub id: Uuid,
-    pub run_id: Uuid,
     pub sequence: u64,
-    pub kind: String,
-    pub data: Value,
+    pub event_type: EventType,
+    pub object_kind: ObjectKind,
+    pub object_id: Uuid,
+    pub manifest_id: Option<Uuid>,
+    pub revision: Option<u64>,
+    pub value: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    Created,
+    Updated,
+    Deleted,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,7 +116,7 @@ pub enum ObjectKind {
     Resource,
     Driver,
     Run,
-    Event,
+    Link,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,7 +142,7 @@ pub struct CreateManifest {
     pub description: String,
     pub resource_schema: Value,
     pub actions: Vec<Action>,
-    pub driver: String,
+    pub driver: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +150,96 @@ pub struct CreateResource {
     pub manifest_id: Uuid,
     pub name: String,
     pub spec: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateResource {
+    pub expected_revision: u64,
+    pub spec: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateLink {
+    pub source: ObjectRef,
+    pub relation: String,
+    pub target: ObjectRef,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinkFilter {
+    pub source: Option<ObjectRef>,
+    pub relation: Option<String>,
+    pub target: Option<ObjectRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlannedResource {
+    pub id: Uuid,
+    pub manifest_id: Uuid,
+    pub name: String,
+    pub spec: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlannedLink {
+    pub id: Uuid,
+    pub source: ObjectRef,
+    pub relation: String,
+    pub target: ObjectRef,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum Mutation {
+    CreateResource {
+        resource: PlannedResource,
+    },
+    UpdateResource {
+        resource_id: Uuid,
+        expected_revision: u64,
+        spec: Value,
+    },
+    CreateLink {
+        link: PlannedLink,
+    },
+    UpdateResourceStatus {
+        resource_id: Uuid,
+        observed_revision: u64,
+        status: Value,
+    },
+    CompleteRun {
+        run_id: Uuid,
+        result: RunResult,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DriverExecution {
+    pub output: Value,
+    #[serde(default)]
+    pub mutations: Vec<Mutation>,
+}
+
+impl From<Value> for DriverExecution {
+    fn from(output: Value) -> Self {
+        Self {
+            output,
+            mutations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventFilter {
+    pub object_kind: Option<ObjectKind>,
+    pub object_id: Option<Uuid>,
+    pub manifest_id: Option<Uuid>,
+    pub after_sequence: Option<u64>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +277,26 @@ pub enum RunResult {
 pub enum DriverWork {
     Reconcile { resource: Resource, revision: u64 },
     Run { run: Box<Run>, resource: Resource },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    Pending,
+    Acked,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DriverDelivery {
+    pub id: Uuid,
+    pub driver_id: Uuid,
+    pub generation: u64,
+    pub work: DriverWork,
+    pub status: DeliveryStatus,
+    pub created_at: DateTime<Utc>,
+    pub acked_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

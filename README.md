@@ -32,9 +32,11 @@ Driver 是系统与真实运行环境之间的适配层。
 
 ## Event
 
-Run 执行过程中产生的事实记录。
+平台自动记录的对象生命周期变化。
 
-例如开始执行、产生中间结果、完成或失败。
+Resource、Link 和 Run 被创建、更新或删除时，平台会在同一事务中写入对应的
+`created`、`updated` 或 `deleted` Event。Event 使用全局递增 cursor，
+用于查询历史和断线后继续 Watch；业务代码不能主动创建自定义 Event。
 
 ## Link
 
@@ -56,15 +58,18 @@ Manifest
 
 Resource
   └─ 发起 Action → Run
-                    ├─ 产生 Event
                     └─ 通过 Link 关联输入、输出和其他对象
+
+Resource、Link、Run 的变化
+  └─ 由平台自动记录为 Event
 ```
 
 这些概念只构成通用底层。具体业务对象和业务流程后续再定义。
 
 ## MVP 约束
 
-- 每个 Manifest 在创建时同时创建一个稳定的 singleton Driver。
+- Manifest 可以是被动类型，此时 `driver` 为空且不会创建 Driver。
+- 声明了 Action 的 Manifest 必须拥有一个稳定的 singleton Driver。
 - 同一 Manifest 的所有 Resource 共享这个 Driver 进程。
 - Driver 重启不会创建新的逻辑 Driver，但会递增 `generation`。
 - Run 记录执行它的 Driver 和 generation，旧进程不能完成新一代 Run。
@@ -108,6 +113,48 @@ cargo run -p kas-api
 
 每个 Driver 自动拥有一个 ServiceAccount。Driver 每次启动都需要签发绑定当前 generation 的短期 token，旧 token 会被撤销。
 
+## 更新、关系与事件
+
+Resource spec 可以通过 `PATCH /resources/{id}` 更新，请求必须携带
+`expected_revision`。更新成功后 revision 递增；旧 revision 会收到冲突响应。
+archive、restore 等业务状态保留在各自 Resource spec 中，不是平台字段。
+
+Link API 支持创建、读取、按 source/relation/target 过滤和删除。Event
+是 Watch 使用的内部持久化日志，只能由平台随业务对象写入自动产生，
+不提供业务创建接口。
+
+## Driver WebSocket
+
+Driver 使用 `/drivers/{id}/connect?generation=N` 建立带 Bearer Token 的
+WebSocket，不再依赖 claim 轮询。控制面主动推送 reconcile、Run 和 stop，
+Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一条 `mutation`
+消息。每次投递都持久化；
+同 generation 断线会重放，generation 更新会完成旧投递并把未完成 Run
+重新排队。
+
+reconcile 的 mutation 包含 `update_resource_status`；Run 的 mutation
+可以包含有确定 UUID 的 Resource、Resource 更新和 Link 操作，
+并以 `complete_run` 结束。KAS 返回 `mutation_result`，只有 `committed`
+才表示整组写入成功。KAS 先按 Driver ServiceAccount 的精细 RBAC 验证，
+再在一个 SQLite 事务中同时提交全部操作和完成 delivery；任一操作失败时
+整组回滚。跨 Manifest fanout 需要显式给 Driver ServiceAccount
+绑定诸如 `resources/message:create` 和 `links:create` 的 Role。
+
+现有 REST 写接口继续保留；统一的 `mutation` 入口只存在于 Driver
+WebSocket 协议中，不提供对应的 HTTP endpoint。
+
+## Watch
+
+Watch 直接复用 Driver 的 `/drivers/{driver_id}/connect` WebSocket，
+不提供面向普通客户端的独立连接。Driver 使用 `watch`、`unwatch`，
+控制面使用 `watch_ready`、`created`、`updated`、`deleted`、
+`watch_closed` 和 `error`。消息类型直接表达生命周期变化，不再额外包含
+`change` 或 `operation`。
+
+Watch 不发送 snapshot。Driver 使用 `hello` 中的 Event cursor 建立 Watch，
+并在重连后从最后处理的 cursor 继续。权限使用
+`resources/{manifest}:watch`、`links:watch` 和 `runs:watch`。
+
 ## 测试
 
 运行全部测试：
@@ -122,7 +169,7 @@ cargo test --workspace
 创建 Manifest 和 Resource
   → 启动 singleton Driver
   → 创建 Run
-  → Driver ready 并领取 Run
+  → Driver 通过 WebSocket ready 并接收 Run
   → Driver reconcile Resource 并上报 status
   → Driver 读取 Resource 并执行 echo Action
   → Driver 上报结果后继续运行
@@ -140,4 +187,6 @@ KAS_DRIVER_TOKEN=<driver-token> \
 cargo run -p kas-test-driver
 ```
 
-入口只需要构造具体 Driver 并调用 `DriverRuntime::run()`。Runtime 会持续执行 reconciliation、领取 Run 和上报结果，不会在完成一条 Run 后退出。
+入口只需要构造具体 Driver 并调用 `DriverRuntime::run()`。Runtime 会持续维护
+WebSocket、执行 reconciliation、接收 Run 和上报结果，不会在完成一条 Run
+后退出。

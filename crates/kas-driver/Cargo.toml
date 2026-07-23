@@ -6,9 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+futures-util.workspace = true
 kas-core.workspace = true
-reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 uuid.workspace = true

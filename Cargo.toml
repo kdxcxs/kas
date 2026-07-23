@@ -18,7 +18,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 kas-core = { path = "crates/kas-core" }
 kas-auth = { path = "crates/kas-auth" }
@@ -31,5 +31,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.0"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }

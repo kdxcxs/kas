@@ -124,11 +124,31 @@ pub fn token_hash(token: &str) -> String {
 
 pub fn allows(rules: &[Rule], resource: &str, verb: &str) -> bool {
     rules.iter().any(|rule| {
-        (rule.resources.iter().any(|value| value == "*")
-            || rule.resources.iter().any(|value| value == resource))
+        rule.resources
+            .iter()
+            .any(|value| resource_matches(value, resource))
             && (rule.verbs.iter().any(|value| value == "*")
                 || rule.verbs.iter().any(|value| value == verb))
     })
+}
+
+fn resource_matches(pattern: &str, resource: &str) -> bool {
+    if pattern == "*" || pattern == resource {
+        return true;
+    }
+
+    // A trailing wildcard grants access only to descendants on a path-segment
+    // boundary. For example, `resources/chat/*` matches
+    // `resources/chat/messages`, while `resources/chat` and
+    // `resources/chatter/messages` remain distinct resources.
+    pattern
+        .strip_suffix("/*")
+        .filter(|prefix| !prefix.is_empty())
+        .is_some_and(|prefix| {
+            resource
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+        })
 }
 
 #[cfg(test)]
@@ -145,6 +165,58 @@ mod tests {
         assert!(!allows(&rules, "resources", "create"));
         assert!(!allows(&rules, "runs", "get"));
         assert!(!allows(&[], "resources", "get"));
+    }
+
+    #[test]
+    fn watch_permissions_can_target_an_exact_manifest() {
+        let rules = vec![Rule {
+            resources: vec!["resources/conversation".into()],
+            verbs: vec!["get".into(), "list".into(), "watch".into()],
+        }];
+
+        assert!(allows(&rules, "resources/conversation", "get"));
+        assert!(allows(&rules, "resources/conversation", "list"));
+        assert!(allows(&rules, "resources/conversation", "watch"));
+        assert!(!allows(&rules, "resources/conversation", "create"));
+        assert!(!allows(&rules, "resources/task", "watch"));
+    }
+
+    #[test]
+    fn resource_wildcards_respect_path_boundaries() {
+        let bare_resources = vec![Rule {
+            resources: vec!["resources".into()],
+            verbs: vec!["*".into()],
+        }];
+        assert!(allows(&bare_resources, "resources", "get"));
+        assert!(!allows(&bare_resources, "resources/conversation", "get"));
+
+        let resource_tree = vec![Rule {
+            resources: vec!["resources/conversation/*".into()],
+            verbs: vec!["watch".into()],
+        }];
+        assert!(!allows(&resource_tree, "resources/conversation", "watch"));
+        assert!(!allows(
+            &resource_tree,
+            "resources/conversations/message",
+            "watch"
+        ));
+        assert!(!allows(
+            &resource_tree,
+            "resources/conversation-extra/message",
+            "watch"
+        ));
+        assert!(allows(
+            &resource_tree,
+            "resources/conversation/message",
+            "watch"
+        ));
+
+        let global = vec![Rule {
+            resources: vec!["*".into()],
+            verbs: vec!["*".into()],
+        }];
+        assert!(allows(&global, "resources/conversation", "watch"));
+        assert!(allows(&global, "resources", "update"));
     }
 
     #[test]
