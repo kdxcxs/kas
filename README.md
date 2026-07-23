@@ -66,6 +66,22 @@ Resource、Link、Run 的变化
 
 这些概念只构成通用底层。具体业务对象和业务流程后续再定义。
 
+## Path 身份
+
+所有公开持久对象使用不可变的绝对 `path` 作为身份和引用，不再向 API、
+Driver、Link、Event 或 RBAC 暴露对象 UUID。例如：
+
+```text
+/manifests/computer
+/computers/team-a/computer-01
+/computers/team-a/computer-01/runs/{request-id}
+/service-accounts/team-a/agent-01
+/roles/team-a/computer-reader
+```
+
+Path 创建后不能重命名，禁止空段、`.`、`..`、重复 `/` 和尾部 `/`。
+`request_id`、`delivery_id`、`watch_id` 等协议关联 ID 仍使用 UUID。
+
 ## MVP 约束
 
 - Manifest 可以是被动类型，此时 `driver` 为空且不会创建 Driver。
@@ -107,7 +123,25 @@ cargo run -p kas-api
 
 ## 权限
 
-权限规则直接保存在 SQLite 中，不从配置文件加载。当前模型包含 User、ServiceAccount、Role、RoleBinding 和 Credential。所有 API 默认拒绝，`/health` 除外。
+权限规则直接保存在 SQLite 中，不从配置文件加载。当前模型包含 User、
+ServiceAccount、Role、RoleBinding 和 Credential。所有 API 默认拒绝，
+`/health` 除外。
+
+Rule 同时约束资源类型、verb 和实例 path：
+
+```json
+{
+  "resources": ["resources/computer"],
+  "verbs": ["get", "patch", "watch"],
+  "paths": ["/computers/team-a/**"]
+}
+```
+
+Path pattern 支持精确匹配、单段 `*` 和递归 `**`；省略 `paths` 表示该类型的
+全部实例。List 会逐对象过滤，Watch 创建时验证 selector 范围且推送前再次
+检查具体对象。创建或修改 Role 时，除非拥有 `roles:escalate`，其
+resource、verb 和 path 都不能超过调用者现有权限；绑定 Role 同样要求调用者
+拥有该 Role 的权限或 `bind` 权限。
 
 内置的 `system:admin`、`system:editor`、`system:viewer`、`system:driver` Role 以及系统自动创建的 Binding 不允许通过 API 修改或删除。用户创建的 Role 和 RoleBinding 可以由管理员维护。
 
@@ -115,7 +149,7 @@ cargo run -p kas-api
 
 ## 更新、关系与事件
 
-Resource spec 可以通过 `PATCH /resources/{id}` 更新，请求必须携带
+Resource spec 可以通过 `PATCH /resources/by-path?path=...` 更新，请求必须携带
 `expected_revision`。更新成功后 revision 递增；旧 revision 会收到冲突响应。
 archive、restore 等业务状态保留在各自 Resource spec 中，不是平台字段。
 
@@ -125,7 +159,7 @@ Link API 支持创建、读取、按 source/relation/target 过滤和删除。Ev
 
 ## Driver WebSocket
 
-Driver 使用 `/drivers/{id}/connect?generation=N` 建立带 Bearer Token 的
+Driver 使用 `/drivers/connect?path=...&generation=N` 建立带 Bearer Token 的
 WebSocket，不再依赖 claim 轮询。控制面主动推送 reconcile、Run 和 stop，
 Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一条 `mutation`
 消息。每次投递都持久化；
@@ -133,7 +167,7 @@ Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一
 重新排队。
 
 reconcile 的 mutation 包含 `update_resource_status`；Run 的 mutation
-可以包含有确定 UUID 的 Resource、Resource 更新和 Link 操作，
+可以包含有确定 path 的 Resource、Resource 更新和 Link 操作，
 并以 `complete_run` 结束。KAS 返回 `mutation_result`，只有 `committed`
 才表示整组写入成功。KAS 先按 Driver ServiceAccount 的精细 RBAC 验证，
 再在一个 SQLite 事务中同时提交全部操作和完成 delivery；任一操作失败时
@@ -145,7 +179,7 @@ WebSocket 协议中，不提供对应的 HTTP endpoint。
 
 ## Watch
 
-Watch 直接复用 Driver 的 `/drivers/{driver_id}/connect` WebSocket，
+Watch 直接复用 Driver 的 `/drivers/connect?path=...` WebSocket，
 不提供面向普通客户端的独立连接。Driver 使用 `watch`、`unwatch`，
 控制面使用 `watch_ready`、`created`、`updated`、`deleted`、
 `watch_closed` 和 `error`。消息类型直接表达生命周期变化，不再额外包含
@@ -153,7 +187,7 @@ Watch 直接复用 Driver 的 `/drivers/{driver_id}/connect` WebSocket，
 
 Watch 不发送 snapshot。Driver 使用 `hello` 中的 Event cursor 建立 Watch，
 并在重连后从最后处理的 cursor 继续。权限使用
-`resources/{manifest}:watch`、`links:watch` 和 `runs:watch`。
+类型权限和对应的实例 path pattern。
 
 ## 测试
 
@@ -181,7 +215,7 @@ cargo test --workspace
 
 ```bash
 KAS_API=http://127.0.0.1:3000 \
-KAS_DRIVER_ID=<driver-id> \
+KAS_DRIVER_PATH=<driver-path> \
 KAS_DRIVER_GENERATION=<generation> \
 KAS_DRIVER_TOKEN=<driver-token> \
 cargo run -p kas-test-driver

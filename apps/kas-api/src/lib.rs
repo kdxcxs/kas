@@ -7,7 +7,7 @@ use std::{
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Path, Query, Request, State, WebSocketUpgrade,
+        Query, Request, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -17,7 +17,7 @@ use axum::{
 };
 use kas_auth::{
     AuthContext, CreateRole, CreateRoleBinding, CreateServiceAccount, CreateUser, IssuedCredential,
-    Role, RoleBinding, ServiceAccount, User,
+    Role, RoleBinding, Rule, ServiceAccount, User,
 };
 use kas_core::{
     CreateLink, CreateManifest, CreateResource, CreateRun, Driver, DriverReady, DriverWork, Event,
@@ -35,7 +35,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct AppState {
     store: Arc<Mutex<Store>>,
-    driver_connections: Arc<Mutex<HashMap<Uuid, Uuid>>>,
+    driver_connections: Arc<Mutex<HashMap<String, Uuid>>>,
 }
 
 pub fn app(store: Store) -> Router {
@@ -45,38 +45,38 @@ pub fn app(store: Store) -> Router {
     };
     let protected = Router::new()
         .route("/manifests", get(list_manifests).post(create_manifest))
-        .route("/manifests/{id}/driver", get(get_manifest_driver))
+        .route("/manifests/driver", get(get_manifest_driver))
         .route("/resources", get(list_resources).post(create_resource))
         .route(
-            "/resources/{id}",
+            "/resources/by-path",
             get(get_resource).patch(update_resource_spec),
         )
         .route(
-            "/resources/{id}/status",
+            "/resources/status",
             axum::routing::put(update_resource_status),
         )
-        .route("/drivers/{id}", get(get_driver).patch(update_driver))
-        .route("/drivers/{id}/claim", post(claim_work))
-        .route("/drivers/{id}/connect", get(connect_driver))
-        .route("/drivers/{id}/credentials", post(issue_driver_credential))
+        .route("/drivers/by-path", get(get_driver).patch(update_driver))
+        .route("/drivers/claim", post(claim_work))
+        .route("/drivers/connect", get(connect_driver))
+        .route("/drivers/credentials", post(issue_driver_credential))
         .route("/runs", post(enqueue_run))
-        .route("/runs/{id}", get(get_run))
-        .route("/runs/{id}/result", axum::routing::put(finish_run))
+        .route("/runs/by-path", get(get_run))
+        .route("/runs/result", axum::routing::put(finish_run))
         .route("/links", get(list_links).post(create_link))
-        .route("/links/{id}", get(get_link).delete(delete_link))
+        .route("/links/by-path", get(get_link).delete(delete_link))
         .route("/users", get(list_users).post(create_user))
-        .route("/users/{id}/credentials", post(issue_user_credential))
+        .route("/users/credentials", post(issue_user_credential))
         .route(
             "/service-accounts",
             get(list_service_accounts).post(create_service_account),
         )
         .route(
-            "/service-accounts/{id}/credentials",
+            "/service-accounts/credentials",
             post(issue_service_account_credential),
         )
         .route("/roles", get(list_roles).post(create_role))
         .route(
-            "/roles/{id}",
+            "/roles/by-path",
             axum::routing::patch(update_role).delete(delete_role),
         )
         .route(
@@ -84,7 +84,7 @@ pub fn app(store: Store) -> Router {
             get(list_role_bindings).post(create_role_binding),
         )
         .route(
-            "/role-bindings/{id}",
+            "/role-bindings/by-path",
             axum::routing::delete(delete_role_binding),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -104,6 +104,11 @@ async fn health() -> Json<Value> {
 struct ActiveWatch {
     cursor: u64,
     selectors: Vec<WatchSelector>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObjectPathQuery {
+    path: String,
 }
 
 async fn authenticate_request(
@@ -136,7 +141,7 @@ async fn create_manifest(
     headers: HeaderMap,
     Json(input): Json<CreateManifest>,
 ) -> ApiResult<(StatusCode, Json<Manifest>)> {
-    require(&state, &headers, "manifests", "create")?;
+    require(&state, &headers, "manifests", "create", Some(&input.path))?;
     let manifest = lock(&state)?.create_manifest(input)?;
     Ok((StatusCode::CREATED, Json(manifest)))
 }
@@ -145,17 +150,22 @@ async fn list_manifests(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Manifest>>> {
-    require(&state, &headers, "manifests", "list")?;
-    Ok(Json(lock(&state)?.list_manifests()?))
+    let auth = authenticate(&state, &headers)?;
+    let manifests = lock(&state)?
+        .list_manifests()?
+        .into_iter()
+        .filter(|manifest| kas_auth::allows(&auth.rules, "manifests", "list", Some(&manifest.path)))
+        .collect();
+    Ok(Json(manifests))
 }
 
 async fn get_manifest_driver(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<Json<Option<Driver>>> {
-    require(&state, &headers, "drivers", "get")?;
-    Ok(Json(lock(&state)?.driver_for_manifest(id)?))
+    require(&state, &headers, "manifests", "get", Some(&query.path))?;
+    Ok(Json(lock(&state)?.driver_for_manifest(&query.path)?))
 }
 
 async fn create_resource(
@@ -163,7 +173,14 @@ async fn create_resource(
     headers: HeaderMap,
     Json(input): Json<CreateResource>,
 ) -> ApiResult<(StatusCode, Json<Resource>)> {
-    require(&state, &headers, "resources", "create")?;
+    let manifest = lock(&state)?.get_manifest(&input.manifest_path)?;
+    require(
+        &state,
+        &headers,
+        &format!("resources/{}", manifest.name),
+        "create",
+        Some(&input.path),
+    )?;
     let resource = lock(&state)?.create_resource(input)?;
     Ok((StatusCode::CREATED, Json(resource)))
 }
@@ -172,52 +189,93 @@ async fn list_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Resource>>> {
-    require(&state, &headers, "resources", "list")?;
-    Ok(Json(lock(&state)?.list_resources()?))
+    let auth = authenticate(&state, &headers)?;
+    let store = lock(&state)?;
+    let resources = store
+        .list_resources()?
+        .into_iter()
+        .filter(|resource| {
+            store
+                .get_manifest(&resource.manifest_path)
+                .is_ok_and(|manifest| {
+                    kas_auth::allows(
+                        &auth.rules,
+                        &format!("resources/{}", manifest.name),
+                        "list",
+                        Some(&resource.path),
+                    )
+                })
+        })
+        .collect();
+    Ok(Json(resources))
 }
 
 async fn get_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<Json<Resource>> {
-    require(&state, &headers, "resources", "get")?;
-    Ok(Json(lock(&state)?.get_resource(id)?))
+    let resource = lock(&state)?.get_resource(&query.path)?;
+    let manifest = lock(&state)?.get_manifest(&resource.manifest_path)?;
+    require(
+        &state,
+        &headers,
+        &format!("resources/{}", manifest.name),
+        "get",
+        Some(&resource.path),
+    )?;
+    Ok(Json(resource))
 }
 
 async fn update_resource_spec(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
     Json(input): Json<UpdateResource>,
 ) -> ApiResult<Json<Resource>> {
-    require(&state, &headers, "resources", "patch")?;
-    Ok(Json(lock(&state)?.update_resource(id, input)?))
+    let resource = lock(&state)?.get_resource(&query.path)?;
+    let manifest = lock(&state)?.get_manifest(&resource.manifest_path)?;
+    require(
+        &state,
+        &headers,
+        &format!("resources/{}", manifest.name),
+        "patch",
+        Some(&resource.path),
+    )?;
+    Ok(Json(lock(&state)?.update_resource(&query.path, input)?))
 }
 
 async fn update_resource_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
     Json(input): Json<UpdateResourceStatus>,
 ) -> ApiResult<Json<Resource>> {
-    let auth = require(&state, &headers, "resources/status", "update")?;
-    require_driver_ownership(&auth, input.driver_id, input.driver_generation)?;
-    Ok(Json(lock(&state)?.update_resource_status(id, input)?))
+    let auth = require(
+        &state,
+        &headers,
+        "resources/status",
+        "update",
+        Some(&query.path),
+    )?;
+    require_driver_ownership(&auth, &input.driver_path, input.driver_generation)?;
+    Ok(Json(
+        lock(&state)?.update_resource_status(&query.path, input)?,
+    ))
 }
 
 async fn get_driver(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<Json<Driver>> {
-    let auth = require(&state, &headers, "drivers", "get")?;
-    if let Some(driver_id) = auth.driver_id {
-        if driver_id != id {
+    let auth = require(&state, &headers, "drivers", "get", Some(&query.path))?;
+    if let Some(driver_path) = auth.driver_path.as_deref() {
+        if driver_path != query.path {
             return Err(forbidden());
         }
     }
-    Ok(Json(lock(&state)?.get_driver(id)?))
+    Ok(Json(lock(&state)?.get_driver(&query.path)?))
 }
 
 #[derive(Deserialize)]
@@ -244,12 +302,12 @@ enum DriverUpdate {
 async fn update_driver(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
     Json(input): Json<DriverUpdate>,
 ) -> ApiResult<Json<Driver>> {
-    let auth = require(&state, &headers, "drivers", "patch")?;
-    if let Some(driver_id) = auth.driver_id {
-        if driver_id != id {
+    let auth = require(&state, &headers, "drivers", "patch", Some(&query.path))?;
+    if let Some(driver_path) = auth.driver_path.as_deref() {
+        if driver_path != query.path {
             return Err(forbidden());
         }
         let generation = match &input {
@@ -258,25 +316,25 @@ async fn update_driver(
             }
             DriverUpdate::Starting | DriverUpdate::Stopping => return Err(forbidden()),
         };
-        require_driver_ownership(&auth, id, generation)?;
+        require_driver_ownership(&auth, &query.path, generation)?;
     }
     let driver = match input {
-        DriverUpdate::Starting => lock(&state)?.start_driver(id)?,
+        DriverUpdate::Starting => lock(&state)?.start_driver(&query.path)?,
         DriverUpdate::Ready {
             generation,
             process_id,
             metadata,
         } => lock(&state)?.mark_driver_ready(
-            id,
+            &query.path,
             DriverReady {
                 generation,
                 process_id,
                 metadata,
             },
         )?,
-        DriverUpdate::Stopping => lock(&state)?.stop_driver(id)?,
+        DriverUpdate::Stopping => lock(&state)?.stop_driver(&query.path)?,
         DriverUpdate::Stopped { generation } => {
-            lock(&state)?.mark_driver_stopped(id, generation)?
+            lock(&state)?.mark_driver_stopped(&query.path, generation)?
         }
     };
     Ok(Json(driver))
@@ -287,7 +345,7 @@ async fn enqueue_run(
     headers: HeaderMap,
     Json(input): Json<CreateRun>,
 ) -> ApiResult<(StatusCode, Json<Run>)> {
-    require(&state, &headers, "runs", "create")?;
+    require(&state, &headers, "runs", "create", Some(&input.path))?;
     let run = lock(&state)?.enqueue_run(input)?;
     Ok((StatusCode::ACCEPTED, Json(run)))
 }
@@ -295,25 +353,34 @@ async fn enqueue_run(
 async fn get_run(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<Json<Run>> {
-    require(&state, &headers, "runs", "get")?;
-    Ok(Json(lock(&state)?.get_run(id)?))
+    require(&state, &headers, "runs", "get", Some(&query.path))?;
+    Ok(Json(lock(&state)?.get_run(&query.path)?))
 }
 
 async fn claim_work(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
     Json(input): Json<ClaimWork>,
 ) -> ApiResult<Json<Option<DriverWork>>> {
-    let auth = require(&state, &headers, "drivers/claim", "create")?;
-    require_driver_ownership(&auth, id, input.generation)?;
-    Ok(Json(lock(&state)?.claim_driver_work(id, input.generation)?))
+    let auth = require(
+        &state,
+        &headers,
+        "drivers/claim",
+        "create",
+        Some(&query.path),
+    )?;
+    require_driver_ownership(&auth, &query.path, input.generation)?;
+    Ok(Json(
+        lock(&state)?.claim_driver_work(&query.path, input.generation)?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
 struct DriverConnectQuery {
+    path: String,
     generation: u64,
 }
 
@@ -321,12 +388,17 @@ async fn connect_driver(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
     Query(query): Query<DriverConnectQuery>,
 ) -> ApiResult<Response> {
-    let auth = require(&state, &headers, "drivers/connect", "create")?;
-    require_driver_ownership(&auth, id, query.generation)?;
-    let driver = lock(&state)?.get_driver(id)?;
+    let auth = require(
+        &state,
+        &headers,
+        "drivers/connect",
+        "create",
+        Some(&query.path),
+    )?;
+    require_driver_ownership(&auth, &query.path, query.generation)?;
+    let driver = lock(&state)?.get_driver(&query.path)?;
     if driver.generation != query.generation
         || !matches!(
             driver.state,
@@ -350,10 +422,12 @@ async fn connect_driver(
                 "connection lock poisoned".into(),
             )
         })?
-        .insert(id, connection_id);
+        .insert(query.path.clone(), connection_id);
+    let driver_path = query.path;
+    let generation = query.generation;
     Ok(ws
         .on_upgrade(move |socket| {
-            serve_driver_socket(state, auth, id, query.generation, connection_id, socket)
+            serve_driver_socket(state, auth, driver_path, generation, connection_id, socket)
         })
         .into_response())
 }
@@ -361,14 +435,14 @@ async fn connect_driver(
 async fn serve_driver_socket(
     state: AppState,
     auth: AuthContext,
-    driver_id: Uuid,
+    driver_path: String,
     generation: u64,
     connection_id: Uuid,
     mut socket: WebSocket,
 ) {
     let control_delivery = Uuid::new_v4();
     let initial_driver =
-        match lock(&state).and_then(|store| store.get_driver(driver_id).map_err(Into::into)) {
+        match lock(&state).and_then(|store| store.get_driver(&driver_path).map_err(Into::into)) {
             Ok(driver) => driver,
             Err(_) => return,
         };
@@ -400,22 +474,22 @@ async fn serve_driver_socket(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if !is_current_connection(&state, driver_id, connection_id) {
+                if !is_current_connection(&state, &driver_path, connection_id) {
                     break;
                 }
-                if push_watch_events(&state, &mut socket, &mut watches).await.is_err() {
+                if push_watch_events(&state, &auth, &mut socket, &mut watches).await.is_err() {
                     break;
                 }
-                let driver = match lock(&state).and_then(|store| store.get_driver(driver_id).map_err(Into::into)) {
+                let driver = match lock(&state).and_then(|store| store.get_driver(&driver_path).map_err(Into::into)) {
                     Ok(driver) if driver.generation == generation => driver,
                     _ => break,
                 };
                 match driver.state {
                     kas_core::DriverState::Ready if in_flight.is_none() => {
-                        let delivery = match lock(&state).and_then(|mut store| store.claim_driver_delivery(driver_id, generation).map_err(Into::into)) {
+                        let delivery = match lock(&state).and_then(|mut store| store.claim_driver_delivery(&driver_path, generation).map_err(Into::into)) {
                             Ok(delivery) => delivery,
                             Err(error) => {
-                                eprintln!("Driver {driver_id} delivery claim failed: {}", error.1);
+                                eprintln!("Driver {driver_path} delivery claim failed: {}", error.1);
                                 break;
                             }
                         };
@@ -483,7 +557,7 @@ async fn serve_driver_socket(
                 let context = DriverMessageContext {
                     state: &state,
                     auth: &auth,
-                    driver_id,
+                    driver_path: &driver_path,
                     generation,
                     control_delivery,
                     stop_delivery,
@@ -496,7 +570,7 @@ async fn serve_driver_socket(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        eprintln!("Driver {driver_id} WebSocket message failed: {}", error.1);
+                        eprintln!("Driver {driver_path} WebSocket message failed: {}", error.1);
                         let _ = socket.send(Message::Close(None)).await;
                         break;
                     }
@@ -505,8 +579,8 @@ async fn serve_driver_socket(
         }
     }
     if let Ok(mut connections) = state.driver_connections.lock() {
-        if connections.get(&driver_id) == Some(&connection_id) {
-            connections.remove(&driver_id);
+        if connections.get(&driver_path) == Some(&connection_id) {
+            connections.remove(&driver_path);
         }
     }
 }
@@ -514,7 +588,7 @@ async fn serve_driver_socket(
 struct DriverMessageContext<'a> {
     state: &'a AppState,
     auth: &'a AuthContext,
-    driver_id: Uuid,
+    driver_path: &'a str,
     generation: u64,
     control_delivery: Uuid,
     stop_delivery: Option<Uuid>,
@@ -529,7 +603,7 @@ fn handle_driver_message(
     let DriverMessageContext {
         state,
         auth,
-        driver_id,
+        driver_path,
         generation,
         control_delivery,
         stop_delivery,
@@ -540,14 +614,14 @@ fn handle_driver_message(
             process_id,
             metadata,
         } => {
-            require_driver_ownership(auth, driver_id, ready_generation)?;
+            require_driver_ownership(auth, driver_path, ready_generation)?;
             if ready_generation != generation {
                 return Err(forbidden());
             }
-            let driver = lock(state)?.get_driver(driver_id)?;
+            let driver = lock(state)?.get_driver(driver_path)?;
             if driver.state == kas_core::DriverState::Starting {
                 lock(state)?.mark_driver_ready(
-                    driver_id,
+                    driver_path,
                     DriverReady {
                         generation,
                         process_id,
@@ -555,7 +629,7 @@ fn handle_driver_message(
                     },
                 )?;
             } else if driver.state == kas_core::DriverState::Ready {
-                lock(state)?.heartbeat_driver(driver_id, generation)?;
+                lock(state)?.heartbeat_driver(driver_path, generation)?;
             } else {
                 return Err(ApiError(
                     StatusCode::CONFLICT,
@@ -566,7 +640,7 @@ fn handle_driver_message(
         ClientMessage::Ack { delivery_id } => {
             if delivery_id != control_delivery && Some(delivery_id) != stop_delivery {
                 ensure_in_flight(*in_flight, delivery_id)?;
-                lock(state)?.acknowledge_driver_delivery(delivery_id, driver_id, generation)?;
+                lock(state)?.acknowledge_driver_delivery(delivery_id, driver_path, generation)?;
             }
         }
         ClientMessage::Mutation {
@@ -578,7 +652,7 @@ fn handle_driver_message(
             let outcome = apply_driver_mutation(
                 state,
                 auth,
-                driver_id,
+                driver_path,
                 generation,
                 *in_flight,
                 request_id,
@@ -664,14 +738,14 @@ fn handle_driver_message(
         ClientMessage::Stopped {
             generation: stopped_generation,
         } => {
-            require_driver_ownership(auth, driver_id, stopped_generation)?;
+            require_driver_ownership(auth, driver_path, stopped_generation)?;
             if stopped_generation != generation {
                 return Err(forbidden());
             }
-            lock(state)?.mark_driver_stopped(driver_id, generation)?;
+            lock(state)?.mark_driver_stopped(driver_path, generation)?;
         }
         ClientMessage::Pong => {
-            lock(state)?.heartbeat_driver(driver_id, generation)?;
+            lock(state)?.heartbeat_driver(driver_path, generation)?;
         }
     }
     Ok(None)
@@ -681,7 +755,7 @@ fn handle_driver_message(
 fn apply_driver_mutation(
     state: &AppState,
     auth: &AuthContext,
-    driver_id: Uuid,
+    driver_path: &str,
     generation: u64,
     in_flight: Option<Uuid>,
     request_id: Uuid,
@@ -689,19 +763,19 @@ fn apply_driver_mutation(
     driver_generation: u64,
     operations: Vec<Mutation>,
 ) -> ApiResult<Vec<Value>> {
-    require_driver_ownership(auth, driver_id, driver_generation)?;
+    require_driver_ownership(auth, driver_path, driver_generation)?;
     if request_id != delivery_id || driver_generation != generation {
         return Err(forbidden());
     }
     ensure_in_flight(in_flight, delivery_id)?;
     let delivery = lock(state)?.get_driver_delivery(delivery_id)?;
-    if delivery.driver_id != driver_id || delivery.generation != generation {
+    if delivery.driver_path != driver_path || delivery.generation != generation {
         return Err(forbidden());
     }
     match delivery.work {
         DriverWork::Reconcile { resource, revision } => {
             let [Mutation::UpdateResourceStatus {
-                resource_id,
+                resource_path,
                 observed_revision,
                 status,
             }] = operations.as_slice()
@@ -712,17 +786,22 @@ fn apply_driver_mutation(
                         .into(),
                 ));
             };
-            if *resource_id != resource.id || *observed_revision != revision {
+            if resource_path != &resource.path || *observed_revision != revision {
                 return Err(forbidden());
             }
-            if !kas_auth::allows(&auth.rules, "resources/status", "update") {
+            if !kas_auth::allows(
+                &auth.rules,
+                "resources/status",
+                "update",
+                Some(resource_path),
+            ) {
                 return Err(forbidden());
             }
             let resource = lock(state)?.finish_reconciliation_delivery(
                 delivery_id,
-                driver_id,
+                driver_path,
                 generation,
-                *resource_id,
+                resource_path,
                 *observed_revision,
                 status.clone(),
             )?;
@@ -737,21 +816,21 @@ fn apply_driver_mutation(
                     "A Run mutation cannot be empty".into(),
                 ));
             };
-            let Mutation::CompleteRun { run_id, result } = completion else {
+            let Mutation::CompleteRun { run_path, result } = completion else {
                 return Err(ApiError(
                     StatusCode::BAD_REQUEST,
                     "A Run mutation must end with complete_run".into(),
                 ));
             };
-            if *run_id != run.id {
+            if run_path != &run.path {
                 return Err(forbidden());
             }
             authorize_mutations(state, auth, mutations)?;
             let run = lock(state)?.finish_run_delivery_with_mutations(
                 delivery_id,
-                driver_id,
+                driver_path,
                 generation,
-                *run_id,
+                run_path,
                 FinishRun {
                     driver_generation,
                     result: result.clone(),
@@ -794,17 +873,25 @@ fn authorize_mutations(
     mutations: &[Mutation],
 ) -> ApiResult<()> {
     for mutation in mutations {
-        let (resource, verb) = match mutation {
+        let (resource_key, verb, path) = match mutation {
             Mutation::CreateResource { resource } => {
-                let manifest = lock(state)?.get_manifest(resource.manifest_id)?;
-                (format!("resources/{}", manifest.name), "create")
+                let manifest = lock(state)?.get_manifest(&resource.manifest_path)?;
+                (
+                    format!("resources/{}", manifest.name),
+                    "create",
+                    resource.path.as_str(),
+                )
             }
-            Mutation::UpdateResource { resource_id, .. } => {
-                let resource = lock(state)?.get_resource(*resource_id)?;
-                let manifest = lock(state)?.get_manifest(resource.manifest_id)?;
-                (format!("resources/{}", manifest.name), "patch")
+            Mutation::UpdateResource { resource_path, .. } => {
+                let resource = lock(state)?.get_resource(resource_path)?;
+                let manifest = lock(state)?.get_manifest(&resource.manifest_path)?;
+                (
+                    format!("resources/{}", manifest.name),
+                    "patch",
+                    resource_path.as_str(),
+                )
             }
-            Mutation::CreateLink { .. } => ("links".into(), "create"),
+            Mutation::CreateLink { link } => ("links".into(), "create", link.path.as_str()),
             Mutation::UpdateResourceStatus { .. } | Mutation::CompleteRun { .. } => {
                 return Err(ApiError(
                     StatusCode::BAD_REQUEST,
@@ -813,7 +900,7 @@ fn authorize_mutations(
                 ));
             }
         };
-        if !kas_auth::allows(&auth.rules, &resource, verb) {
+        if !kas_auth::allows(&auth.rules, &resource_key, verb, Some(path)) {
             return Err(forbidden());
         }
     }
@@ -826,15 +913,27 @@ fn authorize_watch(
     selectors: &[WatchSelector],
 ) -> ApiResult<()> {
     for selector in selectors {
-        let resource = match selector {
+        let (resource, path) = match selector {
             WatchSelector::Resource {
-                manifest_id: Some(manifest_id),
-            } => format!("resources/{}", manifest_name(state, *manifest_id)?),
-            WatchSelector::Resource { manifest_id: None } => "resources/*".into(),
-            WatchSelector::Link { .. } => "links".into(),
-            WatchSelector::Run { .. } => "runs".into(),
+                manifest_path: Some(manifest_path),
+                path,
+            } => (
+                format!("resources/{}", manifest_name(state, manifest_path)?),
+                path,
+            ),
+            WatchSelector::Resource {
+                manifest_path: None,
+                path,
+            } => ("resources/*".into(), path),
+            WatchSelector::Link { path, .. } => ("links".into(), path),
+            WatchSelector::Run { path, .. } => ("runs".into(), path),
         };
-        if !kas_auth::allows(&auth.rules, &resource, "watch") {
+        let proposed = Rule {
+            resources: vec![resource],
+            verbs: vec!["watch".into()],
+            paths: path.iter().cloned().collect(),
+        };
+        if !kas_auth::rules_are_subset(&[proposed], &auth.rules) {
             return Err(forbidden());
         }
     }
@@ -843,6 +942,7 @@ fn authorize_watch(
 
 async fn push_watch_events(
     state: &AppState,
+    auth: &AuthContext,
     socket: &mut WebSocket,
     watches: &mut HashMap<Uuid, ActiveWatch>,
 ) -> Result<(), ()> {
@@ -874,7 +974,7 @@ async fn push_watch_events(
                     .iter()
                     .any(|selector| selector_matches(selector, &event))
             });
-            if matches {
+            if matches && event_is_authorized(state, auth, &event) {
                 let message = watch_event_message(watch_id, event);
                 send_server_message(socket, &message).await?;
             }
@@ -885,11 +985,20 @@ async fn push_watch_events(
 
 fn selector_matches(selector: &WatchSelector, event: &Event) -> bool {
     match selector {
-        WatchSelector::Resource { manifest_id } => {
+        WatchSelector::Resource {
+            manifest_path,
+            path,
+        } => {
             event.object_kind == ObjectKind::Resource
-                && manifest_id.is_none_or(|id| event.manifest_id == Some(id))
+                && manifest_path
+                    .as_ref()
+                    .is_none_or(|value| event.manifest_path.as_ref() == Some(value))
+                && path
+                    .as_ref()
+                    .is_none_or(|pattern| kas_auth::path_matches(pattern, &event.object_path))
         }
         WatchSelector::Link {
+            path,
             relation,
             source,
             target,
@@ -900,28 +1009,53 @@ fn selector_matches(selector: &WatchSelector, event: &Event) -> bool {
             let Ok(link) = serde_json::from_value::<Link>(event.value.clone()) else {
                 return false;
             };
-            relation
-                .as_ref()
-                .is_none_or(|value| &link.relation == value)
+            path.as_ref()
+                .is_none_or(|pattern| kas_auth::path_matches(pattern, &event.object_path))
+                && relation
+                    .as_ref()
+                    .is_none_or(|value| &link.relation == value)
                 && source.as_ref().is_none_or(|value| &link.source == value)
                 && target.as_ref().is_none_or(|value| &link.target == value)
         }
-        WatchSelector::Run { resource_id } => {
+        WatchSelector::Run {
+            resource_path,
+            path,
+        } => {
             if event.object_kind != ObjectKind::Run {
                 return false;
             }
-            resource_id.is_none_or(|resource_id| {
-                serde_json::from_value::<Run>(event.value.clone())
-                    .is_ok_and(|run| run.resource_id == resource_id)
-            })
+            path.as_ref()
+                .is_none_or(|pattern| kas_auth::path_matches(pattern, &event.object_path))
+                && resource_path.as_ref().is_none_or(|resource_path| {
+                    serde_json::from_value::<Run>(event.value.clone())
+                        .is_ok_and(|run| &run.resource_path == resource_path)
+                })
         }
     }
+}
+
+fn event_is_authorized(state: &AppState, auth: &AuthContext, event: &Event) -> bool {
+    let resource = match event.object_kind {
+        ObjectKind::Resource => {
+            let Some(manifest_path) = event.manifest_path.as_deref() else {
+                return false;
+            };
+            let Ok(name) = manifest_name(state, manifest_path) else {
+                return false;
+            };
+            format!("resources/{name}")
+        }
+        ObjectKind::Link => "links".into(),
+        ObjectKind::Run => "runs".into(),
+        ObjectKind::Manifest | ObjectKind::Driver => return false,
+    };
+    kas_auth::allows(&auth.rules, &resource, "watch", Some(&event.object_path))
 }
 
 fn watch_event_message(watch_id: Uuid, event: Event) -> ServerMessage {
     let object = WatchObject {
         kind: event.object_kind,
-        id: event.object_id,
+        path: event.object_path,
         revision: event.revision,
         value: event.value,
     };
@@ -964,12 +1098,12 @@ fn watch_error_response(
     }
 }
 
-fn is_current_connection(state: &AppState, driver_id: Uuid, connection_id: Uuid) -> bool {
+fn is_current_connection(state: &AppState, driver_path: &str, connection_id: Uuid) -> bool {
     state
         .driver_connections
         .lock()
         .ok()
-        .and_then(|connections| connections.get(&driver_id).copied())
+        .and_then(|connections| connections.get(driver_path).copied())
         == Some(connection_id)
 }
 
@@ -985,23 +1119,29 @@ async fn send_server_message(socket: &mut WebSocket, message: &ServerMessage) ->
 async fn finish_run(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
     Json(input): Json<FinishRun>,
 ) -> ApiResult<Json<Run>> {
-    let auth = require(&state, &headers, "runs/result", "update")?;
-    if let Some(driver_id) = auth.driver_id {
-        require_driver_ownership(&auth, driver_id, input.driver_generation)?;
+    let auth = require(&state, &headers, "runs/result", "update", Some(&query.path))?;
+    if let Some(driver_path) = auth.driver_path.as_deref() {
+        require_driver_ownership(&auth, driver_path, input.driver_generation)?;
     }
-    Ok(Json(lock(&state)?.finish_run(id, input)?))
+    Ok(Json(lock(&state)?.finish_run(&query.path, input)?))
 }
 
 async fn issue_driver_credential(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<(StatusCode, Json<IssuedCredential>)> {
-    require(&state, &headers, "drivers/credentials", "create")?;
-    let credential = lock(&state)?.issue_driver_credential(id)?;
+    require(
+        &state,
+        &headers,
+        "drivers/credentials",
+        "create",
+        Some(&query.path),
+    )?;
+    let credential = lock(&state)?.issue_driver_credential(&query.path)?;
     Ok((StatusCode::CREATED, Json(credential)))
 }
 
@@ -1010,7 +1150,7 @@ async fn create_user(
     headers: HeaderMap,
     Json(input): Json<CreateUser>,
 ) -> ApiResult<(StatusCode, Json<User>)> {
-    require(&state, &headers, "users", "create")?;
+    require(&state, &headers, "users", "create", Some(&input.path))?;
     Ok((StatusCode::CREATED, Json(lock(&state)?.create_user(input)?)))
 }
 
@@ -1018,19 +1158,24 @@ async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<User>>> {
-    require(&state, &headers, "users", "list")?;
-    Ok(Json(lock(&state)?.list_users()?))
+    let auth = authenticate(&state, &headers)?;
+    let users = lock(&state)?
+        .list_users()?
+        .into_iter()
+        .filter(|user| kas_auth::allows(&auth.rules, "users", "list", Some(&user.path)))
+        .collect();
+    Ok(Json(users))
 }
 
 async fn issue_user_credential(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<(StatusCode, Json<IssuedCredential>)> {
-    require(&state, &headers, "credentials", "create")?;
+    require(&state, &headers, "credentials", "create", Some(&query.path))?;
     Ok((
         StatusCode::CREATED,
-        Json(lock(&state)?.issue_user_credential(id)?),
+        Json(lock(&state)?.issue_user_credential(&query.path)?),
     ))
 }
 
@@ -1039,7 +1184,13 @@ async fn create_service_account(
     headers: HeaderMap,
     Json(input): Json<CreateServiceAccount>,
 ) -> ApiResult<(StatusCode, Json<ServiceAccount>)> {
-    require(&state, &headers, "serviceaccounts", "create")?;
+    require(
+        &state,
+        &headers,
+        "serviceaccounts",
+        "create",
+        Some(&input.path),
+    )?;
     Ok((
         StatusCode::CREATED,
         Json(lock(&state)?.create_service_account(input)?),
@@ -1050,19 +1201,26 @@ async fn list_service_accounts(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<ServiceAccount>>> {
-    require(&state, &headers, "serviceaccounts", "list")?;
-    Ok(Json(lock(&state)?.list_service_accounts()?))
+    let auth = authenticate(&state, &headers)?;
+    let accounts = lock(&state)?
+        .list_service_accounts()?
+        .into_iter()
+        .filter(|account| {
+            kas_auth::allows(&auth.rules, "serviceaccounts", "list", Some(&account.path))
+        })
+        .collect();
+    Ok(Json(accounts))
 }
 
 async fn issue_service_account_credential(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<(StatusCode, Json<IssuedCredential>)> {
-    require(&state, &headers, "credentials", "create")?;
+    require(&state, &headers, "credentials", "create", Some(&query.path))?;
     Ok((
         StatusCode::CREATED,
-        Json(lock(&state)?.issue_service_account_credential(id)?),
+        Json(lock(&state)?.issue_service_account_credential(&query.path)?),
     ))
 }
 
@@ -1071,8 +1229,12 @@ async fn create_role(
     headers: HeaderMap,
     Json(input): Json<CreateRole>,
 ) -> ApiResult<(StatusCode, Json<Role>)> {
-    require(&state, &headers, "roles", "create")?;
-    require(&state, &headers, "roles", "escalate")?;
+    let auth = require(&state, &headers, "roles", "create", Some(&input.path))?;
+    if !kas_auth::allows(&auth.rules, "roles", "escalate", Some(&input.path))
+        && !kas_auth::rules_are_subset(&input.rules, &auth.rules)
+    {
+        return Err(forbidden());
+    }
     Ok((StatusCode::CREATED, Json(lock(&state)?.create_role(input)?)))
 }
 
@@ -1080,28 +1242,43 @@ async fn list_roles(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Role>>> {
-    require(&state, &headers, "roles", "list")?;
-    Ok(Json(lock(&state)?.list_roles()?))
+    let auth = authenticate(&state, &headers)?;
+    let roles = lock(&state)?
+        .list_roles()?
+        .into_iter()
+        .filter(|role| kas_auth::allows(&auth.rules, "roles", "list", Some(&role.path)))
+        .collect();
+    Ok(Json(roles))
 }
 
 async fn update_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
     Json(input): Json<CreateRole>,
 ) -> ApiResult<Json<Role>> {
-    require(&state, &headers, "roles", "patch")?;
-    require(&state, &headers, "roles", "escalate")?;
-    Ok(Json(lock(&state)?.update_role(id, input)?))
+    if input.path != query.path {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Role path is immutable".into(),
+        ));
+    }
+    let auth = require(&state, &headers, "roles", "patch", Some(&query.path))?;
+    if !kas_auth::allows(&auth.rules, "roles", "escalate", Some(&query.path))
+        && !kas_auth::rules_are_subset(&input.rules, &auth.rules)
+    {
+        return Err(forbidden());
+    }
+    Ok(Json(lock(&state)?.update_role(&query.path, input)?))
 }
 
 async fn delete_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<StatusCode> {
-    require(&state, &headers, "roles", "delete")?;
-    lock(&state)?.delete_role(id)?;
+    require(&state, &headers, "roles", "delete", Some(&query.path))?;
+    lock(&state)?.delete_role(&query.path)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1110,8 +1287,19 @@ async fn create_role_binding(
     headers: HeaderMap,
     Json(input): Json<CreateRoleBinding>,
 ) -> ApiResult<(StatusCode, Json<RoleBinding>)> {
-    require(&state, &headers, "rolebindings", "create")?;
-    require(&state, &headers, "roles", "bind")?;
+    let auth = require(
+        &state,
+        &headers,
+        "rolebindings",
+        "create",
+        Some(&input.path),
+    )?;
+    let role = lock(&state)?.get_role(&input.role_path)?;
+    if !kas_auth::allows(&auth.rules, "roles", "bind", Some(&role.path))
+        && !kas_auth::rules_are_subset(&role.rules, &auth.rules)
+    {
+        return Err(forbidden());
+    }
     Ok((
         StatusCode::CREATED,
         Json(lock(&state)?.create_role_binding(input)?),
@@ -1122,17 +1310,30 @@ async fn list_role_bindings(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<RoleBinding>>> {
-    require(&state, &headers, "rolebindings", "list")?;
-    Ok(Json(lock(&state)?.list_role_bindings()?))
+    let auth = authenticate(&state, &headers)?;
+    let bindings = lock(&state)?
+        .list_role_bindings()?
+        .into_iter()
+        .filter(|binding| {
+            kas_auth::allows(&auth.rules, "rolebindings", "list", Some(&binding.path))
+        })
+        .collect();
+    Ok(Json(bindings))
 }
 
 async fn delete_role_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<StatusCode> {
-    require(&state, &headers, "rolebindings", "delete")?;
-    lock(&state)?.delete_role_binding(id)?;
+    require(
+        &state,
+        &headers,
+        "rolebindings",
+        "delete",
+        Some(&query.path),
+    )?;
+    lock(&state)?.delete_role_binding(&query.path)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1141,30 +1342,30 @@ async fn create_link(
     headers: HeaderMap,
     Json(input): Json<CreateLink>,
 ) -> ApiResult<(StatusCode, Json<Link>)> {
-    require(&state, &headers, "links", "create")?;
+    require(&state, &headers, "links", "create", Some(&input.path))?;
     Ok((StatusCode::CREATED, Json(lock(&state)?.create_link(input)?)))
 }
 
 #[derive(Debug, Deserialize)]
 struct LinkQuery {
     source_kind: Option<ObjectKind>,
-    source_id: Option<Uuid>,
+    source_path: Option<String>,
     relation: Option<String>,
     target_kind: Option<ObjectKind>,
-    target_id: Option<Uuid>,
+    target_path: Option<String>,
 }
 
 fn optional_object_ref(
     kind: Option<ObjectKind>,
-    id: Option<Uuid>,
+    path: Option<String>,
     label: &str,
 ) -> ApiResult<Option<ObjectRef>> {
-    match (kind, id) {
-        (Some(kind), Some(id)) => Ok(Some(ObjectRef { kind, id })),
+    match (kind, path) {
+        (Some(kind), Some(path)) => Ok(Some(ObjectRef { kind, path })),
         (None, None) => Ok(None),
         _ => Err(ApiError(
             StatusCode::BAD_REQUEST,
-            format!("{label}_kind and {label}_id must be provided together"),
+            format!("{label}_kind and {label}_path must be provided together"),
         )),
     }
 }
@@ -1174,36 +1375,41 @@ async fn list_links(
     headers: HeaderMap,
     Query(query): Query<LinkQuery>,
 ) -> ApiResult<Json<Vec<Link>>> {
-    require(&state, &headers, "links", "list")?;
+    let auth = authenticate(&state, &headers)?;
     let filter = LinkFilter {
-        source: optional_object_ref(query.source_kind, query.source_id, "source")?,
+        source: optional_object_ref(query.source_kind, query.source_path, "source")?,
         relation: query.relation,
-        target: optional_object_ref(query.target_kind, query.target_id, "target")?,
+        target: optional_object_ref(query.target_kind, query.target_path, "target")?,
     };
-    Ok(Json(lock(&state)?.list_links(filter)?))
+    let links = lock(&state)?
+        .list_links(filter)?
+        .into_iter()
+        .filter(|link| kas_auth::allows(&auth.rules, "links", "list", Some(&link.path)))
+        .collect();
+    Ok(Json(links))
 }
 
 async fn get_link(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<Json<Link>> {
-    require(&state, &headers, "links", "get")?;
-    Ok(Json(lock(&state)?.get_link(id)?))
+    require(&state, &headers, "links", "get", Some(&query.path))?;
+    Ok(Json(lock(&state)?.get_link(&query.path)?))
 }
 
 async fn delete_link(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
+    Query(query): Query<ObjectPathQuery>,
 ) -> ApiResult<StatusCode> {
-    require(&state, &headers, "links", "delete")?;
-    lock(&state)?.delete_link(id)?;
+    require(&state, &headers, "links", "delete", Some(&query.path))?;
+    lock(&state)?.delete_link(&query.path)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn manifest_name(state: &AppState, id: Uuid) -> ApiResult<String> {
-    Ok(lock(state)?.get_manifest(id)?.name)
+fn manifest_name(state: &AppState, path: &str) -> ApiResult<String> {
+    Ok(lock(state)?.get_manifest(path)?.name)
 }
 
 fn require(
@@ -1211,9 +1417,10 @@ fn require(
     headers: &HeaderMap,
     resource: &str,
     verb: &str,
+    path: Option<&str>,
 ) -> ApiResult<AuthContext> {
     let auth = authenticate(state, headers)?;
-    if !kas_auth::allows(&auth.rules, resource, verb) {
+    if !kas_auth::allows(&auth.rules, resource, verb, path) {
         return Err(forbidden());
     }
     Ok(auth)
@@ -1231,9 +1438,13 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<AuthContext>
     Ok(auth)
 }
 
-fn require_driver_ownership(auth: &AuthContext, driver_id: Uuid, generation: u64) -> ApiResult<()> {
-    if let Some(auth_driver_id) = auth.driver_id {
-        if auth_driver_id != driver_id || auth.driver_generation != Some(generation) {
+fn require_driver_ownership(
+    auth: &AuthContext,
+    driver_path: &str,
+    generation: u64,
+) -> ApiResult<()> {
+    if let Some(auth_driver_path) = auth.driver_path.as_deref() {
+        if auth_driver_path != driver_path || auth.driver_generation != Some(generation) {
             return Err(forbidden());
         }
     }

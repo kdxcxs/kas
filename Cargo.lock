@@ -889,6 +889,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "url",
  "uuid",
 ]
 
@@ -924,7 +925,6 @@ dependencies = [
  "kas-driver",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]

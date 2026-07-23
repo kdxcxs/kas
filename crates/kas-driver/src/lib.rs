@@ -44,22 +44,25 @@ pub trait Driver: Send + Sync {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WatchSelector {
     Resource {
-        manifest_id: Option<Uuid>,
+        manifest_path: Option<String>,
+        path: Option<String>,
     },
     Link {
+        path: Option<String>,
         relation: Option<String>,
         source: Option<ObjectRef>,
         target: Option<ObjectRef>,
     },
     Run {
-        resource_id: Option<Uuid>,
+        resource_path: Option<String>,
+        path: Option<String>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WatchObject {
     pub kind: ObjectKind,
-    pub id: Uuid,
+    pub path: String,
     pub revision: Option<u64>,
     pub value: Value,
 }
@@ -214,7 +217,7 @@ pub enum ClientMessage {
 
 pub struct DriverRuntime<D> {
     api: String,
-    driver_id: Uuid,
+    driver_path: String,
     generation: u64,
     token: String,
     implementation: D,
@@ -225,14 +228,14 @@ pub struct DriverRuntime<D> {
 impl<D: Driver> DriverRuntime<D> {
     pub fn new(
         api: impl Into<String>,
-        driver_id: Uuid,
+        driver_path: impl Into<String>,
         generation: u64,
         token: impl Into<String>,
         implementation: D,
     ) -> Self {
         Self {
             api: api.into().trim_end_matches('/').to_owned(),
-            driver_id,
+            driver_path: driver_path.into(),
             generation,
             token: token.into(),
             implementation,
@@ -320,11 +323,13 @@ impl<D: Driver> DriverRuntime<D> {
                     .map(|rest| format!("ws://{rest}"))
             })
             .unwrap_or_else(|| self.api.clone());
-        let url = format!(
-            "{websocket_api}/drivers/{}/connect?generation={}",
-            self.driver_id, self.generation
-        );
+        let mut url = url::Url::parse(&format!("{websocket_api}/drivers/connect"))
+            .map_err(|error| SessionError::Other(error.into()))?;
+        url.query_pairs_mut()
+            .append_pair("path", &self.driver_path)
+            .append_pair("generation", &self.generation.to_string());
         let mut request = url
+            .as_str()
             .into_client_request()
             .map_err(|error| SessionError::Other(error.into()))?;
         request.headers_mut().insert(
@@ -401,7 +406,7 @@ impl<D: Driver> DriverRuntime<D> {
                         delivery_id,
                         driver_generation: self.generation,
                         operations: vec![Mutation::UpdateResourceStatus {
-                            resource_id: resource.id,
+                            resource_path: resource.path,
                             observed_revision: revision,
                             status,
                         }],
@@ -431,7 +436,7 @@ impl<D: Driver> DriverRuntime<D> {
                     ),
                 };
                 mutations.push(Mutation::CompleteRun {
-                    run_id: run.id,
+                    run_path: run.path,
                     result,
                 });
                 self.send(
@@ -675,7 +680,10 @@ mod tests {
         }
 
         fn watch_selectors(&self) -> Vec<WatchSelector> {
-            vec![WatchSelector::Resource { manifest_id: None }]
+            vec![WatchSelector::Resource {
+                manifest_path: None,
+                path: None,
+            }]
         }
 
         fn on_watch_event(&self, event: &WatchEvent) -> Result<(), DriverError> {
@@ -684,10 +692,10 @@ mod tests {
         }
     }
 
-    fn driver_record(driver_id: Uuid, generation: u64) -> DriverRecord {
+    fn driver_record(driver_path: &str, generation: u64) -> DriverRecord {
         serde_json::from_value(json!({
-            "id": driver_id,
-            "manifest_id": Uuid::new_v4(),
+            "path": driver_path,
+            "manifest_path": "/manifests/watching",
             "name": "watching",
             "state": "ready",
             "generation": generation,
@@ -706,13 +714,13 @@ mod tests {
     #[test]
     fn mutation_has_stable_tagged_wire_format() {
         let delivery_id = Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap();
-        let run_id = Uuid::parse_str("20000000-0000-0000-0000-000000000002").unwrap();
+        let run_path = "/runs/example".to_owned();
         let mutation = ClientMessage::Mutation {
             request_id: delivery_id,
             delivery_id,
             driver_generation: 7,
             operations: vec![Mutation::CompleteRun {
-                run_id,
+                run_path: run_path.clone(),
                 result: RunResult::Succeeded {
                     output: json!({"message": "done"}),
                 },
@@ -728,7 +736,7 @@ mod tests {
                 "driver_generation": 7,
                 "operations": [{
                     "operation": "complete_run",
-                    "run_id": run_id,
+                    "run_path": run_path,
                     "result": {
                         "status": "succeeded",
                         "output": {"message": "done"}
@@ -772,12 +780,13 @@ mod tests {
     fn watch_messages_have_stable_tagged_wire_format() {
         let request_id = Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap();
         let watch_id = Uuid::parse_str("20000000-0000-0000-0000-000000000002").unwrap();
-        let manifest_id = Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap();
+        let manifest_path = "/manifests/example".to_owned();
         let watch = ClientMessage::Watch {
             request_id,
             cursor: Some(12),
             selectors: vec![WatchSelector::Resource {
-                manifest_id: Some(manifest_id),
+                manifest_path: Some(manifest_path.clone()),
+                path: Some("/examples/**".into()),
             }],
         };
         assert_eq!(
@@ -788,7 +797,8 @@ mod tests {
                 "cursor": 12,
                 "selectors": [{
                     "kind": "resource",
-                    "manifest_id": manifest_id
+                    "manifest_path": manifest_path,
+                    "path": "/examples/**"
                 }]
             })
         );
@@ -798,7 +808,7 @@ mod tests {
             cursor: 13,
             object: WatchObject {
                 kind: ObjectKind::Resource,
-                id: manifest_id,
+                path: "/resources/example".into(),
                 revision: Some(2),
                 value: json!({"name": "example"}),
             },
@@ -811,7 +821,7 @@ mod tests {
                 "cursor": 13,
                 "object": {
                     "kind": "resource",
-                    "id": manifest_id,
+                    "path": "/resources/example",
                     "revision": 2,
                     "value": {"name": "example"}
                 }
@@ -821,13 +831,14 @@ mod tests {
 
     #[test]
     fn connection_request_uses_websocket_and_bearer_auth() {
-        let driver_id = Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap();
-        let runtime = DriverRuntime::new("https://kas.example.test/", driver_id, 9, "secret", Noop);
+        let driver_path = "/drivers/example";
+        let runtime =
+            DriverRuntime::new("https://kas.example.test/", driver_path, 9, "secret", Noop);
         let request = runtime.connection_request().unwrap();
 
         assert_eq!(
             request.uri().to_string(),
-            format!("wss://kas.example.test/drivers/{driver_id}/connect?generation=9")
+            "wss://kas.example.test/drivers/connect?path=%2Fdrivers%2Fexample&generation=9"
         );
         assert_eq!(request.headers()["authorization"], "Bearer secret");
     }
@@ -885,8 +896,13 @@ mod tests {
             ));
         });
 
-        let driver_id = Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap();
-        let runtime = DriverRuntime::new(format!("http://{address}"), driver_id, 9, "secret", Noop);
+        let runtime = DriverRuntime::new(
+            format!("http://{address}"),
+            "/drivers/example",
+            9,
+            "secret",
+            Noop,
+        );
         assert_eq!(
             runtime.connect_and_serve().await.unwrap(),
             SessionOutcome::Stopped
@@ -933,9 +949,14 @@ mod tests {
             );
         });
 
-        let driver_id = Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap();
-        let runtime = DriverRuntime::new(format!("http://{address}"), driver_id, 9, "secret", Noop)
-            .with_reconnect_interval(Duration::from_millis(10));
+        let runtime = DriverRuntime::new(
+            format!("http://{address}"),
+            "/drivers/example",
+            9,
+            "secret",
+            Noop,
+        )
+        .with_reconnect_interval(Duration::from_millis(10));
         let error = runtime.run().await.unwrap_err();
         assert!(error
             .to_string()
@@ -947,13 +968,13 @@ mod tests {
     async fn watch_resumes_from_last_processed_cursor_after_reconnect() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let driver_id = Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap();
+        let driver_path = "/drivers/example";
         let first_delivery = Uuid::new_v4();
         let second_delivery = Uuid::new_v4();
         let first_watch = Uuid::new_v4();
         let second_watch = Uuid::new_v4();
-        let object_id = Uuid::new_v4();
-        let record = driver_record(driver_id, 9);
+        let object_path = "/resources/example";
+        let record = driver_record(driver_path, 9);
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -1015,7 +1036,7 @@ mod tests {
                         cursor: 41,
                         object: WatchObject {
                             kind: ObjectKind::Resource,
-                            id: object_id,
+                            path: object_path.into(),
                             revision: Some(0),
                             value: json!({"pass": 1}),
                         },
@@ -1074,7 +1095,7 @@ mod tests {
                         cursor: 42,
                         object: WatchObject {
                             kind: ObjectKind::Resource,
-                            id: object_id,
+                            path: object_path.into(),
                             revision: Some(1),
                             value: json!({"pass": 2}),
                         },
@@ -1102,7 +1123,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let runtime = DriverRuntime::new(
             format!("http://{address}"),
-            driver_id,
+            driver_path,
             9,
             "secret",
             Watching {

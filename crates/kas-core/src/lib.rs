@@ -13,7 +13,7 @@ pub struct Action {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
-    pub id: Uuid,
+    pub path: String,
     pub name: String,
     pub version: u32,
     pub description: String,
@@ -25,8 +25,8 @@ pub struct Manifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resource {
-    pub id: Uuid,
-    pub manifest_id: Uuid,
+    pub path: String,
+    pub manifest_path: String,
     pub name: String,
     pub spec: Value,
     pub status: Value,
@@ -47,8 +47,8 @@ pub enum DriverState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Driver {
-    pub id: Uuid,
-    pub manifest_id: Uuid,
+    pub path: String,
+    pub manifest_path: String,
     pub name: String,
     pub state: DriverState,
     pub generation: u64,
@@ -74,10 +74,10 @@ pub enum RunStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Run {
-    pub id: Uuid,
+    pub path: String,
     pub request_id: Uuid,
-    pub resource_id: Uuid,
-    pub driver_id: Uuid,
+    pub resource_path: String,
+    pub driver_path: String,
     pub driver_generation: Option<u64>,
     pub action: String,
     pub input: Value,
@@ -94,8 +94,8 @@ pub struct Event {
     pub sequence: u64,
     pub event_type: EventType,
     pub object_kind: ObjectKind,
-    pub object_id: Uuid,
-    pub manifest_id: Option<Uuid>,
+    pub object_path: String,
+    pub manifest_path: Option<String>,
     pub revision: Option<u64>,
     pub value: Value,
     pub created_at: DateTime<Utc>,
@@ -122,12 +122,12 @@ pub enum ObjectKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectRef {
     pub kind: ObjectKind,
-    pub id: Uuid,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Link {
-    pub id: Uuid,
+    pub path: String,
     pub source: ObjectRef,
     pub relation: String,
     pub target: ObjectRef,
@@ -137,6 +137,7 @@ pub struct Link {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateManifest {
+    pub path: String,
     pub name: String,
     pub version: u32,
     pub description: String,
@@ -147,7 +148,8 @@ pub struct CreateManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateResource {
-    pub manifest_id: Uuid,
+    pub path: String,
+    pub manifest_path: String,
     pub name: String,
     pub spec: Value,
 }
@@ -160,6 +162,7 @@ pub struct UpdateResource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateLink {
+    pub path: String,
     pub source: ObjectRef,
     pub relation: String,
     pub target: ObjectRef,
@@ -176,15 +179,15 @@ pub struct LinkFilter {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlannedResource {
-    pub id: Uuid,
-    pub manifest_id: Uuid,
+    pub path: String,
+    pub manifest_path: String,
     pub name: String,
     pub spec: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlannedLink {
-    pub id: Uuid,
+    pub path: String,
     pub source: ObjectRef,
     pub relation: String,
     pub target: ObjectRef,
@@ -199,7 +202,7 @@ pub enum Mutation {
         resource: PlannedResource,
     },
     UpdateResource {
-        resource_id: Uuid,
+        resource_path: String,
         expected_revision: u64,
         spec: Value,
     },
@@ -207,12 +210,12 @@ pub enum Mutation {
         link: PlannedLink,
     },
     UpdateResourceStatus {
-        resource_id: Uuid,
+        resource_path: String,
         observed_revision: u64,
         status: Value,
     },
     CompleteRun {
-        run_id: Uuid,
+        run_path: String,
         result: RunResult,
     },
 }
@@ -236,15 +239,15 @@ impl From<Value> for DriverExecution {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventFilter {
     pub object_kind: Option<ObjectKind>,
-    pub object_id: Option<Uuid>,
-    pub manifest_id: Option<Uuid>,
+    pub object_path: Option<String>,
+    pub manifest_path: Option<String>,
     pub after_sequence: Option<u64>,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateResourceStatus {
-    pub driver_id: Uuid,
+    pub driver_path: String,
     pub driver_generation: u64,
     pub observed_revision: u64,
     pub status: Value,
@@ -252,8 +255,9 @@ pub struct UpdateResourceStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRun {
+    pub path: String,
     pub request_id: Uuid,
-    pub resource_id: Uuid,
+    pub resource_path: String,
     pub action: String,
     pub input: Value,
 }
@@ -290,7 +294,7 @@ pub enum DeliveryStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DriverDelivery {
     pub id: Uuid,
-    pub driver_id: Uuid,
+    pub driver_path: String,
     pub generation: u64,
     pub work: DriverWork,
     pub status: DeliveryStatus,

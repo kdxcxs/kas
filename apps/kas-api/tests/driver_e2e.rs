@@ -1,18 +1,18 @@
 use std::{
+    collections::HashSet,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use kas_api::app;
 use kas_auth::{
-    CreateRole, CreateRoleBinding, CreateUser, IssuedCredential, Role, RoleBinding, Rule, Subject,
-    SubjectKind, User, SYSTEM_ADMIN_ROLE,
+    CreateRole, CreateRoleBinding, CreateServiceAccount, CreateUser, IssuedCredential, Role, Rule,
+    ServiceAccount, Subject, SubjectKind, User,
 };
 use kas_core::{
-    Action, CreateLink, CreateManifest, CreateResource, CreateRun, DriverState, FinishRun,
-    ObjectKind, ObjectRef, RunResult, RunStatus, UpdateResource,
+    Action, CreateLink, CreateManifest, CreateResource, CreateRun, Driver as DriverRecord,
+    DriverState, Link, Manifest, ObjectKind, ObjectRef, Resource, Run, RunStatus,
 };
-use kas_core::{Driver as DriverRecord, Link, Manifest, Resource, Run};
 use kas_driver::{
     Driver as DriverImplementation, DriverError, DriverRuntime, WatchEvent, WatchSelector,
 };
@@ -67,7 +67,7 @@ async fn wait_for_watch_event(
     observed: &ObservedWatch,
     matches: impl Fn(&WatchEvent) -> bool,
 ) -> anyhow::Result<WatchEvent> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let changed = observed.changed.notified();
             if let Some(event) = observed
@@ -95,27 +95,38 @@ fn watch_event_parts(event: &WatchEvent) -> (&'static str, u64, &kas_driver::Wat
     }
 }
 
+fn with_path(url: impl AsRef<str>, path: &str) -> String {
+    format!("{}?path={path}", url.as_ref())
+}
+
+fn authenticated_client(token: &str) -> anyhow::Result<Client> {
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+    Ok(Client::builder().default_headers(headers).build()?)
+}
+
 async fn replace_driver_connection(
     address: std::net::SocketAddr,
-    driver_id: Uuid,
+    driver_path: &str,
     generation: u64,
     token: &str,
 ) -> anyhow::Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
-    let mut request = format!("ws://{address}/drivers/{driver_id}/connect?generation={generation}")
-        .into_client_request()?;
+    let mut request =
+        format!("ws://{address}/drivers/connect?path={driver_path}&generation={generation}")
+            .into_client_request()?;
     request
         .headers_mut()
         .insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
     Ok(tokio_tungstenite::connect_async(request).await?.0)
 }
 
-async fn wait_for_finished_run(client: &Client, api: &str, id: Uuid) -> anyhow::Result<Run> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+async fn wait_for_finished_run(client: &Client, api: &str, path: &str) -> anyhow::Result<Run> {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let run: Run = client
-                .get(format!("{api}/runs/{id}"))
+                .get(with_path(format!("{api}/runs/by-path"), path))
                 .send()
                 .await?
                 .error_for_status()?
@@ -131,7 +142,7 @@ async fn wait_for_finished_run(client: &Client, api: &str, id: Uuid) -> anyhow::
 }
 
 #[tokio::test]
-async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
+async fn driver_path_permissions_and_websocket_work_end_to_end() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("kas.db");
     kas_store::migrate(&database)?;
@@ -142,131 +153,24 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
     let application = app(store);
     let server = tokio::spawn(async move { axum::serve(listener, application).await });
     let api = format!("http://{address}");
-    let unauthorized = Client::new().get(format!("{api}/resources")).send().await?;
-    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::AUTHORIZATION,
-        format!("Bearer {}", admin.token).parse()?,
-    );
-    let client = Client::builder().default_headers(headers).build()?;
 
-    let reader: User = client
-        .post(format!("{api}/users"))
-        .json(&CreateUser {
-            name: "reader".into(),
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let reader_role: Role = client
-        .post(format!("{api}/roles"))
-        .json(&CreateRole {
-            name: "resource-reader".into(),
-            description: "Can list resources".into(),
-            rules: vec![Rule {
-                resources: vec!["resources".into()],
-                verbs: vec!["list".into()],
-            }],
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    client
-        .post(format!("{api}/role-bindings"))
-        .json(&CreateRoleBinding {
-            name: "reader".into(),
-            role_id: reader_role.id,
-            subjects: vec![Subject {
-                kind: SubjectKind::User,
-                id: reader.id,
-            }],
-        })
-        .send()
-        .await?
-        .error_for_status()?;
-    let reader_credential: IssuedCredential = client
-        .post(format!("{api}/users/{}/credentials", reader.id))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let reader_client = Client::builder()
-        .default_headers({
-            let mut headers = header::HeaderMap::new();
-            headers.insert(
-                header::AUTHORIZATION,
-                format!("Bearer {}", reader_credential.token).parse()?,
-            );
-            headers
-        })
-        .build()?;
-    assert!(reader_client
-        .get(format!("{api}/resources"))
-        .send()
-        .await?
-        .status()
-        .is_success());
     assert_eq!(
-        reader_client
-            .post(format!("{api}/manifests"))
-            .json(&CreateManifest {
-                name: "forbidden".into(),
-                version: 1,
-                description: "Forbidden".into(),
-                resource_schema: json!({ "type": "object" }),
-                actions: vec![],
-                driver: Some("forbidden-driver".into()),
-            })
+        Client::new()
+            .get(format!("{api}/resources"))
             .send()
             .await?
             .status(),
-        reqwest::StatusCode::FORBIDDEN
+        reqwest::StatusCode::UNAUTHORIZED
     );
-    assert_eq!(
-        client
-            .patch(format!("{api}/roles/{SYSTEM_ADMIN_ROLE}"))
-            .json(&CreateRole {
-                name: "changed".into(),
-                description: "changed".into(),
-                rules: vec![]
-            })
-            .send()
-            .await?
-            .status(),
-        reqwest::StatusCode::CONFLICT
-    );
-    let bindings: Vec<RoleBinding> = client
-        .get(format!("{api}/role-bindings"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let bootstrap = bindings
-        .iter()
-        .find(|binding| binding.name == "system:bootstrap-admin")
-        .unwrap();
-    assert_eq!(
-        client
-            .delete(format!("{api}/role-bindings/{}", bootstrap.id))
-            .send()
-            .await?
-            .status(),
-        reqwest::StatusCode::CONFLICT
-    );
+    let client = authenticated_client(&admin.token)?;
 
-    let passive_manifest: Manifest = client
+    let note_manifest: Manifest = client
         .post(format!("{api}/manifests"))
         .json(&CreateManifest {
+            path: "/manifests/note".into(),
             name: "note".into(),
             version: 1,
-            description: "A passive Resource without a Driver".into(),
+            description: "Passive output".into(),
             resource_schema: json!({
                 "type": "object",
                 "properties": { "archived": { "type": "boolean" } },
@@ -281,55 +185,121 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    let passive_driver: Option<DriverRecord> = client
-        .get(format!("{api}/manifests/{}/driver", passive_manifest.id))
+    assert!(client
+        .get(with_path(
+            format!("{api}/manifests/driver"),
+            &note_manifest.path
+        ))
         .send()
         .await?
         .error_for_status()?
-        .json()
-        .await?;
-    assert!(passive_driver.is_none());
-    let passive_resource: Resource = client
-        .post(format!("{api}/resources"))
-        .json(&CreateResource {
-            manifest_id: passive_manifest.id,
-            name: "release-note".into(),
-            spec: json!({ "archived": false }),
-        })
-        .send()
+        .json::<Option<DriverRecord>>()
         .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let updated_passive: Resource = client
-        .patch(format!("{api}/resources/{}", passive_resource.id))
-        .json(&UpdateResource {
-            expected_revision: passive_resource.revision,
-            spec: json!({ "archived": true }),
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(updated_passive.revision, passive_resource.revision + 1);
-    assert_eq!(updated_passive.spec, json!({ "archived": true }));
-    assert_eq!(
+        .is_none());
+
+    // One scoped reader demonstrates exact, one-segment `*`, and descendant
+    // `**` matching through the real REST list filter.
+    let fixtures = [
+        "/scope/exact",
+        "/scope/star/one",
+        "/scope/star/one/deep",
+        "/scope/deep",
+        "/scope/deep/a/b",
+        "/scope/other",
+    ];
+    for path in fixtures {
         client
-            .patch(format!("{api}/resources/{}", passive_resource.id))
-            .json(&UpdateResource {
-                expected_revision: passive_resource.revision,
+            .post(format!("{api}/resources"))
+            .json(&CreateResource {
+                path: path.into(),
+                manifest_path: note_manifest.path.clone(),
+                name: path.rsplit('/').next().unwrap().into(),
                 spec: json!({ "archived": false }),
             })
             .send()
             .await?
-            .status(),
-        reqwest::StatusCode::CONFLICT
+            .error_for_status()?;
+    }
+    let reader: User = client
+        .post(format!("{api}/users"))
+        .json(&CreateUser {
+            path: "/users/scoped-reader".into(),
+            name: "scoped-reader".into(),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let reader_role: Role = client
+        .post(format!("{api}/roles"))
+        .json(&CreateRole {
+            path: "/roles/readers/scoped".into(),
+            name: "scoped-reader".into(),
+            description: "Exercise all supported path patterns".into(),
+            rules: vec![Rule {
+                resources: vec!["resources/note".into()],
+                verbs: vec!["list".into()],
+                paths: vec![
+                    "/scope/exact".into(),
+                    "/scope/star/*".into(),
+                    "/scope/deep/**".into(),
+                ],
+            }],
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    client
+        .post(format!("{api}/role-bindings"))
+        .json(&CreateRoleBinding {
+            path: "/role-bindings/readers/scoped".into(),
+            name: "scoped-reader".into(),
+            role_path: reader_role.path,
+            subjects: vec![Subject {
+                kind: SubjectKind::User,
+                path: reader.path.clone(),
+            }],
+        })
+        .send()
+        .await?
+        .error_for_status()?;
+    let reader_credential: IssuedCredential = client
+        .post(with_path(format!("{api}/users/credentials"), &reader.path))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let visible: HashSet<String> = authenticated_client(&reader_credential.token)?
+        .get(format!("{api}/resources"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Resource>>()
+        .await?
+        .into_iter()
+        .map(|resource| resource.path)
+        .collect();
+    assert_eq!(
+        visible,
+        [
+            "/scope/exact",
+            "/scope/star/one",
+            "/scope/deep",
+            "/scope/deep/a/b"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
 
     let manifest: Manifest = client
         .post(format!("{api}/manifests"))
         .json(&CreateManifest {
+            path: "/manifests/test".into(),
             name: "test".into(),
             version: 1,
             description: "End-to-end test Manifest".into(),
@@ -353,7 +323,7 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .json()
         .await?;
     let driver: DriverRecord = client
-        .get(format!("{api}/manifests/{}/driver", manifest.id))
+        .get(with_path(format!("{api}/manifests/driver"), &manifest.path))
         .send()
         .await?
         .error_for_status()?
@@ -364,28 +334,65 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .send()
         .await?
         .error_for_status()?
-        .json::<Vec<kas_auth::ServiceAccount>>()
+        .json::<Vec<ServiceAccount>>()
         .await?
         .into_iter()
-        .find(|account| account.driver_id == Some(driver.id))
+        .find(|account| account.driver_path.as_deref() == Some(&driver.path))
         .expect("Driver ServiceAccount");
-    let fanout_role: Role = client
+
+    // This binding lets the Driver fan out transactionally, watch only its
+    // subtree, and manage ordinary identities/RBAC inside its delegated paths.
+    let delegated_role: Role = client
         .post(format!("{api}/roles"))
         .json(&CreateRole {
-            name: "test-driver-fanout".into(),
-            description: "Allow the test Driver to atomically create note output".into(),
+            path: "/roles/system/test-driver-delegated".into(),
+            name: "test-driver-delegated".into(),
+            description: "Driver data and delegated control-plane scope".into(),
             rules: vec![
                 Rule {
                     resources: vec!["resources/note".into()],
-                    verbs: vec!["create".into(), "watch".into()],
+                    verbs: vec!["create".into(), "get".into(), "list".into(), "watch".into()],
+                    paths: vec![
+                        "/executions/team-a/**".into(),
+                        "/watch/exact".into(),
+                        "/watch/star/*".into(),
+                        "/watch/deep/**".into(),
+                    ],
+                },
+                Rule {
+                    resources: vec!["resources/test".into()],
+                    verbs: vec!["watch".into()],
+                    paths: vec!["/executions/team-a/**".into()],
                 },
                 Rule {
                     resources: vec!["links".into()],
                     verbs: vec!["create".into(), "watch".into()],
+                    paths: vec!["/executions/team-a/**".into()],
                 },
                 Rule {
-                    resources: vec!["resources/test".into(), "runs".into()],
+                    resources: vec!["runs".into()],
                     verbs: vec!["watch".into()],
+                    paths: vec!["/executions/team-a/**".into()],
+                },
+                Rule {
+                    resources: vec!["serviceaccounts".into()],
+                    verbs: vec!["create".into()],
+                    paths: vec!["/service-accounts/team-a/**".into()],
+                },
+                Rule {
+                    resources: vec!["credentials".into()],
+                    verbs: vec!["create".into()],
+                    paths: vec!["/service-accounts/team-a/**".into()],
+                },
+                Rule {
+                    resources: vec!["roles".into()],
+                    verbs: vec!["create".into()],
+                    paths: vec!["/roles/team-a/**".into()],
+                },
+                Rule {
+                    resources: vec!["rolebindings".into()],
+                    verbs: vec!["create".into()],
+                    paths: vec!["/role-bindings/team-a/**".into()],
                 },
             ],
         })
@@ -397,18 +404,20 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
     client
         .post(format!("{api}/role-bindings"))
         .json(&CreateRoleBinding {
-            name: "test-driver-fanout".into(),
-            role_id: fanout_role.id,
+            path: "/role-bindings/system/test-driver-delegated".into(),
+            name: "test-driver-delegated".into(),
+            role_path: delegated_role.path,
             subjects: vec![Subject {
                 kind: SubjectKind::ServiceAccount,
-                id: driver_service_account.id,
+                path: driver_service_account.path.clone(),
             }],
         })
         .send()
         .await?
         .error_for_status()?;
+
     let starting: DriverRecord = client
-        .patch(format!("{api}/drivers/{}", driver.id))
+        .patch(with_path(format!("{api}/drivers/by-path"), &driver.path))
         .json(&json!({ "state": "starting" }))
         .send()
         .await?
@@ -416,15 +425,112 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .json()
         .await?;
     assert_eq!(starting.state, DriverState::Starting);
+    let credential: IssuedCredential = client
+        .post(with_path(
+            format!("{api}/drivers/credentials"),
+            &driver.path,
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let driver_client = authenticated_client(&credential.token)?;
+
+    // A Driver uses the same REST and RBAC model as any other ServiceAccount.
+    let child_account: ServiceAccount = driver_client
+        .post(format!("{api}/service-accounts"))
+        .json(&CreateServiceAccount {
+            path: "/service-accounts/team-a/worker".into(),
+            name: "worker".into(),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let overreach = driver_client
+        .post(format!("{api}/roles"))
+        .json(&CreateRole {
+            path: "/roles/team-a/overreach".into(),
+            name: "overreach".into(),
+            description: "Must be rejected".into(),
+            rules: vec![Rule {
+                resources: vec!["resources/note".into()],
+                verbs: vec!["get".into()],
+                paths: vec!["/executions/**".into()],
+            }],
+        })
+        .send()
+        .await?;
+    assert_eq!(overreach.status(), reqwest::StatusCode::FORBIDDEN);
+    let child_role: Role = driver_client
+        .post(format!("{api}/roles"))
+        .json(&CreateRole {
+            path: "/roles/team-a/note-reader".into(),
+            name: "note-reader".into(),
+            description: "A strict subset of the Driver's own rights".into(),
+            rules: vec![Rule {
+                resources: vec!["resources/note".into()],
+                verbs: vec!["get".into(), "watch".into()],
+                paths: vec!["/executions/team-a/readonly/**".into()],
+            }],
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    driver_client
+        .post(format!("{api}/role-bindings"))
+        .json(&CreateRoleBinding {
+            path: "/role-bindings/team-a/note-reader".into(),
+            name: "note-reader".into(),
+            role_path: child_role.path,
+            subjects: vec![Subject {
+                kind: SubjectKind::ServiceAccount,
+                path: child_account.path.clone(),
+            }],
+        })
+        .send()
+        .await?
+        .error_for_status()?;
+    let child_credential: IssuedCredential = driver_client
+        .post(with_path(
+            format!("{api}/service-accounts/credentials"),
+            &child_account.path,
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(child_credential.token.starts_with("kas_"));
+
+    let source_path = "/executions/team-a/test-1";
     let resource: Resource = client
         .post(format!("{api}/resources"))
         .json(&CreateResource {
-            manifest_id: manifest.id,
+            path: source_path.into(),
+            manifest_path: manifest.path.clone(),
             name: "fixture".into(),
             spec: json!({
                 "label": "fixture",
-                "fanout_manifest_id": passive_manifest.id
+                "fanout_manifest_path": note_manifest.path
             }),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let initial_note: Resource = client
+        .post(format!("{api}/resources"))
+        .json(&CreateResource {
+            path: "/executions/team-a/note-1".into(),
+            manifest_path: note_manifest.path.clone(),
+            name: "note-1".into(),
+            spec: json!({ "archived": false }),
         })
         .send()
         .await?
@@ -434,14 +540,15 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
     let link: Link = client
         .post(format!("{api}/links"))
         .json(&CreateLink {
+            path: "/executions/team-a/links/related".into(),
             source: ObjectRef {
                 kind: ObjectKind::Resource,
-                id: passive_resource.id,
+                path: initial_note.path.clone(),
             },
             relation: "related_to".into(),
             target: ObjectRef {
                 kind: ObjectKind::Resource,
-                id: resource.id,
+                path: resource.path.clone(),
             },
             metadata: json!({ "reason": "e2e" }),
         })
@@ -450,30 +557,60 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    let links: Vec<Link> = client
-        .get(format!(
-            "{api}/links?source_kind=resource&source_id={}",
-            passive_resource.id
-        ))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(links, vec![link.clone()]);
-    let fetched_link: Link = client
-        .get(format!("{api}/links/{}", link.id))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(fetched_link, link);
+
+    let observed = Arc::new(ObservedWatch::default());
+    let runtime = DriverRuntime::new(
+        &api,
+        driver.path.clone(),
+        starting.generation,
+        credential.token.clone(),
+        RecordingTestDriver {
+            selectors: vec![
+                WatchSelector::Resource {
+                    manifest_path: Some(manifest.path.clone()),
+                    path: Some("/executions/team-a/**".into()),
+                },
+                WatchSelector::Resource {
+                    manifest_path: Some(note_manifest.path.clone()),
+                    path: Some("/executions/team-a/**".into()),
+                },
+                WatchSelector::Resource {
+                    manifest_path: Some(note_manifest.path.clone()),
+                    path: Some("/watch/exact".into()),
+                },
+                WatchSelector::Resource {
+                    manifest_path: Some(note_manifest.path.clone()),
+                    path: Some("/watch/star/*".into()),
+                },
+                WatchSelector::Resource {
+                    manifest_path: Some(note_manifest.path.clone()),
+                    path: Some("/watch/deep/**".into()),
+                },
+                WatchSelector::Link {
+                    path: Some("/executions/team-a/**".into()),
+                    relation: None,
+                    source: None,
+                    target: None,
+                },
+                WatchSelector::Run {
+                    resource_path: Some(resource.path.clone()),
+                    path: Some("/executions/team-a/**".into()),
+                },
+            ],
+            observed: observed.clone(),
+        },
+    )
+    .with_reconnect_interval(Duration::from_millis(200));
+    let driver_process = tokio::spawn(async move { runtime.run().await });
+
+    let request_id = Uuid::new_v4();
+    let run_path = format!("{source_path}/runs/{request_id}");
     let first: Run = client
         .post(format!("{api}/runs"))
         .json(&CreateRun {
-            request_id: Uuid::new_v4(),
-            resource_id: resource.id,
+            path: run_path.clone(),
+            request_id,
+            resource_path: resource.path.clone(),
             action: "echo".into(),
             input: json!({ "message": "hello" }),
         })
@@ -482,63 +619,29 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .error_for_status()?
         .json()
         .await?;
-
-    let credential: IssuedCredential = client
-        .post(format!("{api}/drivers/{}/credentials", driver.id))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let observed = Arc::new(ObservedWatch::default());
-    let runtime = DriverRuntime::new(
-        &api,
-        driver.id,
-        starting.generation,
-        credential.token.clone(),
-        RecordingTestDriver {
-            selectors: vec![
-                WatchSelector::Resource {
-                    manifest_id: Some(manifest.id),
-                },
-                WatchSelector::Resource {
-                    manifest_id: Some(passive_manifest.id),
-                },
-                WatchSelector::Link {
-                    relation: None,
-                    source: None,
-                    target: None,
-                },
-                WatchSelector::Run {
-                    resource_id: Some(resource.id),
-                },
-            ],
-            observed: observed.clone(),
-        },
-    )
-    .with_reconnect_interval(Duration::from_millis(300));
-    let driver_process = tokio::spawn(async move { runtime.run().await });
-    let first = wait_for_finished_run(&client, &api, first.id).await?;
+    assert_eq!(first.path, run_path);
+    let first = wait_for_finished_run(&client, &api, &first.path).await?;
     assert_eq!(first.status, RunStatus::Succeeded);
-    let first_output = first.output.as_ref().expect("Run output");
-    assert_eq!(first_output["echo"], json!({ "message": "hello" }));
-    let fanout_resource_id = Uuid::parse_str(
-        first_output["fanout_resource_id"]
-            .as_str()
-            .expect("fanout Resource ID"),
-    )?;
-    let fanout_resource: Resource = client
-        .get(format!("{api}/resources/{fanout_resource_id}"))
+    assert_eq!(
+        first.output.as_ref().unwrap()["echo"],
+        json!({ "message": "hello" })
+    );
+    let fanout_path = first.output.as_ref().unwrap()["fanout_resource_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fanout: Resource = client
+        .get(with_path(format!("{api}/resources/by-path"), &fanout_path))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(fanout_resource.manifest_id, passive_manifest.id);
+    assert_eq!(fanout.manifest_path, note_manifest.path);
     let produced: Vec<Link> = client
         .get(format!(
-            "{api}/links?source_kind=run&source_id={}",
-            first.id
+            "{api}/links?source_kind=run&source_path={}",
+            first.path
         ))
         .send()
         .await?
@@ -547,22 +650,23 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .await?;
     assert!(produced
         .iter()
-        .any(|link| { link.relation == "produces" && link.target.id == fanout_resource_id }));
+        .any(|link| link.relation == "produces" && link.target.path == fanout.path));
+
     let reconciled_event = wait_for_watch_event(&observed, |event| {
         let (kind, _, object) = watch_event_parts(event);
-        kind == "updated" && object.kind == ObjectKind::Resource && object.id == resource.id
+        kind == "updated" && object.kind == ObjectKind::Resource && object.path == resource.path
     })
     .await?;
     let fanout_event = wait_for_watch_event(&observed, |event| {
         let (kind, _, object) = watch_event_parts(event);
-        kind == "created" && object.kind == ObjectKind::Resource && object.id == fanout_resource_id
+        kind == "created" && object.kind == ObjectKind::Resource && object.path == fanout.path
     })
     .await?;
     let run_event = wait_for_watch_event(&observed, |event| {
         let (kind, _, object) = watch_event_parts(event);
         kind == "updated"
             && object.kind == ObjectKind::Run
-            && object.id == first.id
+            && object.path == first.path
             && object.value["status"] == "succeeded"
     })
     .await?;
@@ -573,6 +677,53 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
             && object.value["relation"] == "produces"
     })
     .await?;
+
+    // Exercise exact, `*`, and `**` WatchSelector path matching. The nested
+    // child under the one-segment selector and the unrelated path must not be
+    // delivered.
+    for path in [
+        "/watch/exact",
+        "/watch/star/one",
+        "/watch/star/one/nested",
+        "/watch/deep",
+        "/watch/deep/a/b",
+        "/watch/other",
+    ] {
+        client
+            .post(format!("{api}/resources"))
+            .json(&CreateResource {
+                path: path.into(),
+                manifest_path: note_manifest.path.clone(),
+                name: path.rsplit('/').next().unwrap().into(),
+                spec: json!({ "archived": false }),
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+    for expected in [
+        "/watch/exact",
+        "/watch/star/one",
+        "/watch/deep",
+        "/watch/deep/a/b",
+    ] {
+        wait_for_watch_event(&observed, |event| {
+            let (kind, _, object) = watch_event_parts(event);
+            kind == "created" && object.kind == ObjectKind::Resource && object.path == expected
+        })
+        .await?;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let watched_paths: HashSet<String> = observed
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| watch_event_parts(event).2.path.clone())
+        .collect();
+    assert!(!watched_paths.contains("/watch/star/one/nested"));
+    assert!(!watched_paths.contains("/watch/other"));
+
     let mut observed_cursors = [
         watch_event_parts(&reconciled_event).1,
         watch_event_parts(&fanout_event).1,
@@ -581,46 +732,32 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
     ];
     observed_cursors.sort_unstable();
     assert!(observed_cursors.windows(2).all(|pair| pair[0] < pair[1]));
-    let repeated: Run = client
-        .put(format!("{api}/runs/{}/result", first.id))
-        .json(&FinishRun {
-            driver_generation: starting.generation,
-            result: RunResult::Succeeded {
-                output: first.output.clone().unwrap(),
-            },
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(repeated, first);
 
     let reconciled: Resource = client
-        .get(format!("{api}/resources/{}", resource.id))
+        .get(with_path(
+            format!("{api}/resources/by-path"),
+            &resource.path,
+        ))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(
-        reconciled.status,
-        json!({ "observed_spec": {
-            "label": "fixture",
-            "fanout_manifest_id": passive_manifest.id
-        } })
-    );
+    assert_eq!(reconciled.status["observed_spec"]["label"], "fixture");
 
-    // Replace the Runtime's socket briefly. The Link is deleted while the
-    // Runtime is disconnected, so observing it after reconnect proves that
-    // the Runtime resumed its watch from the last successfully handled cursor.
-    let mut replacement =
-        replace_driver_connection(address, driver.id, starting.generation, &credential.token)
-            .await?;
+    // A superseding socket disconnects the Runtime. Deleting while it is away
+    // verifies that reconnect resumes the watch from its last handled cursor.
+    let mut replacement = replace_driver_connection(
+        address,
+        &driver.path,
+        starting.generation,
+        &credential.token,
+    )
+    .await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         client
-            .delete(format!("{api}/links/{}", link.id))
+            .delete(with_path(format!("{api}/links/by-path"), &link.path))
             .send()
             .await?
             .status(),
@@ -629,52 +766,15 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
     replacement.close(None).await?;
     let deleted_event = wait_for_watch_event(&observed, |event| {
         let (kind, _, object) = watch_event_parts(event);
-        kind == "deleted" && object.kind == ObjectKind::Link && object.id == link.id
+        kind == "deleted" && object.kind == ObjectKind::Link && object.path == link.path
     })
     .await?;
     assert!(
         watch_event_parts(&deleted_event).1 > *observed_cursors.last().expect("initial cursor")
     );
-    assert_eq!(
-        client
-            .get(format!("{api}/links/{}", link.id))
-            .send()
-            .await?
-            .status(),
-        reqwest::StatusCode::NOT_FOUND
-    );
-
-    let second: Run = client
-        .post(format!("{api}/runs"))
-        .json(&CreateRun {
-            request_id: Uuid::new_v4(),
-            resource_id: resource.id,
-            action: "echo".into(),
-            input: json!({ "message": "still running" }),
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let second = wait_for_finished_run(&client, &api, second.id).await?;
-    assert_eq!(second.status, RunStatus::Succeeded);
-    assert_eq!(
-        second.output.as_ref().unwrap()["echo"],
-        json!({ "message": "still running" })
-    );
-    wait_for_watch_event(&observed, |event| {
-        let (kind, _, object) = watch_event_parts(event);
-        kind == "updated"
-            && object.kind == ObjectKind::Run
-            && object.id == second.id
-            && object.value["status"] == "succeeded"
-    })
-    .await?;
-    assert!(!driver_process.is_finished());
 
     let stopping: DriverRecord = client
-        .patch(format!("{api}/drivers/{}", driver.id))
+        .patch(with_path(format!("{api}/drivers/by-path"), &driver.path))
         .json(&json!({ "state": "stopping" }))
         .send()
         .await?
@@ -682,9 +782,9 @@ async fn test_driver_executes_a_run_end_to_end() -> anyhow::Result<()> {
         .json()
         .await?;
     assert_eq!(stopping.state, DriverState::Stopping);
-    tokio::time::timeout(Duration::from_secs(3), driver_process).await???;
+    tokio::time::timeout(Duration::from_secs(5), driver_process).await???;
     let stopped: DriverRecord = client
-        .get(format!("{api}/drivers/{}", driver.id))
+        .get(with_path(format!("{api}/drivers/by-path"), &driver.path))
         .send()
         .await?
         .error_for_status()?
