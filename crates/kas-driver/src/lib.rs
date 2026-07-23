@@ -2,8 +2,8 @@ use std::{sync::Mutex, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use kas_core::{
-    Driver as DriverRecord, DriverExecution, DriverState, Mutation, ObjectKind, ObjectRef,
-    Resource, Run, RunResult,
+    Action, Driver as DriverRecord, DriverExecution, DriverState, Mutation, ObjectKind,
+    ObjectSelector, Resource, Run, RunResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -29,7 +29,12 @@ pub trait Driver: Send + Sync {
 
     fn reconcile(&self, resource: &Resource) -> Result<Value, DriverError>;
 
-    fn execute(&self, resource: &Resource, run: &Run) -> Result<DriverExecution, DriverError>;
+    fn execute(
+        &self,
+        resource: &Resource,
+        action: &Action,
+        run: &Run,
+    ) -> Result<DriverExecution, DriverError>;
 
     fn watch_selectors(&self) -> Vec<WatchSelector> {
         Vec::new()
@@ -40,24 +45,7 @@ pub trait Driver: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WatchSelector {
-    Resource {
-        manifest_path: Option<String>,
-        path: Option<String>,
-    },
-    Link {
-        path: Option<String>,
-        relation: Option<String>,
-        source: Option<ObjectRef>,
-        target: Option<ObjectRef>,
-    },
-    Run {
-        resource_path: Option<String>,
-        path: Option<String>,
-    },
-}
+pub type WatchSelector = ObjectSelector;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WatchObject {
@@ -125,6 +113,7 @@ pub enum ServerMessage {
         delivery_id: Uuid,
         run: Box<Run>,
         resource: Resource,
+        action: Action,
     },
     Stop {
         delivery_id: Uuid,
@@ -418,23 +407,25 @@ impl<D: Driver> DriverRuntime<D> {
                 delivery_id,
                 run,
                 resource,
+                action,
             } => {
                 self.send(socket, ClientMessage::Ack { delivery_id })
                     .await?;
-                let (result, mut mutations) = match self.implementation.execute(&resource, &run) {
-                    Ok(execution) => (
-                        RunResult::Succeeded {
-                            output: execution.output,
-                        },
-                        execution.mutations,
-                    ),
-                    Err(error) => (
-                        RunResult::Failed {
-                            error: error.to_string(),
-                        },
-                        Vec::new(),
-                    ),
-                };
+                let (result, mut mutations) =
+                    match self.implementation.execute(&resource, &action, &run) {
+                        Ok(execution) => (
+                            RunResult::Succeeded {
+                                output: execution.output,
+                            },
+                            execution.mutations,
+                        ),
+                        Err(error) => (
+                            RunResult::Failed {
+                                error: error.to_string(),
+                            },
+                            Vec::new(),
+                        ),
+                    };
                 mutations.push(Mutation::CompleteRun {
                     run_path: run.path,
                     result,
@@ -657,7 +648,12 @@ mod tests {
             Ok(Value::Null)
         }
 
-        fn execute(&self, _: &Resource, _: &Run) -> Result<DriverExecution, DriverError> {
+        fn execute(
+            &self,
+            _: &Resource,
+            _: &Action,
+            _: &Run,
+        ) -> Result<DriverExecution, DriverError> {
             Ok(Value::Null.into())
         }
     }
@@ -675,14 +671,19 @@ mod tests {
             Ok(Value::Null)
         }
 
-        fn execute(&self, _: &Resource, _: &Run) -> Result<DriverExecution, DriverError> {
+        fn execute(
+            &self,
+            _: &Resource,
+            _: &Action,
+            _: &Run,
+        ) -> Result<DriverExecution, DriverError> {
             Ok(Value::Null.into())
         }
 
         fn watch_selectors(&self) -> Vec<WatchSelector> {
-            vec![WatchSelector::Resource {
-                manifest_path: None,
-                path: None,
+            vec![ObjectSelector {
+                kind: Some(kas_core::KindSelector::One(ObjectKind::Resource)),
+                ..ObjectSelector::default()
             }]
         }
 
@@ -695,8 +696,7 @@ mod tests {
     fn driver_record(driver_path: &str, generation: u64) -> DriverRecord {
         serde_json::from_value(json!({
             "path": driver_path,
-            "manifest_path": "/manifests/watching",
-            "name": "watching",
+            "desired_state": "running",
             "state": "ready",
             "generation": generation,
             "process_id": null,
@@ -780,13 +780,13 @@ mod tests {
     fn watch_messages_have_stable_tagged_wire_format() {
         let request_id = Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap();
         let watch_id = Uuid::parse_str("20000000-0000-0000-0000-000000000002").unwrap();
-        let manifest_path = "/manifests/example".to_owned();
         let watch = ClientMessage::Watch {
             request_id,
             cursor: Some(12),
-            selectors: vec![WatchSelector::Resource {
-                manifest_path: Some(manifest_path.clone()),
+            selectors: vec![ObjectSelector {
+                kind: Some(kas_core::KindSelector::One(ObjectKind::Resource)),
                 path: Some("/examples/**".into()),
+                ..ObjectSelector::default()
             }],
         };
         assert_eq!(
@@ -797,7 +797,6 @@ mod tests {
                 "cursor": 12,
                 "selectors": [{
                     "kind": "resource",
-                    "manifest_path": manifest_path,
                     "path": "/examples/**"
                 }]
             })

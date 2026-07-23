@@ -1,6 +1,4 @@
-use kas_core::{
-    DriverExecution, Mutation, ObjectKind, ObjectRef, PlannedLink, PlannedResource, Resource, Run,
-};
+use kas_core::{Action, DriverExecution, Resource, Run};
 use kas_driver::{Driver, DriverError};
 use serde_json::{json, Value};
 
@@ -15,45 +13,16 @@ impl Driver for TestDriver {
         Ok(json!({ "observed_spec": resource.spec }))
     }
 
-    fn execute(&self, resource: &Resource, run: &Run) -> Result<DriverExecution, DriverError> {
-        if run.action != "echo" {
-            return Err(DriverError::UnsupportedAction(run.action.clone()));
+    fn execute(
+        &self,
+        _resource: &Resource,
+        action: &Action,
+        run: &Run,
+    ) -> Result<DriverExecution, DriverError> {
+        if action.name != "echo" {
+            return Err(DriverError::UnsupportedAction(action.path.clone()));
         }
-        let mut execution: DriverExecution = json!({ "echo": run.input }).into();
-        if let Some(manifest_path) = resource
-            .spec
-            .get("fanout_manifest_path")
-            .and_then(Value::as_str)
-        {
-            let resource_path = format!("{}/fanout", run.path);
-            execution.output["fanout_resource_path"] = json!(resource_path);
-            execution.mutations = vec![
-                Mutation::CreateResource {
-                    resource: PlannedResource {
-                        path: resource_path.clone(),
-                        manifest_path: manifest_path.into(),
-                        name: format!("echo-{}", run.path.rsplit('/').next().unwrap_or("result")),
-                        spec: json!({ "archived": false }),
-                    },
-                },
-                Mutation::CreateLink {
-                    link: PlannedLink {
-                        path: format!("{}/links/produces", run.path),
-                        source: ObjectRef {
-                            kind: ObjectKind::Run,
-                            path: run.path.clone(),
-                        },
-                        relation: "produces".into(),
-                        target: ObjectRef {
-                            kind: ObjectKind::Resource,
-                            path: resource_path,
-                        },
-                        metadata: json!({}),
-                    },
-                },
-            ];
-        }
-        Ok(execution)
+        Ok(json!({ "echo": run.input }).into())
     }
 }
 
@@ -62,12 +31,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fanout_uses_run_scoped_paths() {
+    fn echo_uses_hydrated_action() {
         let resource: Resource = serde_json::from_value(json!({
             "path": "/resources/source",
-            "manifest_path": "/manifests/source",
             "name": "source",
-            "spec": {"fanout_manifest_path": "/manifests/message"},
+            "spec": {},
             "status": {},
             "revision": 0,
             "created_at": "2026-01-01T00:00:00Z",
@@ -77,10 +45,7 @@ mod tests {
         let run: Run = serde_json::from_value(json!({
             "path": "/runs/echo-1",
             "request_id": "10000000-0000-0000-0000-000000000001",
-            "resource_path": "/resources/source",
-            "driver_path": "/drivers/source",
             "driver_generation": 1,
-            "action": "echo",
             "input": {"message": "hello"},
             "status": "running",
             "output": null,
@@ -90,42 +55,18 @@ mod tests {
             "finished_at": null
         }))
         .unwrap();
+        let action: Action = serde_json::from_value(json!({
+            "path": "/manifests/test/actions/echo",
+            "name": "echo",
+            "description": "Echo",
+            "input_schema": {},
+            "output_schema": {}
+        }))
+        .unwrap();
 
-        let execution = TestDriver.execute(&resource, &run).unwrap();
+        let execution = TestDriver.execute(&resource, &action, &run).unwrap();
 
-        assert_eq!(
-            execution.output["fanout_resource_path"],
-            "/runs/echo-1/fanout"
-        );
-        assert!(matches!(
-            execution.mutations.as_slice(),
-            [
-                Mutation::CreateResource {
-                    resource: PlannedResource {
-                        path,
-                        manifest_path,
-                        ..
-                    }
-                },
-                Mutation::CreateLink {
-                    link: PlannedLink {
-                        path: link_path,
-                        source: ObjectRef {
-                            path: source_path,
-                            ..
-                        },
-                        target: ObjectRef {
-                            path: target_path,
-                            ..
-                        },
-                        ..
-                    }
-                }
-            ] if path == "/runs/echo-1/fanout"
-                && manifest_path == "/manifests/message"
-                && link_path == "/runs/echo-1/links/produces"
-                && source_path == "/runs/echo-1"
-                && target_path == "/runs/echo-1/fanout"
-        ));
+        assert_eq!(execution.output["echo"]["message"], "hello");
+        assert!(execution.mutations.is_empty());
     }
 }

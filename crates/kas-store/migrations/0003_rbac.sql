@@ -51,9 +51,3 @@ CREATE TABLE credentials (
     revoked_at TEXT,
     created_at TEXT NOT NULL
 ) STRICT;
-
-INSERT INTO roles(id,name,description,rules_json,managed_by,created_at,updated_at) VALUES
-('00000000-0000-0000-0000-000000000001','system:admin','Full system access','[{"resources":["*"],"verbs":["*"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-('00000000-0000-0000-0000-000000000002','system:editor','Manage business objects','[{"resources":["manifests","resources","drivers","runs"],"verbs":["get","list","create","update","patch"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-('00000000-0000-0000-0000-000000000003','system:viewer','Read business objects','[{"resources":["manifests","resources","drivers","runs"],"verbs":["get","list"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-('00000000-0000-0000-0000-000000000004','system:driver','Driver runtime access','[{"resources":["drivers"],"verbs":["get","patch"]},{"resources":["drivers/claim"],"verbs":["create"]},{"resources":["resources/status","runs/result"],"verbs":["update"]}]','system',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'));

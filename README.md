@@ -10,7 +10,8 @@ KAS 先只保留几个最基础的概念：
 
 ## Manifest
 
-一类 Resource 的声明，用来说明这类 Resource 有哪些数据、可以执行哪些 Action，以及由哪个 Driver 负责。
+一类 Resource 的完整包，用来声明 Resource schema、Action、Relation，以及可选的
+singleton Driver 和它的 executable。
 
 ## Action
 
@@ -41,8 +42,8 @@ Resource、Link 和 Run 被创建、更新或删除时，平台会在同一事�
 ## Link
 
 两个对象之间的有方向关系。任何具有稳定 Path 的持久对象都可以作为 source
-或 target，包括 Manifest、Resource、Driver、Run、Link、User、
-ServiceAccount、Role、RoleBinding 和 Credential。Event、Delivery、
+或 target，包括 Manifest、Action、Relation、Resource、Driver、Run、Link、
+User、ServiceAccount、Role、RoleBinding 和 Credential。Event、Delivery、
 request、watch 等追加记录或运行时对象不属于 Link 端点。
 
 例如：
@@ -91,7 +92,8 @@ Path 创建后不能重命名，禁止空段、`.`、`..`、重复 `/` 和尾部
 - 声明了 Action 的 Manifest 必须拥有一个稳定的 singleton Driver。
 - 同一 Manifest 的所有 Resource 共享这个 Driver 进程。
 - Driver 重启不会创建新的逻辑 Driver，但会递增 `generation`。
-- Run 记录执行它的 Driver 和 generation，旧进程不能完成新一代 Run。
+- Run 通过受保护的 Link 关联 Resource、Action 和 Driver，并记录执行
+  generation；旧进程不能完成新一代 Run。
 
 Driver 生命周期：
 
@@ -152,7 +154,52 @@ cargo run -p kas-api
 ```
 
 `kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
-`kas-admin bootstrap` 只允许执行一次，并把初始管理员 Bearer token 输出到终端。
+Store 打开数据库时会自动安装随 KAS 发布的 `builtins/core` 和 `builtins/auth`
+Manifest 包，因此核心 Relation 和默认 Role 从首次启动起就存在，不由
+Migration 写入，也不依赖管理命令注入。`kas-admin bootstrap` 只使用 auth
+built-in 中标记为 admin 的 Role 创建首个管理员及其 Binding，并把 Bearer
+token 输出到终端。
+
+## Manifest 包
+
+`POST /manifests` 接收 `application/vnd.kas.manifest+tar`，不接受客户端机器上的
+binary 绝对路径。tar 根目录必须包含 `manifest.json`，例如：
+
+```text
+agent.kas
+├── manifest.json
+└── driver/
+    └── bin/
+        └── kas-agent-driver
+```
+
+Manifest 内成员使用 `./` 相对路径：
+
+```text
+./actions/message
+./relations/has-thread
+./driver
+./driver/bin/kas-agent-driver
+```
+
+对象路径分别解析为 `/manifests/agent/actions/message`、
+`/manifests/agent/relations/has-thread` 和 `/manifests/agent/driver`。
+entrypoint 仍作为包内相对文件保存。
+
+API 对整个 tar 计算 SHA-256，先解压到 staging，校验完成后原子移动到：
+
+```text
+${KAS_DATA_DIR}/packages/sha256/<digest>/
+```
+
+数据库只保存 `sha256:<digest>` 和相对 entrypoint，不保存数据目录的绝对路径。
+同一 Manifest path 和 digest 的重复安装是幂等操作；同一路径安装不同内容会被拒绝。
+
+带 Driver 的 Manifest 安装完成后，由 API 进程内的 Supervisor 自动启动
+entrypoint。Supervisor 管理 singleton、generation、临时 Credential、ready
+超时、停止、崩溃重启和退避，并向进程传递 `KAS_API`、
+`KAS_DRIVER_PATH`、`KAS_DRIVER_GENERATION`、`KAS_DRIVER_TOKEN`、
+`KAS_MANIFEST_PATH` 和 `KAS_PACKAGE_ROOT`。
 
 ## 权限
 
@@ -176,9 +223,15 @@ Path pattern 支持精确匹配、单段 `*` 和递归 `**`；省略 `paths` 表
 resource、verb 和 path 都不能超过调用者现有权限；绑定 Role 同样要求调用者
 拥有该 Role 的权限或 `bind` 权限。
 
-内置的 `system:admin`、`system:editor`、`system:viewer`、`system:driver` Role 以及系统自动创建的 Binding 不允许通过 API 修改或删除。用户创建的 Role 和 RoleBinding 可以由管理员维护。
+Manifest 可以在 `rbac` 中声明自己的 ServiceAccount、Role 和 RoleBinding。
+这些对象随 Manifest 原子安装，不能作为普通独立对象修改或删除。Driver 必须
+通过 `service_account` 显式引用其中一个 ServiceAccount；KAS 不猜测业务权限，
+也不会为 Driver 自动生成 Role 或 Binding。Driver 每次启动会签发绑定当前
+generation 和该 ServiceAccount 的短期 token，旧 token 会被撤销。
 
-每个 Driver 自动拥有一个 ServiceAccount。Driver 每次启动都需要签发绑定当前 generation 的短期 token，旧 token 会被撤销。
+默认的 `system:admin`、`system:editor`、`system:viewer` Role 由 auth built-in
+Manifest 声明。系统身份不依赖固定对象 path：bootstrap 按 Role 的
+`system_role` 语义查找 admin。
 
 ## 更新、关系与事件
 
@@ -186,10 +239,27 @@ Resource spec 可以通过 `PATCH /resources/by-path?path=...` 更新，请求�
 `expected_revision`。更新成功后 revision 递增；旧 revision 会收到冲突响应。
 archive、restore 等业务状态保留在各自 Resource spec 中，不是平台字段。
 
-Link API 支持创建、读取、按 source/relation/target 过滤和删除。创建 Link
-除了需要对 Link 自身拥有 `links:create`，还必须对 source 和 target 对应的
-对象类型及 Path 拥有 `link` verb。Event 是 Watch 使用的内部持久化日志，
-只能由平台随业务对象写入自动产生，不提供业务创建接口。
+Action、Relation、Driver、ServiceAccount、Role 和 RoleBinding 都拥有
+Manifest 下的独立 Path。Manifest 安装时，KAS 根据 core/auth built-in Relation
+的语义 role 自动创建 Manifest 到所有成员、Driver 到 ServiceAccount、
+RoleBinding 到 Role 和 Subject 的受保护 Link。创建 Resource 和 Run 时，KAS
+同样自动创建 Resource 到 Manifest、Run 到 Resource/Action/Driver 的归属
+Link；客户端只提交直接引用，不需要也不能伪造这些平台关系。
+
+实现按 Relation 的语义 role 查找关系，不把 built-in Relation 的具体 path
+写死在业务逻辑中。数据库可以维护由 Link 自动生成的内部投影索引，但这些
+索引不属于公开 API。
+
+Link API 支持创建、读取、按 source/relation_path/target 过滤和删除。创建 Link
+除了需要 `links:create` 和具体 Relation 的 `relations:use`，还必须对 source
+和 target 对应的对象类型及 Path 拥有 `link` verb。执行 Run 还需要具体 Action
+的 `actions:invoke`。
+
+`GET /resources/by-path?path=...&include=relations` 会在 Resource 字段之外返回
+一层双向 `links` 和调用者有权读取的 `related` 对象，不进行递归展开。
+
+Event 是 Watch 使用的内部持久化日志，只能由平台随业务对象写入自动产生，
+不提供业务创建接口。
 
 ## Driver WebSocket
 
@@ -203,10 +273,15 @@ Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一
 reconcile 的 mutation 包含 `update_resource_status`；Run 的 mutation
 可以包含有确定 path 的 Resource、Resource 更新和 Link 操作，
 并以 `complete_run` 结束。KAS 返回 `mutation_result`，只有 `committed`
-才表示整组写入成功。KAS 先按 Driver ServiceAccount 的精细 RBAC 验证，
-再在一个 SQLite 事务中同时提交全部操作和完成 delivery；任一操作失败时
-整组回滚。跨 Manifest fanout 需要显式给 Driver ServiceAccount
-绑定诸如 `resources/message:create` 和 `links:create` 的 Role。
+才表示整组写入成功。
+
+Driver 的 `ready`、ack、reconcile 状态回写和 Run 完成属于控制协议，由绑定
+generation 的 Credential、Driver 身份、in-flight delivery 和目标对象共同
+授权，不要求 Manifest 猜测这些基础协议权限。mutation 中额外的业务写操作
+仍按 Driver ServiceAccount 的精细 RBAC 验证，并和 delivery 完成在一个
+SQLite 事务中提交；任一操作失败时整组回滚。跨 Manifest fanout 需要显式给
+Driver ServiceAccount 绑定诸如 `resources/message:create` 和
+`links:create` 的 Role。
 
 现有 REST 写接口继续保留；统一的 `mutation` 入口只存在于 Driver
 WebSocket 协议中，不提供对应的 HTTP endpoint。
@@ -231,21 +306,31 @@ Watch 不发送 snapshot。Driver 使用 `hello` 中的 Event cursor 建立 Watc
 cargo test --workspace
 ```
 
-端到端测试会创建临时数据库并启动真实 HTTP 服务，然后使用 `kas-test-driver` 完成以下流程：
+真实进程级端到端测试已独立为脚本，不再放在 Rust 进程内模拟：
 
-```text
-创建 Manifest 和 Resource
-  → 启动 singleton Driver
-  → 创建 Run
-  → Driver 通过 WebSocket ready 并接收 Run
-  → Driver reconcile Resource 并上报 status
-  → Driver 读取 Resource 并执行 echo Action
-  → Driver 上报结果后继续运行
-  → 创建并完成第二条 Run
-  → 通过 API 查询并验证最终状态
+```bash
+tests/e2e.sh
 ```
 
-`kas-test-driver` 也可以单独运行。控制面将 Driver 切换到 `starting` 后，把对应信息传给进程：
+脚本使用临时数据库和数据目录完成：
+
+```text
+启动 migration、admin 和真实 kas-api
+  → 验证 core/auth built-in Manifest 在启动时已存在
+  → 把编译后的 kas-test-driver 打进 .kas tar
+  → POST 安装 Manifest 包
+  → 验证 Manifest/RBAC/Driver 的受保护关系已自动创建
+  → Supervisor 启动真实 binary
+  → Driver 通过 WebSocket ready
+  → 创建 Resource，并由 KAS 自动关联 Manifest
+  → 查询 Resource、Links 和关联对象
+  → 创建 Run，并由 KAS 自动关联 Resource/Action/Driver
+  → Driver 执行 echo 并完成 Run
+  → 验证受保护的 System Links
+  → 停止 Driver 并确认子进程退出
+```
+
+`kas-test-driver` 也可以单独运行。正常情况下这些变量由 Supervisor 自动传入：
 
 ```bash
 KAS_API=http://127.0.0.1:3000 \
