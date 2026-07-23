@@ -1,0 +1,16 @@
+[package]
+name = "kas-agent-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+kas-core.workspace = true
+kas-driver.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+

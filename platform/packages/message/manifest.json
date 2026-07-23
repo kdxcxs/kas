@@ -1,0 +1,141 @@
+{
+  "path": "/manifests/message",
+  "name": "message",
+  "version": 1,
+  "description": "An immutable text message authored by a User or Agent.",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "role",
+      "body"
+    ],
+    "properties": {
+      "role": {
+        "type": "string",
+        "enum": [
+          "user",
+          "assistant",
+          "system"
+        ]
+      },
+      "body": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  },
+  "actions": [],
+  "relations": [
+    {
+      "path": "./relations/authored-by",
+      "name": "authored_by",
+      "inverse_name": "authored",
+      "sources": [
+        {
+          "kind": "resource",
+          "path": "/messages/**"
+        }
+      ],
+      "targets": [
+        {
+          "any_of": [
+            {
+              "kind": "user"
+            },
+            {
+              "kind": "resource",
+              "path": "/agents/**"
+            }
+          ]
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/addressed-to",
+      "name": "addressed_to",
+      "inverse_name": "received",
+      "sources": [
+        {
+          "kind": "resource",
+          "path": "/messages/**"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "resource",
+          "path": "/agents/**"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/replies-to",
+      "name": "replies_to",
+      "inverse_name": "has_reply",
+      "sources": [
+        {
+          "kind": "resource",
+          "path": "/messages/**"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "resource",
+          "path": "/messages/**"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    },
+    {
+      "path": "./relations/thread-root",
+      "name": "thread_root",
+      "inverse_name": "thread_message",
+      "sources": [
+        {
+          "kind": "resource",
+          "path": "/messages/**"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "resource",
+          "path": "/messages/**"
+        }
+      ],
+      "cardinality": {
+        "max_targets_per_source": 1
+      },
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  ],
+  "driver": null,
+  "rbac": {
+    "service_accounts": [],
+    "roles": [],
+    "role_bindings": []
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "path": "/manifests/agent",
+  "name": "agent",
+  "version": 1,
+  "description": "A Codex CLI agent running in the current Driver environment.",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "working_directory"
+    ],
+    "properties": {
+      "instructions": {
+        "type": "string",
+        "default": ""
+      },
+      "working_directory": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  },
+  "actions": [
+    {
+      "path": "./actions/message",
+      "name": "message",
+      "description": "Send a stored user Message to this Agent and create its assistant reply.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": [
+          "message_path"
+        ],
+        "properties": {
+          "message_path": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": [
+          "reply_message_path"
+        ],
+        "properties": {
+          "reply_message_path": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+  "relations": [],
+  "driver": {
+    "path": "./driver",
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-agent-driver",
+    "service_account": "./service-accounts/driver",
+    "args": [],
+    "restart": "on_failure"
+  },
+  "rbac": {
+    "service_accounts": [
+      {
+        "path": "./service-accounts/driver",
+        "name": "agent-driver"
+      }
+    ],
+    "roles": [
+      {
+        "path": "./roles/driver",
+        "name": "agent-driver",
+        "description": "Create Agent replies and relate them to Agents and Messages.",
+        "rules": [
+          {
+            "resources": [
+              "resources/agent"
+            ],
+            "verbs": [
+              "get",
+              "link"
+            ],
+            "paths": [
+              "/agents/**"
+            ]
+          },
+          {
+            "resources": [
+              "resources/message"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "link"
+            ],
+            "paths": [
+              "/messages/**"
+            ]
+          },
+          {
+            "resources": [
+              "relations"
+            ],
+            "verbs": [
+              "use"
+            ],
+            "paths": [
+              "/manifests/message/relations/**"
+            ]
+          },
+          {
+            "resources": [
+              "links"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create"
+            ],
+            "paths": [
+              "/messages/**"
+            ]
+          }
+        ]
+      }
+    ],
+    "role_bindings": [
+      {
+        "path": "./role-bindings/driver",
+        "name": "agent-driver",
+        "role_path": "./roles/driver",
+        "subjects": [
+          {
+            "kind": "service_account",
+            "path": "./service-accounts/driver"
+          }
+        ]
+      }
+    ]
+  }
+}
