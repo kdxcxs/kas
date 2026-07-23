@@ -872,10 +872,12 @@ fn authorize_mutations(
     auth: &AuthContext,
     mutations: &[Mutation],
 ) -> ApiResult<()> {
+    let mut pending_resources = HashMap::new();
     for mutation in mutations {
         let (resource_key, verb, path) = match mutation {
             Mutation::CreateResource { resource } => {
                 let manifest = lock(state)?.get_manifest(&resource.manifest_path)?;
+                pending_resources.insert(resource.path.clone(), manifest.name.clone());
                 (
                     format!("resources/{}", manifest.name),
                     "create",
@@ -891,7 +893,11 @@ fn authorize_mutations(
                     resource_path.as_str(),
                 )
             }
-            Mutation::CreateLink { link } => ("links".into(), "create", link.path.as_str()),
+            Mutation::CreateLink { link } => {
+                authorize_link_endpoint(state, auth, &link.source, Some(&pending_resources))?;
+                authorize_link_endpoint(state, auth, &link.target, Some(&pending_resources))?;
+                ("links".into(), "create", link.path.as_str())
+            }
             Mutation::UpdateResourceStatus { .. } | Mutation::CompleteRun { .. } => {
                 return Err(ApiError(
                     StatusCode::BAD_REQUEST,
@@ -1047,7 +1053,13 @@ fn event_is_authorized(state: &AppState, auth: &AuthContext, event: &Event) -> b
         }
         ObjectKind::Link => "links".into(),
         ObjectKind::Run => "runs".into(),
-        ObjectKind::Manifest | ObjectKind::Driver => return false,
+        ObjectKind::Manifest => "manifests".into(),
+        ObjectKind::Driver => "drivers".into(),
+        ObjectKind::User => "users".into(),
+        ObjectKind::ServiceAccount => "serviceaccounts".into(),
+        ObjectKind::Role => "roles".into(),
+        ObjectKind::RoleBinding => "rolebindings".into(),
+        ObjectKind::Credential => "credentials".into(),
     };
     kas_auth::allows(&auth.rules, &resource, "watch", Some(&event.object_path))
 }
@@ -1342,8 +1354,44 @@ async fn create_link(
     headers: HeaderMap,
     Json(input): Json<CreateLink>,
 ) -> ApiResult<(StatusCode, Json<Link>)> {
-    require(&state, &headers, "links", "create", Some(&input.path))?;
+    let auth = require(&state, &headers, "links", "create", Some(&input.path))?;
+    authorize_link_endpoint(&state, &auth, &input.source, None)?;
+    authorize_link_endpoint(&state, &auth, &input.target, None)?;
     Ok((StatusCode::CREATED, Json(lock(&state)?.create_link(input)?)))
+}
+
+fn authorize_link_endpoint(
+    state: &AppState,
+    auth: &AuthContext,
+    object: &ObjectRef,
+    pending_resources: Option<&HashMap<String, String>>,
+) -> ApiResult<()> {
+    let resource = match object.kind {
+        ObjectKind::Manifest => "manifests".into(),
+        ObjectKind::Resource => {
+            let manifest_name = pending_resources
+                .and_then(|resources| resources.get(&object.path))
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    let resource = lock(state)?.get_resource(&object.path)?;
+                    manifest_name(state, &resource.manifest_path)
+                })?;
+            format!("resources/{manifest_name}")
+        }
+        ObjectKind::Driver => "drivers".into(),
+        ObjectKind::Run => "runs".into(),
+        ObjectKind::Link => "links".into(),
+        ObjectKind::User => "users".into(),
+        ObjectKind::ServiceAccount => "serviceaccounts".into(),
+        ObjectKind::Role => "roles".into(),
+        ObjectKind::RoleBinding => "rolebindings".into(),
+        ObjectKind::Credential => "credentials".into(),
+    };
+    if !kas_auth::allows(&auth.rules, &resource, "link", Some(&object.path)) {
+        return Err(forbidden());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

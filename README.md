@@ -40,7 +40,10 @@ Resource、Link 和 Run 被创建、更新或删除时，平台会在同一事�
 
 ## Link
 
-两个对象之间的有方向关系。
+两个对象之间的有方向关系。任何具有稳定 Path 的持久对象都可以作为 source
+或 target，包括 Manifest、Resource、Driver、Run、Link、User、
+ServiceAccount、Role、RoleBinding 和 Credential。Event、Delivery、
+request、watch 等追加记录或运行时对象不属于 Link 端点。
 
 例如：
 
@@ -153,9 +156,10 @@ Resource spec 可以通过 `PATCH /resources/by-path?path=...` 更新，请求�
 `expected_revision`。更新成功后 revision 递增；旧 revision 会收到冲突响应。
 archive、restore 等业务状态保留在各自 Resource spec 中，不是平台字段。
 
-Link API 支持创建、读取、按 source/relation/target 过滤和删除。Event
-是 Watch 使用的内部持久化日志，只能由平台随业务对象写入自动产生，
-不提供业务创建接口。
+Link API 支持创建、读取、按 source/relation/target 过滤和删除。创建 Link
+除了需要对 Link 自身拥有 `links:create`，还必须对 source 和 target 对应的
+对象类型及 Path 拥有 `link` verb。Event 是 Watch 使用的内部持久化日志，
+只能由平台随业务对象写入自动产生，不提供业务创建接口。
 
 ## Driver WebSocket
 

@@ -351,7 +351,13 @@ async fn driver_path_permissions_and_websocket_work_end_to_end() -> anyhow::Resu
             rules: vec![
                 Rule {
                     resources: vec!["resources/note".into()],
-                    verbs: vec!["create".into(), "get".into(), "list".into(), "watch".into()],
+                    verbs: vec![
+                        "create".into(),
+                        "get".into(),
+                        "link".into(),
+                        "list".into(),
+                        "watch".into(),
+                    ],
                     paths: vec![
                         "/executions/team-a/**".into(),
                         "/watch/exact".into(),
@@ -361,7 +367,7 @@ async fn driver_path_permissions_and_websocket_work_end_to_end() -> anyhow::Resu
                 },
                 Rule {
                     resources: vec!["resources/test".into()],
-                    verbs: vec!["watch".into()],
+                    verbs: vec!["link".into(), "watch".into()],
                     paths: vec!["/executions/team-a/**".into()],
                 },
                 Rule {
@@ -371,12 +377,12 @@ async fn driver_path_permissions_and_websocket_work_end_to_end() -> anyhow::Resu
                 },
                 Rule {
                     resources: vec!["runs".into()],
-                    verbs: vec!["watch".into()],
+                    verbs: vec!["link".into(), "watch".into()],
                     paths: vec!["/executions/team-a/**".into()],
                 },
                 Rule {
                     resources: vec!["serviceaccounts".into()],
-                    verbs: vec!["create".into()],
+                    verbs: vec!["create".into(), "link".into()],
                     paths: vec!["/service-accounts/team-a/**".into()],
                 },
                 Rule {
@@ -537,6 +543,48 @@ async fn driver_path_permissions_and_websocket_work_end_to_end() -> anyhow::Resu
         .error_for_status()?
         .json()
         .await?;
+    let forbidden_endpoint_link = driver_client
+        .post(format!("{api}/links"))
+        .json(&CreateLink {
+            path: "/executions/team-a/links/forbidden-endpoint".into(),
+            source: ObjectRef {
+                kind: ObjectKind::ServiceAccount,
+                path: child_account.path.clone(),
+            },
+            relation: "manages".into(),
+            target: ObjectRef {
+                kind: ObjectKind::Resource,
+                path: "/scope/exact".into(),
+            },
+            metadata: json!({}),
+        })
+        .send()
+        .await?;
+    assert_eq!(
+        forbidden_endpoint_link.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    let managed_link: Link = driver_client
+        .post(format!("{api}/links"))
+        .json(&CreateLink {
+            path: "/executions/team-a/links/managed-by-worker".into(),
+            source: ObjectRef {
+                kind: ObjectKind::ServiceAccount,
+                path: child_account.path.clone(),
+            },
+            relation: "manages".into(),
+            target: ObjectRef {
+                kind: ObjectKind::Resource,
+                path: resource.path.clone(),
+            },
+            metadata: json!({}),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(managed_link.source.kind, ObjectKind::ServiceAccount);
     let link: Link = client
         .post(format!("{api}/links"))
         .json(&CreateLink {

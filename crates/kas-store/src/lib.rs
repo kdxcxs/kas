@@ -35,7 +35,7 @@ pub enum StoreError {
     UnsupportedSchema { current: u32, latest: u32 },
 }
 
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 6;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -46,6 +46,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         include_str!("../migrations/0004_events_and_deliveries.sql"),
     ),
     (5, include_str!("../migrations/0005_paths.sql")),
+    (6, include_str!("../migrations/0006_link_endpoint_rbac.sql")),
 ];
 
 pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
@@ -2095,6 +2096,11 @@ fn object_kind(kind: &ObjectKind) -> &'static str {
         ObjectKind::Driver => "driver",
         ObjectKind::Run => "run",
         ObjectKind::Link => "link",
+        ObjectKind::User => "user",
+        ObjectKind::ServiceAccount => "service_account",
+        ObjectKind::Role => "role",
+        ObjectKind::RoleBinding => "role_binding",
+        ObjectKind::Credential => "credential",
     }
 }
 
@@ -2105,6 +2111,11 @@ fn object_kind_from_str(value: &str, index: usize) -> rusqlite::Result<ObjectKin
         "driver" => Ok(ObjectKind::Driver),
         "run" => Ok(ObjectKind::Run),
         "link" => Ok(ObjectKind::Link),
+        "user" => Ok(ObjectKind::User),
+        "service_account" => Ok(ObjectKind::ServiceAccount),
+        "role" => Ok(ObjectKind::Role),
+        "role_binding" => Ok(ObjectKind::RoleBinding),
+        "credential" => Ok(ObjectKind::Credential),
         _ => Err(from_sql(index, format!("invalid Object kind {value}"))),
     }
 }
@@ -2117,6 +2128,11 @@ fn ensure_object_exists(connection: &Connection, object: &ObjectRef) -> Result<(
         ObjectKind::Driver => "drivers",
         ObjectKind::Run => "runs",
         ObjectKind::Link => "links",
+        ObjectKind::User => "users",
+        ObjectKind::ServiceAccount => "service_accounts",
+        ObjectKind::Role => "roles",
+        ObjectKind::RoleBinding => "role_bindings",
+        ObjectKind::Credential => "credentials",
     };
     let exists: bool = connection.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?)"),
@@ -2324,6 +2340,8 @@ mod tests {
         };
         assert!(columns.iter().any(|column| column == "object_path"));
         assert!(!columns.iter().any(|column| column == "object_id"));
+        let editor = store.get_role("/roles/system/editor").unwrap();
+        assert!(editor.rules[0].verbs.iter().any(|verb| verb == "link"));
     }
 
     #[test]
@@ -2420,5 +2438,67 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(error, StoreError::Invalid(_)));
+    }
+
+    #[test]
+    fn links_accept_identity_and_rbac_objects_as_endpoints() {
+        let mut store = Store::memory().unwrap();
+        let user = store
+            .create_user(CreateUser {
+                path: "/users/alice".into(),
+                name: "alice".into(),
+            })
+            .unwrap();
+        let service_account = store
+            .create_service_account(CreateServiceAccount {
+                path: "/service-accounts/automation".into(),
+                name: "automation".into(),
+            })
+            .unwrap();
+        let role = store
+            .create_role(CreateRole {
+                path: "/roles/automation".into(),
+                name: "automation".into(),
+                description: "automation role".into(),
+                rules: Vec::new(),
+            })
+            .unwrap();
+        let role_binding = store
+            .create_role_binding(CreateRoleBinding {
+                path: "/role-bindings/automation".into(),
+                name: "automation".into(),
+                role_path: role.path.clone(),
+                subjects: vec![Subject {
+                    kind: SubjectKind::ServiceAccount,
+                    path: service_account.path.clone(),
+                }],
+            })
+            .unwrap();
+        let credential = store
+            .issue_service_account_credential(&service_account.path)
+            .unwrap();
+
+        let endpoints = [
+            (ObjectKind::User, user.path),
+            (ObjectKind::ServiceAccount, service_account.path),
+            (ObjectKind::Role, role.path.clone()),
+            (ObjectKind::RoleBinding, role_binding.path),
+            (ObjectKind::Credential, credential.path),
+        ];
+        for (index, (kind, path)) in endpoints.into_iter().enumerate() {
+            let link = store
+                .create_link(CreateLink {
+                    path: format!("/links/security-object-{index}"),
+                    source: ObjectRef { kind, path },
+                    relation: "related_to".into(),
+                    target: ObjectRef {
+                        kind: ObjectKind::Role,
+                        path: role.path.clone(),
+                    },
+                    metadata: json!({}),
+                })
+                .unwrap();
+            assert_eq!(store.get_link(&link.path).unwrap(), link);
+        }
     }
 }

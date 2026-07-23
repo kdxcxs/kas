@@ -117,6 +117,11 @@ pub enum ObjectKind {
     Driver,
     Run,
     Link,
+    User,
+    ServiceAccount,
+    Role,
+    RoleBinding,
+    Credential,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
