@@ -23,13 +23,10 @@ use kas_auth::{
 };
 use kas_core::{
     CreateLink, CreateResource, CreateRun, Driver, DriverDesiredState, DriverReady, DriverWork,
-    Event, EventFilter, EventType, FinishRun, KindSelector, Link, LinkFilter, Manifest, Mutation,
-    ObjectKind, ObjectRef, ObjectSelector, Resource, RestartPolicy, Run, UpdateResource,
-    UpdateResourceStatus,
+    FinishRun, Link, LinkFilter, Manifest, Mutation, ObjectKind, ObjectRef, Resource,
+    RestartPolicy, Run, UpdateResource, UpdateResourceStatus,
 };
-use kas_driver::{
-    ClientMessage, MutationError, MutationStatus, ServerMessage, WatchObject, WatchSelector,
-};
+use kas_driver::{ClientMessage, MutationError, MutationStatus, ServerMessage};
 use kas_store::{Store, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -220,11 +217,6 @@ fn driver_launch(
 
 async fn health() -> Json<Value> {
     Json(json!({"ok": true}))
-}
-
-struct ActiveWatch {
-    cursor: u64,
-    selectors: Vec<WatchSelector>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -775,17 +767,11 @@ async fn serve_driver_socket(
             Ok(driver) => driver,
             Err(_) => return,
         };
-    let cursor =
-        match lock(&state).and_then(|store| store.current_event_cursor().map_err(ApiError::from)) {
-            Ok(cursor) => cursor,
-            Err(_) => return,
-        };
     if send_server_message(
         &mut socket,
         &ServerMessage::Hello {
             delivery_id: control_delivery,
             driver: initial_driver,
-            cursor,
         },
     )
     .await
@@ -800,14 +786,10 @@ async fn serve_driver_socket(
     let mut in_flight: Option<Uuid> = None;
     let mut stop_delivery: Option<Uuid> = None;
     let mut stop_acked = false;
-    let mut watches: HashMap<Uuid, ActiveWatch> = HashMap::new();
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 if !is_current_connection(&state, &driver_path, connection_id) {
-                    break;
-                }
-                if push_watch_events(&state, &auth, &mut socket, &mut watches).await.is_err() {
                     break;
                 }
                 let driver = match lock(&state).and_then(|store| store.get_driver(&driver_path).map_err(Into::into)) {
@@ -870,8 +852,6 @@ async fn serve_driver_socket(
                         if send_server_message(
                             &mut socket,
                             &ServerMessage::Error {
-                                request_id: None,
-                                watch_id: None,
                                 code: "invalid_message".into(),
                                 message: error.to_string(),
                             },
@@ -896,7 +876,6 @@ async fn serve_driver_socket(
                     context,
                     &mut in_flight,
                     &mut stop_acked,
-                    &mut watches,
                     message,
                 ) {
                     Ok(Some(response)) => {
@@ -934,7 +913,6 @@ fn handle_driver_message(
     context: DriverMessageContext<'_>,
     in_flight: &mut Option<Uuid>,
     stop_acked: &mut bool,
-    watches: &mut HashMap<Uuid, ActiveWatch>,
     message: ClientMessage,
 ) -> ApiResult<Option<ServerMessage>> {
     let DriverMessageContext {
@@ -1016,62 +994,6 @@ fn handle_driver_message(
                 status,
                 results,
                 error,
-            }));
-        }
-        ClientMessage::Watch {
-            request_id,
-            cursor,
-            selectors,
-        } => {
-            if selectors.is_empty() {
-                return Ok(Some(ServerMessage::Error {
-                    request_id: Some(request_id),
-                    watch_id: None,
-                    code: "invalid_request".into(),
-                    message: "A watch must contain at least one selector".into(),
-                }));
-            }
-            if let Err(error) = authorize_watch(state, auth, &selectors) {
-                return Ok(Some(watch_error_response(Some(request_id), None, error)));
-            }
-            let current_cursor = lock(state)?.current_event_cursor()?;
-            let accepted_cursor = match cursor {
-                Some(cursor) if cursor <= current_cursor => cursor,
-                Some(_) => {
-                    return Ok(Some(ServerMessage::Error {
-                        request_id: Some(request_id),
-                        watch_id: None,
-                        code: "invalid_cursor".into(),
-                        message: format!(
-                            "Watch cursor cannot be greater than the current cursor {current_cursor}"
-                        ),
-                    }));
-                }
-                None => current_cursor,
-            };
-            let watch_id = Uuid::new_v4();
-            watches.insert(
-                watch_id,
-                ActiveWatch {
-                    cursor: accepted_cursor,
-                    selectors,
-                },
-            );
-            return Ok(Some(ServerMessage::WatchReady {
-                request_id,
-                watch_id,
-                cursor: accepted_cursor,
-            }));
-        }
-        ClientMessage::Unwatch { watch_id } => {
-            if watches.remove(&watch_id).is_some() {
-                return Ok(Some(ServerMessage::WatchClosed { watch_id }));
-            }
-            return Ok(Some(ServerMessage::Error {
-                request_id: None,
-                watch_id: Some(watch_id),
-                code: "not_found".into(),
-                message: "Watch not found".into(),
             }));
         }
         ClientMessage::Stopped {
@@ -1258,217 +1180,6 @@ fn authorize_mutations(
         }
     }
     Ok(())
-}
-
-fn authorize_watch(
-    _state: &AppState,
-    auth: &AuthContext,
-    selectors: &[WatchSelector],
-) -> ApiResult<()> {
-    for selector in selectors {
-        for kind in selector_kinds(selector) {
-            let proposed = Rule {
-                resources: vec![watch_resource(kind).into()],
-                verbs: vec!["watch".into()],
-                paths: selector.path.iter().cloned().collect(),
-            };
-            if !kas_auth::rules_are_subset(&[proposed], &auth.rules) {
-                return Err(forbidden());
-            }
-        }
-    }
-    Ok(())
-}
-
-const WATCHABLE_KINDS: [ObjectKind; 12] = [
-    ObjectKind::Manifest,
-    ObjectKind::Action,
-    ObjectKind::Relation,
-    ObjectKind::Resource,
-    ObjectKind::Driver,
-    ObjectKind::Run,
-    ObjectKind::Link,
-    ObjectKind::User,
-    ObjectKind::ServiceAccount,
-    ObjectKind::Role,
-    ObjectKind::RoleBinding,
-    ObjectKind::Credential,
-];
-
-fn selector_kinds(selector: &ObjectSelector) -> Vec<ObjectKind> {
-    let mut kinds = match selector.kind.as_ref() {
-        Some(KindSelector::One(kind)) => vec![*kind],
-        Some(KindSelector::Many(kinds)) => kinds.clone(),
-        Some(KindSelector::Any(_)) | None => WATCHABLE_KINDS.to_vec(),
-    };
-    if !selector.any_of.is_empty() {
-        let alternatives = selector
-            .any_of
-            .iter()
-            .flat_map(selector_kinds)
-            .collect::<Vec<_>>();
-        kinds.retain(|kind| alternatives.contains(kind));
-    }
-    kinds.sort_by_key(|kind| *kind as u8);
-    kinds.dedup();
-    kinds
-}
-
-fn watch_resource(kind: ObjectKind) -> &'static str {
-    match kind {
-        ObjectKind::Manifest => "manifests",
-        ObjectKind::Action => "actions",
-        ObjectKind::Relation => "relations",
-        ObjectKind::Resource => "resources/*",
-        ObjectKind::Driver => "drivers",
-        ObjectKind::Run => "runs",
-        ObjectKind::Link => "links",
-        ObjectKind::User => "users",
-        ObjectKind::ServiceAccount => "serviceaccounts",
-        ObjectKind::Role => "roles",
-        ObjectKind::RoleBinding => "rolebindings",
-        ObjectKind::Credential => "credentials",
-    }
-}
-
-async fn push_watch_events(
-    state: &AppState,
-    auth: &AuthContext,
-    socket: &mut WebSocket,
-    watches: &mut HashMap<Uuid, ActiveWatch>,
-) -> Result<(), ()> {
-    let watch_ids: Vec<_> = watches.keys().copied().collect();
-    for watch_id in watch_ids {
-        let Some(watch) = watches.get(&watch_id) else {
-            continue;
-        };
-        let events = lock(state)
-            .and_then(|store| {
-                store
-                    .list_events_filtered(EventFilter {
-                        after_sequence: Some(watch.cursor),
-                        limit: Some(100),
-                        ..Default::default()
-                    })
-                    .map_err(Into::into)
-            })
-            .map_err(|_| ())?;
-        for event in events {
-            // A cursor represents the global event stream, not only matching
-            // events. Advancing across non-matches prevents rescanning them.
-            if let Some(watch) = watches.get_mut(&watch_id) {
-                watch.cursor = event.sequence;
-            }
-            let matches = watches.get(&watch_id).is_some_and(|watch| {
-                watch
-                    .selectors
-                    .iter()
-                    .any(|selector| selector_matches(state, selector, &event))
-            });
-            if matches && event_is_authorized(state, auth, &event) {
-                let message = watch_event_message(watch_id, event);
-                send_server_message(socket, &message).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn selector_matches(state: &AppState, selector: &WatchSelector, event: &Event) -> bool {
-    let object = ObjectRef {
-        kind: event.object_kind,
-        path: event.object_path.clone(),
-    };
-    if let Ok(store) = state.store.lock() {
-        if store
-            .object_matches_selector(&object, selector)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    // Deleted objects are no longer available for relational matching. Their
-    // immutable kind/path can still be matched without retaining snapshots.
-    selector_shape_matches(selector, &object)
-}
-
-fn selector_shape_matches(selector: &ObjectSelector, object: &ObjectRef) -> bool {
-    if selector
-        .kind
-        .as_ref()
-        .is_some_and(|kind| !kind.matches(object.kind))
-        || selector
-            .path
-            .as_ref()
-            .is_some_and(|path| !kas_auth::path_matches(path, &object.path))
-        || !selector.links.is_empty()
-    {
-        return false;
-    }
-    selector.any_of.is_empty()
-        || selector
-            .any_of
-            .iter()
-            .any(|alternative| selector_shape_matches(alternative, object))
-}
-
-fn event_is_authorized(state: &AppState, auth: &AuthContext, event: &Event) -> bool {
-    let resource = match event.object_kind {
-        ObjectKind::Resource => {
-            let Ok(manifest) = manifest_for_resource(state, &event.object_path) else {
-                return false;
-            };
-            format!("resources/{}", manifest.name)
-        }
-        kind => watch_resource(kind).into(),
-    };
-    kas_auth::allows(&auth.rules, &resource, "watch", Some(&event.object_path))
-}
-
-fn watch_event_message(watch_id: Uuid, event: Event) -> ServerMessage {
-    let object = WatchObject {
-        kind: event.object_kind,
-        path: event.object_path,
-        revision: event.revision,
-        value: event.value,
-    };
-    match event.event_type {
-        EventType::Created => ServerMessage::Created {
-            watch_id,
-            cursor: event.sequence,
-            object,
-        },
-        EventType::Updated => ServerMessage::Updated {
-            watch_id,
-            cursor: event.sequence,
-            object,
-        },
-        EventType::Deleted => ServerMessage::Deleted {
-            watch_id,
-            cursor: event.sequence,
-            object,
-        },
-    }
-}
-
-fn watch_error_response(
-    request_id: Option<Uuid>,
-    watch_id: Option<Uuid>,
-    error: ApiError,
-) -> ServerMessage {
-    let code = match error.0 {
-        StatusCode::BAD_REQUEST => "invalid_request",
-        StatusCode::UNAUTHORIZED => "unauthorized",
-        StatusCode::FORBIDDEN => "forbidden",
-        StatusCode::NOT_FOUND => "not_found",
-        _ => "internal_error",
-    };
-    ServerMessage::Error {
-        request_id,
-        watch_id,
-        code: code.into(),
-        message: error.1,
-    }
 }
 
 fn is_current_connection(state: &AppState, driver_path: &str, connection_id: Uuid) -> bool {

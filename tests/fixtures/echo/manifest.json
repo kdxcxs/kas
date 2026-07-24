@@ -78,7 +78,6 @@
             "verbs": [
               "get",
               "list",
-              "watch",
               "link"
             ],
             "paths": [

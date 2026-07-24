@@ -1938,7 +1938,7 @@ impl Store {
         })
     }
 
-    pub fn current_event_cursor(&self) -> Result<u64, StoreError> {
+    pub fn current_event_sequence(&self) -> Result<u64, StoreError> {
         self.connection
             .query_row("SELECT COALESCE(MAX(sequence),0) FROM events", [], |row| {
                 row.get(0)
@@ -4757,7 +4757,7 @@ mod tests {
                 description: "read team notes".into(),
                 rules: vec![Rule {
                     resources: vec!["resources/note".into()],
-                    verbs: vec!["get".into(), "watch".into()],
+                    verbs: vec!["get".into(), "patch".into()],
                     paths: vec!["/notes/team-a/**".into()],
                 }],
             })

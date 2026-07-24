@@ -36,15 +36,15 @@ Driver 是系统与真实运行环境之间的适配层。
 平台自动记录的对象生命周期变化。
 
 Resource、Link 和 Run 被创建、更新或删除时，平台会在同一事务中写入对应的
-`created`、`updated` 或 `deleted` Event。Event 使用全局递增 cursor，
-用于查询历史和断线后继续 Watch；业务代码不能主动创建自定义 Event。
+`created`、`updated` 或 `deleted` Event。Event 使用全局递增 sequence，
+用于审计和查询历史；业务代码不能主动创建自定义 Event。
 
 ## Link
 
 两个对象之间的有方向关系。任何具有稳定 Path 的持久对象都可以作为 source
 或 target，包括 Manifest、Action、Relation、Resource、Driver、Run、Link、
-User、ServiceAccount、Role、RoleBinding 和 Credential。Event、Delivery、
-request、watch 等追加记录或运行时对象不属于 Link 端点。
+User、ServiceAccount、Role、RoleBinding 和 Credential。Event、Delivery
+和 request 等追加记录或运行时对象不属于 Link 端点。
 
 例如：
 
@@ -84,7 +84,7 @@ Driver、Link、Event 或 RBAC 暴露对象 UUID。例如：
 ```
 
 Path 创建后不能重命名，禁止空段、`.`、`..`、重复 `/` 和尾部 `/`。
-`request_id`、`delivery_id`、`watch_id` 等协议关联 ID 仍使用 UUID。
+`request_id`、`delivery_id` 等协议关联 ID 仍使用 UUID。
 
 ## MVP 约束
 
@@ -212,14 +212,14 @@ Rule 同时约束资源类型、verb 和实例 path：
 ```json
 {
   "resources": ["resources/computer"],
-  "verbs": ["get", "patch", "watch"],
+  "verbs": ["get", "patch"],
   "paths": ["/computers/team-a/**"]
 }
 ```
 
 Path pattern 支持精确匹配、单段 `*` 和递归 `**`；省略 `paths` 表示该类型的
-全部实例。List 会逐对象过滤，Watch 创建时验证 selector 范围且推送前再次
-检查具体对象。创建或修改 Role 时，除非拥有 `roles:escalate`，其
+全部实例。List 会逐对象过滤。创建或修改 Role 时，除非拥有
+`roles:escalate`，其
 resource、verb 和 path 都不能超过调用者现有权限；绑定 Role 同样要求调用者
 拥有该 Role 的权限或 `bind` 权限。
 
@@ -283,8 +283,8 @@ Link API 支持创建、读取、按 source/relation_path/target 过滤和删除
 `GET /resources/by-path?path=...&include=relations` 会在 Resource 字段之外返回
 一层双向 `links` 和调用者有权读取的 `related` 对象，不进行递归展开。
 
-Event 是 Watch 使用的内部持久化日志，只能由平台随业务对象写入自动产生，
-不提供业务创建接口。
+Event 是平台维护的内部持久化审计日志，只能随业务对象事务自动产生，
+不提供业务创建接口，也不参与 Driver 工作投递。
 
 ## Driver WebSocket
 
@@ -315,17 +315,10 @@ Driver ServiceAccount 绑定诸如 `resources/message:create` 和
 现有 REST 写接口继续保留；统一的 `mutation` 入口只存在于 Driver
 WebSocket 协议中，不提供对应的 HTTP endpoint。
 
-## Watch
-
-Watch 直接复用 Driver 的 `/drivers/connect?path=...` WebSocket，
-不提供面向普通客户端的独立连接。Driver 使用 `watch`、`unwatch`，
-控制面使用 `watch_ready`、`created`、`updated`、`deleted`、
-`watch_closed` 和 `error`。消息类型直接表达生命周期变化，不再额外包含
-`change` 或 `operation`。
-
-Watch 不发送 snapshot。Driver 使用 `hello` 中的 Event cursor 建立 Watch，
-并在重连后从最后处理的 cursor 继续。权限使用
-类型权限和对应的实例 path pattern。
+Driver 不订阅 Event。需要 Driver 处理的业务变化必须显式表示为
+`Resource.spec/status` 或 `Link.spec/status` 的差异；缺失关系由 Relation
+的 `ensure` 创建待处理 Link。这样工作项由持久化 reconcile queue 投递，
+不会依赖临时订阅、连接状态或 Event sequence。
 
 ## 测试
 
