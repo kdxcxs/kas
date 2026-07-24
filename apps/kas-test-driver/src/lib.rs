@@ -1,6 +1,6 @@
-use kas_core::{Action, DriverExecution, Resource, Run};
+use kas_core::{Action, DriverExecution, Mutation, ReconcileObject, Resource, Run};
 use kas_driver::{Driver, DriverError};
-use serde_json::{json, Value};
+use serde_json::json;
 
 pub struct TestDriver;
 
@@ -9,8 +9,21 @@ impl Driver for TestDriver {
         "test-driver"
     }
 
-    fn reconcile(&self, resource: &Resource) -> Result<Value, DriverError> {
-        Ok(json!({ "observed_spec": resource.spec }))
+    fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
+        Ok(match object {
+            ReconcileObject::Resource(resource) => vec![Mutation::UpdateResourceStatus {
+                resource_path: resource.path.clone(),
+                expected_revision: resource.revision,
+                status: resource.spec.clone(),
+            }],
+            ReconcileObject::Link(link) => vec![Mutation::UpdateLink {
+                link_path: link.path.clone(),
+                expected_revision: link.revision,
+                source: link.source.clone(),
+                target: link.target.clone(),
+                status: link.spec.clone(),
+            }],
+        })
     }
 
     fn execute(

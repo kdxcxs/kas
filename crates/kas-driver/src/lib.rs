@@ -3,7 +3,7 @@ use std::{sync::Mutex, time::Duration};
 use futures_util::{SinkExt, StreamExt};
 use kas_core::{
     Action, Driver as DriverRecord, DriverExecution, DriverState, Mutation, ObjectKind,
-    ObjectSelector, Resource, Run, RunResult,
+    ObjectSelector, ReconcileObject, Resource, Run, RunResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,7 +27,7 @@ pub enum DriverError {
 pub trait Driver: Send + Sync {
     fn name(&self) -> &str;
 
-    fn reconcile(&self, resource: &Resource) -> Result<Value, DriverError>;
+    fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError>;
 
     fn execute(
         &self,
@@ -106,8 +106,7 @@ pub enum ServerMessage {
     },
     Reconcile {
         delivery_id: Uuid,
-        resource: Resource,
-        revision: u64,
+        object: ReconcileObject,
     },
     Run {
         delivery_id: Uuid,
@@ -379,14 +378,16 @@ impl<D: Driver> DriverRuntime<D> {
             }
             ServerMessage::Reconcile {
                 delivery_id,
-                resource,
-                revision,
+                object,
             } => {
                 self.send(socket, ClientMessage::Ack { delivery_id })
                     .await?;
-                let status = match self.implementation.reconcile(&resource) {
-                    Ok(status) => status,
-                    Err(error) => json!({ "error": error.to_string() }),
+                let operations = match self.implementation.reconcile(&object) {
+                    Ok(operations) => operations,
+                    Err(error) => {
+                        eprintln!("Driver reconciliation failed and will be retried: {error}");
+                        Vec::new()
+                    }
                 };
                 self.send(
                     socket,
@@ -394,11 +395,7 @@ impl<D: Driver> DriverRuntime<D> {
                         request_id: delivery_id,
                         delivery_id,
                         driver_generation: self.generation,
-                        operations: vec![Mutation::UpdateResourceStatus {
-                            resource_path: resource.path,
-                            observed_revision: revision,
-                            status,
-                        }],
+                        operations,
                     },
                 )
                 .await?;
@@ -644,8 +641,8 @@ mod tests {
             "noop"
         }
 
-        fn reconcile(&self, _: &Resource) -> Result<Value, DriverError> {
-            Ok(Value::Null)
+        fn reconcile(&self, _: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
+            Ok(Vec::new())
         }
 
         fn execute(
@@ -667,8 +664,8 @@ mod tests {
             "watching"
         }
 
-        fn reconcile(&self, _: &Resource) -> Result<Value, DriverError> {
-            Ok(Value::Null)
+        fn reconcile(&self, _: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
+            Ok(Vec::new())
         }
 
         fn execute(

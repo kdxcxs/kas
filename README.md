@@ -235,9 +235,22 @@ Manifest 声明。系统身份不依赖固定对象 path：bootstrap 按 Role �
 
 ## 更新、关系与事件
 
+Resource 使用同一份 Manifest schema 描述 `spec`（期望的完整状态）和
+`status`（Driver 已实现的完整状态）。Manifest 可以声明扩展状态，并通过
+`default_state` 和 `initial_state` 分别指定新建 Resource 的期望状态和初始
+状态；KAS 固定保留 `pending`、`available`、`deleted`。只要 `spec != status`，
+KAS 就会把对象持续交给该 Manifest 的 singleton Driver reconcile；revision
+只用于 spec 的并发控制，不再兼任状态或重试标记。
+
 Resource spec 可以通过 `PATCH /resources/by-path?path=...` 更新，请求必须携带
 `expected_revision`。更新成功后 revision 递增；旧 revision 会收到冲突响应。
-archive、restore 等业务状态保留在各自 Resource spec 中，不是平台字段。
+archive、restore 等仍是 Manifest 自己定义的业务状态。
+
+`DELETE /resources/by-path?path=...&expected_revision=N` 不会绕过 Driver：
+KAS 先把 `spec.state` 改为 `deleted`，Driver reconcile 后把
+`status.state` 改为 `deleted`。两者都到达 `deleted` 后，KAS 删除 Resource、
+其 Link 和相关运行数据，不保留 tombstone，也暂不提供 force delete；原 path
+随后可以重新使用。
 
 Action、Relation、Driver、ServiceAccount、Role 和 RoleBinding 都拥有
 Manifest 下的独立 Path。Manifest 安装时，KAS 根据 core/auth built-in Relation
@@ -249,6 +262,18 @@ Link；客户端只提交直接引用，不需要也不能伪造这些平台关�
 实现按 Relation 的语义 role 查找关系，不把 built-in Relation 的具体 path
 写死在业务逻辑中。数据库可以维护由 Link 自动生成的内部投影索引，但这些
 索引不属于公开 API。
+
+Relation 使用明确的 `one_to_one`、`one_to_many`、`many_to_one` 或
+`many_to_many` 类型。首版 `ensure` 只支持 `one_to_one`：当 KAS 发现符合
+selector 的对象缺少关系时，会创建一个待处理 Link，其 source 或 target
+可以暂时为空（但不能同时为空），`spec.state=available`、
+`status.state=pending`。这个 Link 由“声明该 Relation 的 Manifest”的 Driver
+reconcile，而不是由任一端点对象的 Driver 猜测所有权。Driver 可以在同一次
+mutation 中创建缺失对象、补齐端点并推进 Link status。
+
+Link 自身同样具有 `spec`、`status` 和 `revision`，也进入持久化 reconcile
+队列。普通 Link 通常以 `available` 创建；部分端点 Link 只允许由上述 ensured
+one-to-one Relation 使用。`on_source_delete` 可以选择 `unlink` 或 `cascade`。
 
 Link API 支持创建、读取、按 source/relation_path/target 过滤和删除。创建 Link
 除了需要 `links:create` 和具体 Relation 的 `relations:use`，还必须对 source
@@ -270,8 +295,12 @@ Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一
 同 generation 断线会重放，generation 更新会完成旧投递并把未完成 Run
 重新排队。
 
-reconcile 的 mutation 包含 `update_resource_status`；Run 的 mutation
-可以包含有确定 path 的 Resource、Resource 更新和 Link 操作，
+reconcile 投递的 `object` 可以是 Resource 或 Link。Driver 的
+`reconcile(&ReconcileObject)` 直接返回一组 mutation：Resource 通常使用
+`update_resource_status`，Link 通常使用 `update_link`，也可以在同一事务中
+创建或删除 Resource、Link、ServiceAccount。空 mutation 会让 KAS 重新检查
+spec/status，并在仍不一致时再次排队；临时失败不会把对象永久标记为失败。
+Run 的 mutation 可以包含有确定 path 的 Resource、Resource 更新和 Link 操作，
 并以 `complete_run` 结束。KAS 返回 `mutation_result`，只有 `committed`
 才表示整组写入成功。
 
@@ -327,6 +356,7 @@ tests/e2e.sh
   → 创建 Run，并由 KAS 自动关联 Resource/Action/Driver
   → Driver 执行 echo 并完成 Run
   → 验证受保护的 System Links
+  → DELETE Resource，经 Driver reconcile 后验证硬删除及 path 可复用
   → 停止 Driver 并确认子进程退出
 ```
 

@@ -6,6 +6,9 @@
   "resource_schema": {
     "not": {}
   },
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
   "actions": [],
   "relations": [
     {
@@ -29,7 +32,7 @@
           ]
         }
       ],
-      "cardinality": {},
+      "type": "many_to_many",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -49,9 +52,7 @@
           "kind": "manifest"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -71,9 +72,7 @@
           "kind": "resource"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -93,9 +92,7 @@
           "kind": "action"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -115,9 +112,7 @@
           "kind": "driver"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -137,10 +132,7 @@
           "kind": "service_account"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1,
-        "max_sources_per_target": 1
-      },
+      "type": "one_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false

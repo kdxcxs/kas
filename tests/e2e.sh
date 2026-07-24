@@ -296,7 +296,26 @@ curl --fail --silent \
   -H "Content-Type: application/json" \
   -d "$RESOURCE_PAYLOAD" \
   "$API/resources" |
-  jq -e '.path == "/resources/e2e/echo"' >/dev/null
+  jq -e '
+    .path == "/resources/e2e/echo"
+    and .spec.state == "available"
+    and .status.state == "pending"
+  ' >/dev/null
+
+RESOURCE=""
+for _ in $(seq 1 200); do
+  RESOURCE="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$RESOURCE_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$RESOURCE" | jq -r '.status.state')" == "available" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$RESOURCE" | jq -e '.spec == .status and .status.state == "available"' >/dev/null
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -365,6 +384,47 @@ curl --fail --silent --get \
       "/manifests/system/core/relations/run-driver",
       "/manifests/system/core/relations/run-resource"
     ] | sort)
+  ' >/dev/null
+
+RESOURCE_REVISION="$(
+  curl --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "path=$RESOURCE_PATH" \
+    "$API/resources/by-path" |
+    jq -r '.revision'
+)"
+curl --fail --silent --request DELETE \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --get \
+  --data-urlencode "path=$RESOURCE_PATH" \
+  --data-urlencode "expected_revision=$RESOURCE_REVISION" \
+  "$API/resources/by-path" |
+  jq -e '.spec.state == "deleted"' >/dev/null
+
+for _ in $(seq 1 200); do
+  RESOURCE_STATUS="$(
+    curl --silent --output "$E2E_DIR/deleted-resource.json" --write-out "%{http_code}" \
+      --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$RESOURCE_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$RESOURCE_STATUS" == "404" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+[[ "$RESOURCE_STATUS" == "404" ]]
+
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$RESOURCE_PAYLOAD" \
+  "$API/resources" |
+  jq -e '
+    .path == "/resources/e2e/echo"
+    and .revision == 0
+    and .status.state == "pending"
   ' >/dev/null
 
 curl --fail --silent --request PATCH \
