@@ -3,12 +3,16 @@
   "name": "message",
   "version": 1,
   "description": "An immutable text message authored by a User or Agent.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
   "resource_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "required": [
       "role",
-      "body"
+      "body",
+      "state"
     ],
     "properties": {
       "role": {
@@ -22,6 +26,14 @@
       "body": {
         "type": "string",
         "minLength": 1
+      },
+      "state": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "available",
+          "deleted"
+        ]
       }
     },
     "additionalProperties": false
@@ -51,9 +63,7 @@
           ]
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -75,9 +85,7 @@
           "path": "/agents/**"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -99,9 +107,7 @@
           "path": "/messages/**"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false
@@ -123,9 +129,7 @@
           "path": "/messages/**"
         }
       ],
-      "cardinality": {
-        "max_targets_per_source": 1
-      },
+      "type": "many_to_one",
       "metadata_schema": {
         "type": "object",
         "additionalProperties": false

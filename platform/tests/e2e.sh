@@ -290,7 +290,8 @@ echo "$REPLY" | jq -e \
   --arg parent "$MESSAGE_PATH" '
     .spec == {
       role: "assistant",
-      body: "KAS_PLATFORM_E2E_OK"
+      body: "KAS_PLATFORM_E2E_OK",
+      state: "available"
     }
     and ([.links[].relation_path] | sort) == ([
       "/manifests/message/relations/authored-by",

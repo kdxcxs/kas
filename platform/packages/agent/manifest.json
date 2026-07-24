@@ -3,11 +3,15 @@
   "name": "agent",
   "version": 1,
   "description": "A Codex CLI agent running in the current Driver environment.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
   "resource_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "required": [
-      "working_directory"
+      "working_directory",
+      "state"
     ],
     "properties": {
       "instructions": {
@@ -17,6 +21,14 @@
       "working_directory": {
         "type": "string",
         "minLength": 1
+      },
+      "state": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "available",
+          "deleted"
+        ]
       }
     },
     "additionalProperties": false

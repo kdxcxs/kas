@@ -6,7 +6,7 @@ use std::{
 
 use kas_core::{
     Action, DriverExecution, Mutation, ObjectKind, ObjectRef, PlannedLink, PlannedResource,
-    Resource, Run,
+    ReconcileObject, Resource, Run,
 };
 use kas_driver::{Driver, DriverError};
 use serde::Deserialize;
@@ -149,14 +149,25 @@ impl Driver for AgentDriver {
         "codex-cli"
     }
 
-    fn reconcile(&self, resource: &Resource) -> Result<Value, DriverError> {
+    fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
+        let ReconcileObject::Resource(resource) = object else {
+            return Err(execution_error("Agent Driver cannot reconcile a Link"));
+        };
         let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
             .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
-        Ok(json!({
-            "ready": spec.working_directory.is_dir(),
-            "codex": self.codex,
-            "working_directory": spec.working_directory
-        }))
+        if resource.spec.get("state").and_then(Value::as_str) != Some("deleted")
+            && !spec.working_directory.is_dir()
+        {
+            return Err(execution_error(format!(
+                "working directory {} does not exist or is not a directory",
+                spec.working_directory.display()
+            )));
+        }
+        Ok(vec![Mutation::UpdateResourceStatus {
+            resource_path: resource.path.clone(),
+            expected_revision: resource.revision,
+            status: resource.spec.clone(),
+        }])
     }
 
     fn execute(
@@ -254,9 +265,11 @@ fn planned_link(
 ) -> PlannedLink {
     PlannedLink {
         path,
-        source,
+        source: Some(source),
         relation_path: relation_path.into(),
-        target,
+        target: Some(target),
+        spec: json!({ "state": "available" }),
+        status: json!({ "state": "available" }),
         metadata: json!({}),
     }
 }
