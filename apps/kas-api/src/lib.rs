@@ -95,7 +95,9 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
         .route("/resources", get(list_resources).post(create_resource))
         .route(
             "/resources/by-path",
-            get(get_resource).patch(update_resource_spec),
+            get(get_resource)
+                .patch(update_resource_spec)
+                .delete(delete_resource),
         )
         .route(
             "/resources/status",
@@ -472,13 +474,15 @@ async fn get_resource(
             .collect::<Vec<_>>();
         let mut related_refs = Vec::new();
         for link in &links {
-            let related = if link.source == resource_ref {
-                &link.target
+            let related = if link.source.as_ref() == Some(&resource_ref) {
+                link.target.as_ref()
             } else {
-                &link.source
+                link.source.as_ref()
             };
-            if !related_refs.contains(related) {
-                related_refs.push(related.clone());
+            if let Some(related) = related {
+                if !related_refs.contains(related) {
+                    related_refs.push(related.clone());
+                }
             }
         }
         let related = related_refs
@@ -514,6 +518,31 @@ async fn get_resource(
 struct ResourceQuery {
     path: String,
     include: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteResourceQuery {
+    path: String,
+    expected_revision: u64,
+}
+
+async fn delete_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DeleteResourceQuery>,
+) -> ApiResult<Json<Resource>> {
+    let resource = lock(&state)?.get_resource(&query.path)?;
+    let manifest = manifest_for_resource(&state, &resource.path)?;
+    require(
+        &state,
+        &headers,
+        &format!("resources/{}", manifest.name),
+        "delete",
+        Some(&resource.path),
+    )?;
+    Ok(Json(
+        lock(&state)?.delete_resource(&query.path, query.expected_revision)?,
+    ))
 }
 
 async fn update_resource_spec(
@@ -796,10 +825,9 @@ async fn serve_driver_socket(
                         };
                         if let Some(delivery) = delivery {
                             let message = match delivery.work {
-                                DriverWork::Reconcile { resource, revision } => ServerMessage::Reconcile {
+                                DriverWork::Reconcile { object } => ServerMessage::Reconcile {
                                     delivery_id: delivery.id,
-                                    resource,
-                                    revision,
+                                    object,
                                 },
                                 DriverWork::Run { run, resource, action } => ServerMessage::Run {
                                     delivery_id: delivery.id,
@@ -1084,33 +1112,19 @@ fn apply_driver_mutation(
         return Err(forbidden());
     }
     match delivery.work {
-        DriverWork::Reconcile { resource, revision } => {
-            let [Mutation::UpdateResourceStatus {
-                resource_path,
-                observed_revision,
-                status,
-            }] = operations.as_slice()
-            else {
-                return Err(ApiError(
-                    StatusCode::BAD_REQUEST,
-                    "A reconciliation mutation must contain exactly one update_resource_status operation"
-                        .into(),
-                ));
-            };
-            if resource_path != &resource.path || *observed_revision != revision {
-                return Err(forbidden());
-            }
-            let resource = lock(state)?.finish_reconciliation_delivery(
+        DriverWork::Reconcile { .. } => {
+            let ordinary = operations
+                .iter()
+                .filter(|operation| !matches!(operation, Mutation::UpdateResourceStatus { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            authorize_mutations(state, auth, &ordinary)?;
+            Ok(lock(state)?.finish_reconciliation_with_mutations(
                 delivery_id,
                 driver_path,
                 generation,
-                resource_path,
-                *observed_revision,
-                status.clone(),
-            )?;
-            Ok(vec![serde_json::to_value(resource).map_err(|error| {
-                ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            })?])
+                operations,
+            )?)
         }
         DriverWork::Run { run, .. } => {
             let Some((completion, mutations)) = operations.split_last() else {
@@ -1200,11 +1214,36 @@ fn authorize_mutations(
                     resource_path.as_str(),
                 )
             }
+            Mutation::DeleteResource { resource_path, .. } => {
+                let manifest = manifest_for_resource(state, resource_path)?;
+                (
+                    format!("resources/{}", manifest.name),
+                    "delete",
+                    resource_path.as_str(),
+                )
+            }
             Mutation::CreateLink { link } => {
                 authorize_relation_use(auth, &link.relation_path)?;
                 authorize_link_endpoint(state, auth, &link.source, Some(&pending_resources))?;
                 authorize_link_endpoint(state, auth, &link.target, Some(&pending_resources))?;
                 ("links".into(), "create", link.path.as_str())
+            }
+            Mutation::UpdateLink {
+                link_path,
+                source,
+                target,
+                ..
+            } => {
+                authorize_link_endpoint(state, auth, source, Some(&pending_resources))?;
+                authorize_link_endpoint(state, auth, target, Some(&pending_resources))?;
+                ("links".into(), "patch", link_path.as_str())
+            }
+            Mutation::DeleteLink { link_path } => ("links".into(), "delete", link_path.as_str()),
+            Mutation::CreateServiceAccount { path, .. } => {
+                ("serviceaccounts".into(), "create", path.as_str())
+            }
+            Mutation::DeleteServiceAccount { path } => {
+                ("serviceaccounts".into(), "delete", path.as_str())
             }
             Mutation::UpdateResourceStatus { .. } | Mutation::CompleteRun { .. } => {
                 return Err(ApiError(
@@ -1718,9 +1757,12 @@ fn object_is_readable(store: &Store, auth: &AuthContext, object: &ObjectRef) -> 
 fn authorize_link_endpoint(
     state: &AppState,
     auth: &AuthContext,
-    object: &ObjectRef,
+    object: &Option<ObjectRef>,
     pending_resources: Option<&HashMap<String, String>>,
 ) -> ApiResult<()> {
+    let Some(object) = object else {
+        return Ok(());
+    };
     let resource = match object.kind {
         ObjectKind::Manifest => "manifests".into(),
         ObjectKind::Resource => {

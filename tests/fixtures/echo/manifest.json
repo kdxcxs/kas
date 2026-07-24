@@ -3,15 +3,27 @@
   "name": "echo",
   "version": 1,
   "description": "Real-process end-to-end test Manifest",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
   "resource_schema": {
     "type": "object",
     "properties": {
       "label": {
         "type": "string"
+      },
+      "state": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "available",
+          "deleted"
+        ]
       }
     },
     "required": [
-      "label"
+      "label",
+      "state"
     ],
     "additionalProperties": false
   },

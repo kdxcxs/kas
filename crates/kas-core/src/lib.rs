@@ -72,12 +72,28 @@ pub struct ObjectSelector {
     pub any_of: Vec<ObjectSelector>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Cardinality {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_targets_per_source: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_sources_per_target: Option<u64>,
+pub const STATE_PENDING: &str = "pending";
+pub const STATE_AVAILABLE: &str = "available";
+pub const STATE_DELETED: &str = "deleted";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationType {
+    OneToOne,
+    OneToMany,
+    ManyToOne,
+    ManyToMany,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnSourceDelete {
+    Unlink,
+    Cascade,
+}
+
+fn default_on_source_delete() -> OnSourceDelete {
+    OnSourceDelete::Unlink
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,8 +119,12 @@ pub struct Relation {
     pub inverse_name: Option<String>,
     pub sources: Vec<ObjectSelector>,
     pub targets: Vec<ObjectSelector>,
+    #[serde(rename = "type")]
+    pub relation_type: RelationType,
     #[serde(default)]
-    pub cardinality: Cardinality,
+    pub ensure: bool,
+    #[serde(default = "default_on_source_delete")]
+    pub on_source_delete: OnSourceDelete,
     #[serde(default)]
     pub metadata_schema: Value,
 }
@@ -216,6 +236,12 @@ pub struct ManifestDefinition {
     pub description: String,
     pub resource_schema: Value,
     #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default = "default_resource_state")]
+    pub default_state: String,
+    #[serde(default = "default_resource_state")]
+    pub initial_state: String,
+    #[serde(default)]
     pub actions: Vec<ActionDefinition>,
     #[serde(default)]
     pub relations: Vec<RelationDefinition>,
@@ -223,6 +249,10 @@ pub struct ManifestDefinition {
     pub driver: Option<DriverDefinition>,
     #[serde(default)]
     pub rbac: ManifestRbacDefinition,
+}
+
+fn default_resource_state() -> String {
+    STATE_AVAILABLE.into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +361,9 @@ impl ManifestDefinition {
             version: self.version,
             description: self.description,
             resource_schema: self.resource_schema,
+            states: self.states,
+            default_state: self.default_state,
+            initial_state: self.initial_state,
             actions,
             relations,
             driver,
@@ -435,6 +468,9 @@ pub struct Manifest {
     pub version: u32,
     pub description: String,
     pub resource_schema: Value,
+    pub states: Vec<String>,
+    pub default_state: String,
+    pub initial_state: String,
     pub actions: Vec<Action>,
     pub relations: Vec<Relation>,
     pub driver: Option<DriverDefinition>,
@@ -556,11 +592,15 @@ pub struct ObjectRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Link {
     pub path: String,
-    pub source: ObjectRef,
+    pub source: Option<ObjectRef>,
     pub relation_path: String,
-    pub target: ObjectRef,
+    pub target: Option<ObjectRef>,
+    pub spec: Value,
+    pub status: Value,
     pub metadata: Value,
+    pub revision: u64,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,6 +610,9 @@ pub struct CreateManifest {
     pub version: u32,
     pub description: String,
     pub resource_schema: Value,
+    pub states: Vec<String>,
+    pub default_state: String,
+    pub initial_state: String,
     pub actions: Vec<Action>,
     pub relations: Vec<Relation>,
     pub driver: Option<DriverDefinition>,
@@ -596,11 +639,27 @@ pub struct UpdateResource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateLink {
     pub path: String,
-    pub source: ObjectRef,
+    pub source: Option<ObjectRef>,
     pub relation_path: String,
-    pub target: ObjectRef,
+    pub target: Option<ObjectRef>,
+    #[serde(default = "available_link_state")]
+    pub spec: Value,
+    #[serde(default = "available_link_state")]
+    pub status: Value,
     #[serde(default)]
     pub metadata: Value,
+}
+
+fn available_link_state() -> Value {
+    serde_json::json!({ "state": STATE_AVAILABLE })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateLink {
+    pub expected_revision: u64,
+    pub source: Option<ObjectRef>,
+    pub target: Option<ObjectRef>,
+    pub status: Value,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -623,9 +682,13 @@ pub struct PlannedResource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlannedLink {
     pub path: String,
-    pub source: ObjectRef,
+    pub source: Option<ObjectRef>,
     pub relation_path: String,
-    pub target: ObjectRef,
+    pub target: Option<ObjectRef>,
+    #[serde(default = "available_link_state")]
+    pub spec: Value,
+    #[serde(default = "available_link_state")]
+    pub status: Value,
     #[serde(default)]
     pub metadata: Value,
 }
@@ -641,12 +704,33 @@ pub enum Mutation {
         expected_revision: u64,
         spec: Value,
     },
+    DeleteResource {
+        resource_path: String,
+        expected_revision: u64,
+    },
     CreateLink {
         link: PlannedLink,
     },
+    UpdateLink {
+        link_path: String,
+        expected_revision: u64,
+        source: Option<ObjectRef>,
+        target: Option<ObjectRef>,
+        status: Value,
+    },
+    DeleteLink {
+        link_path: String,
+    },
+    CreateServiceAccount {
+        path: String,
+        name: String,
+    },
+    DeleteServiceAccount {
+        path: String,
+    },
     UpdateResourceStatus {
         resource_path: String,
-        observed_revision: u64,
+        expected_revision: u64,
         status: Value,
     },
     CompleteRun {
@@ -683,7 +767,7 @@ pub struct EventFilter {
 pub struct UpdateResourceStatus {
     pub driver_path: String,
     pub driver_generation: u64,
-    pub observed_revision: u64,
+    pub expected_revision: u64,
     pub status: Value,
 }
 
@@ -714,10 +798,16 @@ pub enum RunResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReconcileObject {
+    Resource(Resource),
+    Link(Link),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DriverWork {
     Reconcile {
-        resource: Resource,
-        revision: u64,
+        object: ReconcileObject,
     },
     Run {
         run: Box<Run>,
@@ -767,6 +857,9 @@ mod tests {
             version: 1,
             description: String::new(),
             resource_schema: json!({"type": "object"}),
+            states: vec![],
+            default_state: STATE_AVAILABLE.into(),
+            initial_state: STATE_PENDING.into(),
             actions: vec![Action {
                 path: "./actions/message".into(),
                 name: "message".into(),
@@ -788,10 +881,9 @@ mod tests {
                     path: Some(".".into()),
                     ..ObjectSelector::default()
                 }],
-                cardinality: Cardinality {
-                    max_targets_per_source: Some(1),
-                    max_sources_per_target: None,
-                },
+                relation_type: RelationType::ManyToOne,
+                ensure: false,
+                on_source_delete: OnSourceDelete::Unlink,
                 metadata_schema: json!({}),
             }],
             driver: Some(DriverDefinition {
@@ -894,6 +986,9 @@ mod tests {
             version: 1,
             description: String::new(),
             resource_schema: json!({}),
+            states: vec![],
+            default_state: STATE_AVAILABLE.into(),
+            initial_state: STATE_PENDING.into(),
             actions: vec![],
             relations: vec![],
             driver: Some(DriverDefinition {
