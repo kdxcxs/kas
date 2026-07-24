@@ -98,7 +98,6 @@
               "update",
               "patch",
               "delete",
-              "watch",
               "link",
               "invoke",
               "use"
@@ -124,8 +123,7 @@
             ],
             "verbs": [
               "get",
-              "list",
-              "watch"
+              "list"
             ]
           }
         ]

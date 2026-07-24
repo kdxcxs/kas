@@ -22,7 +22,6 @@ pub mod verbs {
     pub const UPDATE: &str = "update";
     pub const PATCH: &str = "patch";
     pub const DELETE: &str = "delete";
-    pub const WATCH: &str = "watch";
     pub const LINK: &str = "link";
     pub const INVOKE: &str = "invoke";
     pub const USE: &str = "use";
@@ -464,10 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn watch_permissions_can_target_an_exact_manifest() {
+    fn path_scoped_permissions_can_target_an_exact_manifest() {
         let rules = vec![Rule {
             resources: vec!["resources/conversation".into()],
-            verbs: vec!["get".into(), "list".into(), "watch".into()],
+            verbs: vec!["get".into(), "list".into()],
             paths: vec!["/conversations/team-a/**".into()],
         }];
 
@@ -493,7 +492,7 @@ mod tests {
         assert!(!allows(
             &rules,
             "resources/task",
-            "watch",
+            "get",
             Some("/conversations/team-a/one")
         ));
     }
@@ -515,31 +514,31 @@ mod tests {
 
         let resource_tree = vec![Rule {
             resources: vec!["resources/conversation/*".into()],
-            verbs: vec!["watch".into()],
+            verbs: vec!["get".into()],
             paths: vec![],
         }];
         assert!(!allows(
             &resource_tree,
             "resources/conversation",
-            "watch",
+            "get",
             None
         ));
         assert!(!allows(
             &resource_tree,
             "resources/conversations/message",
-            "watch",
+            "get",
             None
         ));
         assert!(!allows(
             &resource_tree,
             "resources/conversation-extra/message",
-            "watch",
+            "get",
             None
         ));
         assert!(allows(
             &resource_tree,
             "resources/conversation/message",
-            "watch",
+            "get",
             None
         ));
 
@@ -548,7 +547,7 @@ mod tests {
             verbs: vec!["*".into()],
             paths: vec![],
         }];
-        assert!(allows(&global, "resources/conversation", "watch", None));
+        assert!(allows(&global, "resources/conversation", "get", None));
         assert!(allows(&global, "resources", "update", None));
     }
 
@@ -607,7 +606,7 @@ mod tests {
         let caller = vec![
             Rule {
                 resources: vec!["resources/computer".into()],
-                verbs: vec!["get".into(), "watch".into()],
+                verbs: vec!["get".into(), "patch".into()],
                 paths: vec!["/computers/team-a/**".into()],
             },
             Rule {
