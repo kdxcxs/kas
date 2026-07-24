@@ -68,7 +68,32 @@
       }
     }
   ],
-  "relations": [],
+  "relations": [
+    {
+      "path": "./relations/service-account",
+      "name": "service_account",
+      "inverse_name": "agent",
+      "sources": [
+        {
+          "kind": "resource",
+          "path": "/agents/**"
+        }
+      ],
+      "targets": [
+        {
+          "kind": "service_account",
+          "path": "/agents/**/service-account"
+        }
+      ],
+      "type": "one_to_one",
+      "ensure": true,
+      "on_source_delete": "cascade",
+      "metadata_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  ],
   "driver": {
     "path": "./driver",
     "runtime": "process",
@@ -88,7 +113,7 @@
       {
         "path": "./roles/driver",
         "name": "agent-driver",
-        "description": "Create Agent replies and relate them to Agents and Messages.",
+        "description": "Reconcile Agent identities, create replies, and relate them to Agents and Messages.",
         "rules": [
           {
             "resources": [
@@ -96,6 +121,115 @@
             ],
             "verbs": [
               "get",
+              "link"
+            ],
+            "paths": [
+              "/agents/**"
+            ]
+          },
+          {
+            "resources": [
+              "resources/message"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "link"
+            ],
+            "paths": [
+              "/messages/**"
+            ]
+          },
+          {
+            "resources": [
+              "relations"
+            ],
+            "verbs": [
+              "use"
+            ],
+            "paths": [
+              "/manifests/message/relations/**"
+            ]
+          },
+          {
+            "resources": [
+              "links"
+            ],
+            "verbs": [
+              "get",
+              "list",
+              "create",
+              "patch"
+            ],
+            "paths": [
+              "/messages/**",
+              "/manifests/agent/relations/service-account/links/**"
+            ]
+          },
+          {
+            "resources": [
+              "serviceaccounts"
+            ],
+            "verbs": [
+              "create",
+              "delete",
+              "link"
+            ],
+            "paths": [
+              "/agents/**/service-account"
+            ]
+          },
+          {
+            "resources": [
+              "rolebindings"
+            ],
+            "verbs": [
+              "create",
+              "delete"
+            ],
+            "paths": [
+              "/agents/**/role-binding"
+            ]
+          },
+          {
+            "resources": [
+              "roles"
+            ],
+            "verbs": [
+              "bind"
+            ],
+            "paths": [
+              "/manifests/agent/roles/runtime"
+            ]
+          },
+          {
+            "resources": [
+              "credentials"
+            ],
+            "verbs": [
+              "create",
+              "delete"
+            ],
+            "paths": [
+              "/agents/**/service-account",
+              "/agents/**/service-account/credentials/**"
+            ]
+          }
+        ]
+      },
+      {
+        "path": "./roles/runtime",
+        "name": "agent-runtime",
+        "description": "Allow an Agent to inspect Agents and exchange Messages through KAS.",
+        "rules": [
+          {
+            "resources": [
+              "resources/agent"
+            ],
+            "verbs": [
+              "get",
+              "list",
               "link"
             ],
             "paths": [

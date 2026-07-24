@@ -168,6 +168,33 @@ curl --fail --silent \
   -d "$AGENT_PAYLOAD" \
   "$API/resources" >/dev/null
 
+agent_ready=false
+for _ in $(seq 1 400); do
+  AGENT="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/agents/preview" \
+      --data-urlencode "include=relations" \
+      "$API/resources/by-path"
+  )"
+  if jq -e '
+    .spec == .status
+    and any(.links[];
+      .relation_path == "/manifests/agent/relations/service-account"
+      and .target.path == "/agents/preview/service-account"
+      and .spec == .status
+    )
+  ' >/dev/null <<<"$AGENT"; then
+    agent_ready=true
+    break
+  fi
+  sleep 0.05
+done
+if [[ "$agent_ready" != true ]]; then
+  echo "Preview Agent did not finish identity reconciliation" >&2
+  exit 1
+fi
+
 (
   cd "$FRONTEND_ROOT"
   exec node_modules/.bin/vite \

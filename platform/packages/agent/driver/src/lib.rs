@@ -6,7 +6,7 @@ use std::{
 
 use kas_core::{
     Action, DriverExecution, Mutation, ObjectKind, ObjectRef, PlannedLink, PlannedResource,
-    ReconcileObject, Resource, Run,
+    RbacSubjectDefinition, RbacSubjectKind, ReconcileObject, Resource, Run,
 };
 use kas_driver::{Driver, DriverError};
 use serde::Deserialize;
@@ -17,6 +17,8 @@ const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
 const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
 const THREAD_ROOT: &str = "/manifests/message/relations/thread-root";
+const SERVICE_ACCOUNT_RELATION: &str = "/manifests/agent/relations/service-account";
+const AGENT_RUNTIME_ROLE: &str = "/manifests/agent/roles/runtime";
 
 #[derive(Debug, Clone)]
 pub struct AgentDriver {
@@ -30,6 +32,12 @@ struct AgentSpec {
     #[serde(default)]
     instructions: String,
     working_directory: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssuedCredential {
+    path: String,
+    token: String,
 }
 
 impl AgentDriver {
@@ -64,8 +72,58 @@ impl AgentDriver {
         .map_err(execution_error)
     }
 
+    fn issue_agent_credential(
+        &self,
+        service_account_path: &str,
+    ) -> Result<IssuedCredential, DriverError> {
+        let api = self.api.clone();
+        let token = self.token.clone();
+        let service_account_path = service_account_path.to_owned();
+        std::thread::spawn(move || {
+            reqwest::blocking::Client::new()
+                .post(format!("{api}/service-accounts/credentials"))
+                .bearer_auth(token)
+                .query(&[("path", service_account_path.as_str())])
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .and_then(reqwest::blocking::Response::json)
+                .map_err(|error| {
+                    format!(
+                        "could not issue credential for ServiceAccount {service_account_path}: {error}"
+                    )
+                })
+        })
+        .join()
+        .map_err(|_| execution_error("Credential REST worker panicked"))?
+        .map_err(execution_error)
+    }
+
+    fn revoke_agent_credential(&self, credential_path: &str) -> Result<(), DriverError> {
+        let api = self.api.clone();
+        let token = self.token.clone();
+        let credential_path = credential_path.to_owned();
+        std::thread::spawn(move || {
+            reqwest::blocking::Client::new()
+                .delete(format!("{api}/credentials/by-path"))
+                .bearer_auth(token)
+                .query(&[("path", credential_path.as_str())])
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .map(|_| ())
+                .map_err(|error| {
+                    format!("could not revoke Agent credential {credential_path}: {error}")
+                })
+        })
+        .join()
+        .map_err(|_| execution_error("Credential revoke REST worker panicked"))?
+        .map_err(execution_error)
+    }
+
     fn run_codex(
         &self,
+        agent_path: &str,
+        service_account_path: &str,
+        credential_token: &str,
         working_directory: &Path,
         instructions: &str,
         message: &str,
@@ -78,19 +136,32 @@ impl AgentDriver {
         }
         let output_file = tempfile::NamedTempFile::new()
             .map_err(|error| execution_error(format!("could not create output file: {error}")))?;
-        let prompt = if instructions.trim().is_empty() {
-            format!("User message:\n{message}")
-        } else {
-            format!(
-                "Agent instructions:\n{}\n\nUser message:\n{message}",
-                instructions.trim()
-            )
-        };
+        let platform_context = format!(
+            r#"KAS platform context:
+- KAS is the resource management and reconciliation platform hosting this Agent.
+- Its core objects are Manifest, Resource, Relation, Link, Action, and Run.
+- Your Agent Resource path is {agent_path}.
+- Your ServiceAccount path is {service_account_path}.
+- Use the KAS REST API at $KAS_API with `Authorization: Bearer $KAS_TOKEN`.
+- Read your own Resource with:
+  curl -sS -H "Authorization: Bearer $KAS_TOKEN" "$KAS_API/resources/by-path?path=$KAS_AGENT_PATH&include=relations"
+- List Message Resources with:
+  curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "manifest=/manifests/message" "$KAS_API/resources"
+- Create Resources with JSON POST requests to $KAS_API/resources.
+- Operations are restricted by the RBAC permissions of your ServiceAccount.
+- Never print, persist, or place $KAS_TOKEN in a Resource, Message, Link, or file."#
+        );
+        let prompt = format!(
+            "{platform_context}\n\nAgent instructions:\n{}\n\nUser message:\n{message}",
+            instructions.trim()
+        );
         let mut child = Command::new(&self.codex)
             .arg("--ask-for-approval")
             .arg("never")
             .arg("--sandbox")
             .arg("workspace-write")
+            .arg("-c")
+            .arg("sandbox_workspace_write.network_access=true")
             .arg("exec")
             .arg("--ephemeral")
             .arg("--skip-git-repo-check")
@@ -101,6 +172,16 @@ impl AgentDriver {
             .arg("--output-last-message")
             .arg(output_file.path())
             .arg("-")
+            .env_remove("KAS_DRIVER_TOKEN")
+            .env_remove("KAS_DRIVER_PATH")
+            .env_remove("KAS_DRIVER_GENERATION")
+            .env_remove("KAS_MANIFEST_PATH")
+            .env_remove("KAS_PACKAGE_ROOT")
+            .env_remove("KAS_DATA_DIR")
+            .env("KAS_API", &self.api)
+            .env("KAS_TOKEN", credential_token)
+            .env("KAS_AGENT_PATH", agent_path)
+            .env("KAS_SERVICE_ACCOUNT_PATH", service_account_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -150,24 +231,71 @@ impl Driver for AgentDriver {
     }
 
     fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
-        let ReconcileObject::Resource(resource) = object else {
-            return Err(execution_error("Agent Driver cannot reconcile a Link"));
-        };
-        let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
-            .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
-        if resource.spec.get("state").and_then(Value::as_str) != Some("deleted")
-            && !spec.working_directory.is_dir()
-        {
-            return Err(execution_error(format!(
-                "working directory {} does not exist or is not a directory",
-                spec.working_directory.display()
-            )));
+        match object {
+            ReconcileObject::Resource(resource) => {
+                let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
+                    .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
+                if resource.spec.get("state").and_then(Value::as_str) != Some("deleted")
+                    && !spec.working_directory.is_dir()
+                {
+                    return Err(execution_error(format!(
+                        "working directory {} does not exist or is not a directory",
+                        spec.working_directory.display()
+                    )));
+                }
+                Ok(vec![Mutation::UpdateResourceStatus {
+                    resource_path: resource.path.clone(),
+                    expected_revision: resource.revision,
+                    status: resource.spec.clone(),
+                }])
+            }
+            ReconcileObject::Link(link) => {
+                if link.relation_path != SERVICE_ACCOUNT_RELATION {
+                    return Err(execution_error(format!(
+                        "Agent Driver cannot reconcile Relation {}",
+                        link.relation_path
+                    )));
+                }
+                let agent = link.source.as_ref().ok_or_else(|| {
+                    execution_error("Agent ServiceAccount Link has no Agent source")
+                })?;
+                if agent.kind != ObjectKind::Resource {
+                    return Err(execution_error(
+                        "Agent ServiceAccount Link source is not a Resource",
+                    ));
+                }
+                let service_account_path = format!("{}/service-account", agent.path);
+                let role_binding_path = format!("{}/role-binding", agent.path);
+                let service_account = ObjectRef {
+                    kind: ObjectKind::ServiceAccount,
+                    path: service_account_path.clone(),
+                };
+                let mut mutations = Vec::new();
+                if link.target.as_ref() != Some(&service_account) {
+                    mutations.push(Mutation::CreateServiceAccount {
+                        path: service_account_path.clone(),
+                        name: format!("{}-agent", resource_name(&agent.path)),
+                    });
+                    mutations.push(Mutation::CreateRoleBinding {
+                        path: role_binding_path,
+                        name: format!("{}-agent-runtime", resource_name(&agent.path)),
+                        role_path: AGENT_RUNTIME_ROLE.into(),
+                        subjects: vec![RbacSubjectDefinition {
+                            kind: RbacSubjectKind::ServiceAccount,
+                            path: service_account_path,
+                        }],
+                    });
+                }
+                mutations.push(Mutation::UpdateLink {
+                    link_path: link.path.clone(),
+                    expected_revision: link.revision,
+                    source: link.source.clone(),
+                    target: Some(service_account),
+                    status: link.spec.clone(),
+                });
+                Ok(mutations)
+            }
         }
-        Ok(vec![Mutation::UpdateResourceStatus {
-            resource_path: resource.path.clone(),
-            expected_revision: resource.revision,
-            status: resource.spec.clone(),
-        }])
     }
 
     fn execute(
@@ -204,7 +332,22 @@ impl Driver for AgentDriver {
             .and_then(|link| link.pointer("/target/path"))
             .and_then(Value::as_str)
             .unwrap_or(message_path);
-        let reply = self.run_codex(&spec.working_directory, &spec.instructions, body)?;
+        let service_account_path = format!("{}/service-account", resource.path);
+        let credential = self.issue_agent_credential(&service_account_path)?;
+        let reply = self.run_codex(
+            &resource.path,
+            &service_account_path,
+            &credential.token,
+            &spec.working_directory,
+            &spec.instructions,
+            body,
+        );
+        let revoke = self.revoke_agent_credential(&credential.path);
+        let reply = match (reply, revoke) {
+            (Ok(reply), Ok(())) => reply,
+            (Err(error), _) => return Err(error),
+            (Ok(_), Err(error)) => return Err(error),
+        };
         let reply_path = format!("/messages/{}/assistant", run.request_id);
         let reply_ref = ObjectRef {
             kind: ObjectKind::Resource,
@@ -255,6 +398,12 @@ impl Driver for AgentDriver {
             }],
         })
     }
+}
+
+fn resource_name(path: &str) -> &str {
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("agent")
 }
 
 fn planned_link(

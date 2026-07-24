@@ -40,7 +40,7 @@ pub enum StoreError {
     UnsupportedSchema { current: u32, latest: u32 },
 }
 
-pub const LATEST_SCHEMA_VERSION: u32 = 8;
+pub const LATEST_SCHEMA_VERSION: u32 = 9;
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -59,6 +59,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         8,
         include_str!("../migrations/0008_resource_and_link_reconciliation.sql"),
+    ),
+    (
+        9,
+        include_str!("../migrations/0009_driver_role_bindings.sql"),
     ),
 ];
 
@@ -2337,6 +2341,26 @@ impl Store {
         })
     }
 
+    pub fn revoke_credential(&mut self, path: &str) -> Result<(), StoreError> {
+        validate_object_path("Credential path", path)?;
+        let changed = self.connection.execute(
+            "UPDATE credentials SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+            params![stamp(Utc::now()), path],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM credentials WHERE id=?)",
+            [path],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        Err(StoreError::NotFound(format!("Credential {path}")))
+    }
+
     pub fn create_user(&mut self, input: CreateUser) -> Result<User, StoreError> {
         validate_name("User name", &input.name)?;
         validate_object_path("User path", &input.path)?;
@@ -3006,6 +3030,17 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
                     )));
                 }
             }
+            Mutation::CreateRoleBinding {
+                path,
+                name,
+                role_path,
+                subjects,
+            } => {
+                insert_driver_role_binding_in_tx(tx, path, name, role_path, subjects, Utc::now())?;
+            }
+            Mutation::DeleteRoleBinding { path } => {
+                delete_driver_role_binding_in_tx(tx, path)?;
+            }
             Mutation::UpdateResourceStatus { .. } | Mutation::CompleteRun { .. } => {
                 return Err(StoreError::Invalid(
                     "Lifecycle operations must be applied through a Driver delivery".into(),
@@ -3014,6 +3049,134 @@ fn apply_mutations(tx: &Transaction<'_>, mutations: &[Mutation]) -> Result<(), S
         }
     }
     reconcile_ensures_in_tx(tx, Utc::now())?;
+    Ok(())
+}
+
+fn insert_driver_role_binding_in_tx(
+    tx: &Transaction<'_>,
+    path: &str,
+    name: &str,
+    role_path: &str,
+    subjects: &[RbacSubjectDefinition],
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    validate_name("RoleBinding name", name)?;
+    validate_object_path("RoleBinding path", path)?;
+    validate_object_path("Referenced Role path", role_path)?;
+    if subjects.is_empty() {
+        return Err(StoreError::Invalid("RoleBinding requires a subject".into()));
+    }
+    ensure_object_exists(
+        tx,
+        &ObjectRef {
+            kind: ObjectKind::Role,
+            path: role_path.to_owned(),
+        },
+    )?;
+    tx.execute(
+        "INSERT INTO role_bindings(id,name,managed_by,created_at) VALUES (?,?,'driver',?)",
+        params![path, name, stamp(now)],
+    )
+    .map_err(|error| constraint(error, "Role or RoleBinding is invalid"))?;
+
+    let role_link_path = format!("{path}/links/role");
+    insert_protected_link_for_role(
+        tx,
+        RelationRole::RoleBindingRole,
+        &role_link_path,
+        ObjectRef {
+            kind: ObjectKind::RoleBinding,
+            path: path.to_owned(),
+        },
+        ObjectRef {
+            kind: ObjectKind::Role,
+            path: role_path.to_owned(),
+        },
+        now,
+    )?;
+    tx.execute(
+        "INSERT INTO role_binding_role_index(role_binding_path,role_path,link_path)
+         VALUES (?,?,?)",
+        params![path, role_path, role_link_path],
+    )?;
+
+    for (index, subject) in subjects.iter().enumerate() {
+        let subject = Subject {
+            kind: match subject.kind {
+                RbacSubjectKind::User => SubjectKind::User,
+                RbacSubjectKind::ServiceAccount => SubjectKind::ServiceAccount,
+            },
+            path: subject.path.clone(),
+        };
+        ensure_subject_exists(tx, &subject)?;
+        let subject_link_path = format!("{path}/links/subjects/{index}");
+        insert_protected_link_for_role(
+            tx,
+            RelationRole::RoleBindingSubject,
+            &subject_link_path,
+            ObjectRef {
+                kind: ObjectKind::RoleBinding,
+                path: path.to_owned(),
+            },
+            ObjectRef {
+                kind: match subject.kind {
+                    SubjectKind::User => ObjectKind::User,
+                    SubjectKind::ServiceAccount => ObjectKind::ServiceAccount,
+                },
+                path: subject.path.clone(),
+            },
+            now,
+        )?;
+        tx.execute(
+            "INSERT INTO role_binding_subjects(
+                role_binding_path,subject_kind,subject_path,link_path
+             ) VALUES (?,?,?,?)",
+            params![path, subject.kind.as_str(), subject.path, subject_link_path],
+        )?;
+    }
+    Ok(())
+}
+
+fn delete_driver_role_binding_in_tx(tx: &Transaction<'_>, path: &str) -> Result<(), StoreError> {
+    let managed_by: Option<String> = tx
+        .query_row(
+            "SELECT managed_by FROM role_bindings WHERE id=?",
+            [path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if managed_by.as_deref() != Some("driver") {
+        return Err(StoreError::Conflict(format!(
+            "RoleBinding {path} does not exist or is not Driver-managed"
+        )));
+    }
+    delete_role_binding_rows_in_tx(tx, path)
+}
+
+fn delete_role_binding_rows_in_tx(tx: &Transaction<'_>, path: &str) -> Result<(), StoreError> {
+    let link_paths = {
+        let mut statement = tx.prepare(
+            "SELECT link_path FROM role_binding_subjects WHERE role_binding_path=?
+             UNION ALL
+             SELECT link_path FROM role_binding_role_index WHERE role_binding_path=?",
+        )?;
+        let values = statement
+            .query_map(params![path, path], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        values
+    };
+    tx.execute(
+        "DELETE FROM role_binding_subjects WHERE role_binding_path=?",
+        [path],
+    )?;
+    tx.execute(
+        "DELETE FROM role_binding_role_index WHERE role_binding_path=?",
+        [path],
+    )?;
+    for link_path in link_paths {
+        tx.execute("DELETE FROM links WHERE id=?", [link_path])?;
+    }
+    tx.execute("DELETE FROM role_bindings WHERE id=?", [path])?;
     Ok(())
 }
 
@@ -3994,6 +4157,22 @@ fn finalize_deleted_resource_in_tx(
                 }
             }
             ObjectKind::ServiceAccount => {
+                let role_bindings = {
+                    let mut statement = tx.prepare(
+                        "SELECT rb.id FROM role_bindings rb
+                         JOIN role_binding_subjects s ON s.role_binding_path=rb.id
+                         WHERE rb.managed_by='driver'
+                           AND s.subject_kind='service_account'
+                           AND s.subject_path=?",
+                    )?;
+                    let values = statement
+                        .query_map([&target.path], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    values
+                };
+                for role_binding in role_bindings {
+                    delete_role_binding_rows_in_tx(tx, &role_binding)?;
+                }
                 tx.execute("DELETE FROM credentials WHERE subject_kind='service_account' AND subject_path=?", [&target.path])?;
                 tx.execute(
                     "DELETE FROM service_accounts WHERE id=? AND managed_by IN ('user','driver')",
@@ -4886,6 +5065,13 @@ mod tests {
             path: "/manifests/agent/v1/service-accounts/driver".into(),
             name: "agent-driver".into(),
         });
+        input.rbac.roles.push(RoleDefinition {
+            path: "/manifests/agent/v1/roles/runtime".into(),
+            name: "agent-runtime".into(),
+            description: String::new(),
+            rules: Vec::new(),
+            system_role: None,
+        });
         input.relations.push(Relation {
             path: "/manifests/agent/v1/relations/account".into(),
             name: "account".into(),
@@ -4974,6 +5160,15 @@ mod tests {
                                     path: "/service-accounts/agent-a".into(),
                                     name: "agent-a".into(),
                                 },
+                                Mutation::CreateRoleBinding {
+                                    path: "/role-bindings/agent-a".into(),
+                                    name: "agent-a".into(),
+                                    role_path: "/manifests/agent/v1/roles/runtime".into(),
+                                    subjects: vec![RbacSubjectDefinition {
+                                        kind: RbacSubjectKind::ServiceAccount,
+                                        path: "/service-accounts/agent-a".into(),
+                                    }],
+                                },
                                 Mutation::UpdateLink {
                                     link_path: link.path.clone(),
                                     expected_revision: link.revision,
@@ -5004,6 +5199,15 @@ mod tests {
             .unwrap();
         assert_eq!(link.spec, link.status);
         assert!(link.target.is_some());
+        assert_eq!(
+            store
+                .list_role_bindings()
+                .unwrap()
+                .into_iter()
+                .filter(|binding| binding.path == "/role-bindings/agent-a")
+                .count(),
+            1
+        );
 
         let deleting = store
             .delete_resource("/resources/agent-a", resource.revision)
@@ -5028,6 +5232,11 @@ mod tests {
             store.get_service_account("/service-accounts/agent-a"),
             Err(StoreError::NotFound(_))
         ));
+        assert!(!store
+            .list_role_bindings()
+            .unwrap()
+            .into_iter()
+            .any(|binding| binding.path == "/role-bindings/agent-a"));
         assert!(store
             .list_links(LinkFilter {
                 relation_path: Some("/manifests/agent/v1/relations/account".into()),

@@ -728,6 +728,15 @@ pub enum Mutation {
     DeleteServiceAccount {
         path: String,
     },
+    CreateRoleBinding {
+        path: String,
+        name: String,
+        role_path: String,
+        subjects: Vec<RbacSubjectDefinition>,
+    },
+    DeleteRoleBinding {
+        path: String,
+    },
     UpdateResourceStatus {
         resource_path: String,
         expected_revision: u64,

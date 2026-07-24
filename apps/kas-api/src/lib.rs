@@ -119,6 +119,10 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
             "/service-accounts/credentials",
             post(issue_service_account_credential),
         )
+        .route(
+            "/credentials/by-path",
+            axum::routing::delete(revoke_credential),
+        )
         .route("/roles", get(list_roles).post(create_role))
         .route(
             "/roles/by-path",
@@ -1167,6 +1171,17 @@ fn authorize_mutations(
             Mutation::DeleteServiceAccount { path } => {
                 ("serviceaccounts".into(), "delete", path.as_str())
             }
+            Mutation::CreateRoleBinding {
+                path, role_path, ..
+            } => {
+                if !kas_auth::allows(&auth.rules, "roles", "bind", Some(role_path)) {
+                    return Err(forbidden());
+                }
+                ("rolebindings".into(), "create", path.as_str())
+            }
+            Mutation::DeleteRoleBinding { path } => {
+                ("rolebindings".into(), "delete", path.as_str())
+            }
             Mutation::UpdateResourceStatus { .. } | Mutation::CompleteRun { .. } => {
                 return Err(ApiError(
                     StatusCode::BAD_REQUEST,
@@ -1308,6 +1323,16 @@ async fn issue_service_account_credential(
         StatusCode::CREATED,
         Json(lock(&state)?.issue_service_account_credential(&query.path)?),
     ))
+}
+
+async fn revoke_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ObjectPathQuery>,
+) -> ApiResult<StatusCode> {
+    require(&state, &headers, "credentials", "delete", Some(&query.path))?;
+    lock(&state)?.revoke_credential(&query.path)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_role(

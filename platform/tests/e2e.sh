@@ -149,6 +149,13 @@ echo "$AGENT_MANIFEST" | jq -e '
   and .driver.path == "/manifests/agent/driver"
   and .driver.service_account == "/manifests/agent/service-accounts/driver"
   and .rbac.service_accounts[0].path == "/manifests/agent/service-accounts/driver"
+  and any(.relations[];
+    .path == "/manifests/agent/relations/service-account"
+    and .type == "one_to_one"
+    and .ensure == true
+    and .on_source_delete == "cascade"
+  )
+  and any(.rbac.roles[]; .path == "/manifests/agent/roles/runtime")
 ' >/dev/null
 
 DRIVER=""
@@ -172,13 +179,20 @@ echo "$DRIVER" | jq -e '
 
 mkdir -p "$E2E_DIR/workspace"
 AGENT_PATH="/agents/e2e"
+PROOF_PATH="/messages/e2e-agent-network-proof"
+KAS_PROOF="KAS_NETWORK_$(uuidgen | tr '[:lower:]' '[:upper:]')"
+
 AGENT_PAYLOAD="$(
-  jq -n --arg path "$AGENT_PATH" --arg cwd "$E2E_DIR/workspace" '{
+  jq -n \
+    --arg path "$AGENT_PATH" \
+    --arg cwd "$E2E_DIR/workspace" \
+    --arg proof_path "$PROOF_PATH" \
+    --arg proof "$KAS_PROOF" '{
     path: $path,
     manifest: "/manifests/agent",
     name: "e2e-agent",
     spec: {
-      instructions: "Reply with exactly KAS_PLATFORM_E2E_OK and no other text.",
+      instructions: ("Use curl with $KAS_API and $KAS_TOKEN to POST a new Message Resource to KAS. Use path " + $proof_path + ", manifest /manifests/message, name e2e-agent-network-proof, and spec {\"role\":\"system\",\"body\":\"" + $proof + "\"}. After the POST succeeds, reply with exactly CREATED and no other text."),
       working_directory: $cwd
     }
   }'
@@ -189,6 +203,55 @@ curl --fail --silent \
   -d "$AGENT_PAYLOAD" \
   "$API/resources" |
   jq -e '.path == "/agents/e2e"' >/dev/null
+
+AGENT=""
+for _ in $(seq 1 400); do
+  AGENT="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$AGENT_PATH" \
+      --data-urlencode "include=relations" \
+      "$API/resources/by-path"
+  )"
+  SERVICE_ACCOUNTS="$(
+    curl --fail --silent \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      "$API/service-accounts"
+  )"
+  ROLE_BINDINGS="$(
+    curl --fail --silent \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      "$API/role-bindings"
+  )"
+  if jq -e \
+    --arg service_account "$AGENT_PATH/service-account" '
+      .spec == .status
+      and any(.links[];
+        .relation_path == "/manifests/agent/relations/service-account"
+        and .target.kind == "service_account"
+        and .target.path == $service_account
+        and .spec == .status
+      )
+    ' >/dev/null <<<"$AGENT" \
+    && jq -e --arg path "$AGENT_PATH/service-account" \
+      'any(.[]; .path == $path and .managed_by == "driver")' \
+      >/dev/null <<<"$SERVICE_ACCOUNTS" \
+    && jq -e --arg path "$AGENT_PATH/role-binding" \
+      'any(.[]; .path == $path and .managed_by == "driver")' \
+      >/dev/null <<<"$ROLE_BINDINGS"; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  --arg service_account "$AGENT_PATH/service-account" '
+    .spec == .status
+    and any(.links[];
+      .relation_path == "/manifests/agent/relations/service-account"
+      and .target.path == $service_account
+      and .spec == .status
+    )
+  ' >/dev/null <<<"$AGENT"
 
 MESSAGE_PATH="/messages/e2e-user"
 MESSAGE_PAYLOAD="$(
@@ -278,6 +341,21 @@ echo "$RUN" | jq -e '
 ' >/dev/null
 REPLY_PATH="$(echo "$RUN" | jq -r '.output.reply_message_path')"
 
+PROOF="$(
+  curl --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "path=$PROOF_PATH" \
+    "$API/resources/by-path"
+)"
+echo "$PROOF" | jq -e --arg proof "$KAS_PROOF" '
+  .path == "/messages/e2e-agent-network-proof"
+  and .spec == {
+    role: "system",
+    body: $proof,
+    state: "available"
+  }
+' >/dev/null
+
 REPLY="$(
   curl --fail --silent --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -290,7 +368,7 @@ echo "$REPLY" | jq -e \
   --arg parent "$MESSAGE_PATH" '
     .spec == {
       role: "assistant",
-      body: "KAS_PLATFORM_E2E_OK",
+      body: "CREATED",
       state: "available"
     }
     and ([.links[].relation_path] | sort) == ([
@@ -312,6 +390,45 @@ echo "$REPLY" | jq -e \
       and .target.path == $parent
     )
   ' >/dev/null
+
+AGENT_REVISION="$(jq -r '.revision' <<<"$AGENT")"
+curl --fail --silent --request DELETE --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "path=$AGENT_PATH" \
+  --data-urlencode "expected_revision=$AGENT_REVISION" \
+  "$API/resources/by-path" >/dev/null
+
+for _ in $(seq 1 400); do
+  AGENTS="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "manifest=/manifests/agent" \
+      "$API/resources"
+  )"
+  SERVICE_ACCOUNTS="$(
+    curl --fail --silent \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      "$API/service-accounts"
+  )"
+  ROLE_BINDINGS="$(
+    curl --fail --silent \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      "$API/role-bindings"
+  )"
+  if jq -e --arg path "$AGENT_PATH" 'all(.[]; .path != $path)' >/dev/null <<<"$AGENTS" \
+    && jq -e --arg path "$AGENT_PATH/service-account" \
+      'all(.[]; .path != $path)' >/dev/null <<<"$SERVICE_ACCOUNTS" \
+    && jq -e --arg path "$AGENT_PATH/role-binding" \
+      'all(.[]; .path != $path)' >/dev/null <<<"$ROLE_BINDINGS"; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e --arg path "$AGENT_PATH" 'all(.[]; .path != $path)' >/dev/null <<<"$AGENTS"
+jq -e --arg path "$AGENT_PATH/service-account" \
+  'all(.[]; .path != $path)' >/dev/null <<<"$SERVICE_ACCOUNTS"
+jq -e --arg path "$AGENT_PATH/role-binding" \
+  'all(.[]; .path != $path)' >/dev/null <<<"$ROLE_BINDINGS"
 
 DRIVER_URL="$API/drivers/by-path?path=$(jq -rn --arg value "/manifests/agent/driver" '$value | @uri')"
 curl --fail --silent --request PATCH \
