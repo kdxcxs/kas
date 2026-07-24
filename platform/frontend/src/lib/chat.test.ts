@@ -33,7 +33,7 @@ describe('buildUserMessage', () => {
       ADDRESSED_TO,
       THREAD_ROOT
     ]);
-    expect(message.links?.at(-1)?.target.path).toBe('/messages/root');
+    expect(message.links?.at(-1)?.target?.path).toBe('/messages/root');
   });
 
   it('adds replies_to and preserves the thread root for follow-ups', () => {
@@ -45,10 +45,10 @@ describe('buildUserMessage', () => {
       '/messages/root',
       '/messages/reply'
     );
-    expect(message.links?.find((link) => link.relation_path === THREAD_ROOT)?.target.path).toBe(
+    expect(message.links?.find((link) => link.relation_path === THREAD_ROOT)?.target?.path).toBe(
       '/messages/root'
     );
-    expect(message.links?.find((link) => link.relation_path === REPLIES_TO)?.target.path).toBe(
+    expect(message.links?.find((link) => link.relation_path === REPLIES_TO)?.target?.path).toBe(
       '/messages/reply'
     );
   });
@@ -69,16 +69,24 @@ describe('conversation selection', () => {
         source: { kind: 'resource', path: '/messages/root' },
         relation_path: ADDRESSED_TO,
         target: { kind: 'resource', path: '/agents/demo' },
+        spec: { state: 'available' },
+        status: { state: 'available' },
         metadata: {},
-        created_at: '2026-01-01T00:00:00Z'
+        revision: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z'
       },
       {
         path: '/messages/root/links/thread-root',
         source: { kind: 'resource', path: '/messages/root' },
         relation_path: THREAD_ROOT,
         target: { kind: 'resource', path: '/messages/root' },
+        spec: { state: 'available' },
+        status: { state: 'available' },
         metadata: {},
-        created_at: '2026-01-01T00:00:00Z'
+        revision: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z'
       }
     ]
   };
@@ -92,4 +100,3 @@ describe('conversation selection', () => {
     expect(threadRootOf(base)).toBe('/messages/root');
   });
 });
-

@@ -40,5 +40,49 @@ describe('KasApi', () => {
       new KasApiError('permission denied', 403)
     );
   });
-});
 
+  it('updates and deletes a Resource with optimistic revision checks', async () => {
+    const request = vi.fn().mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          path: '/agents/demo',
+          name: 'demo',
+          spec: { state: 'available' },
+          status: { state: 'available' },
+          revision: 3,
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:00:00Z'
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      )
+    );
+    vi.stubGlobal('fetch', request);
+    const api = new KasApi('/api', 'secret');
+
+    await api.updateResource('/agents/demo', {
+      expected_revision: 2,
+      spec: { state: 'available', working_directory: '/tmp/demo' }
+    });
+    await api.deleteResource('/agents/demo', 3);
+
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      '/api/resources/by-path?path=%2Fagents%2Fdemo',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({
+          expected_revision: 2,
+          spec: { state: 'available', working_directory: '/tmp/demo' }
+        })
+      })
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      '/api/resources/by-path?path=%2Fagents%2Fdemo&expected_revision=3',
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
+});

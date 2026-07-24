@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { KasApi } from './lib/api';
+  import { KasApi, KasApiError } from './lib/api';
   import {
     MESSAGE_ACTION,
     buildUserMessage,
@@ -20,6 +20,8 @@
     token: string;
     userPath: string;
   }
+
+  type View = 'chat' | 'agents';
 
   let settings: Settings = {
     apiBase: DEFAULT_API_BASE,
@@ -44,6 +46,14 @@
   let createPath = '';
   let createWorkingDirectory = '';
   let createInstructions = '';
+  let view: View = 'chat';
+  let showEditAgent = false;
+  let editAgentPath = '';
+  let editWorkingDirectory = '';
+  let editInstructions = '';
+  let deleteTarget: Resource | null = null;
+  let savingAgent = false;
+  let deletingAgentPath = '';
 
   $: selectedAgent = agents.find((agent) => agent.path === selectedAgentPath) ?? null;
   $: currentAgentMessages = selectedAgentPath
@@ -132,9 +142,16 @@
 
   function chooseAgent(path: string): void {
     selectedAgentPath = path;
+    view = 'chat';
     activeThreadRoot = null;
     syncThreadSelection();
     error = '';
+  }
+
+  function openAgentManagement(): void {
+    view = 'agents';
+    error = '';
+    notice = '';
   }
 
   function startThread(): void {
@@ -188,12 +205,82 @@
       selectedAgentPath = path;
       activeThreadRoot = null;
       showCreateAgent = false;
-      notice = `${name} is ready`;
+      notice = `${name} was created`;
     } catch (cause) {
       error = messageOf(cause);
     } finally {
       loading = false;
     }
+  }
+
+  function openEditAgent(agent: Resource): void {
+    editAgentPath = agent.path;
+    editWorkingDirectory = stringSpec(agent, 'working_directory');
+    editInstructions = stringSpec(agent, 'instructions');
+    showEditAgent = true;
+    error = '';
+  }
+
+  async function saveAgent(): Promise<void> {
+    const agent = agents.find((candidate) => candidate.path === editAgentPath);
+    if (!agent || !editWorkingDirectory.trim()) {
+      error = 'Working directory is required.';
+      return;
+    }
+    savingAgent = true;
+    error = '';
+    try {
+      await client().updateResource(agent.path, {
+        expected_revision: agent.revision,
+        spec: {
+          ...agent.spec,
+          instructions: editInstructions.trim(),
+          working_directory: editWorkingDirectory.trim()
+        }
+      });
+      showEditAgent = false;
+      await loadData();
+      notice = `${agent.name} update requested`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingAgent = false;
+    }
+  }
+
+  async function deleteAgent(): Promise<void> {
+    const agent = deleteTarget;
+    if (!agent) return;
+    deletingAgentPath = agent.path;
+    error = '';
+    try {
+      const api = client();
+      await api.deleteResource(agent.path, agent.revision);
+      deleteTarget = null;
+      notice = `Deleting ${agent.name}…`;
+      await waitForResourceDeletion(api, agent.path);
+      await loadData(api);
+      notice = `${agent.name} was deleted`;
+    } catch (cause) {
+      error = messageOf(cause);
+      await loadData().catch(() => undefined);
+    } finally {
+      deletingAgentPath = '';
+    }
+  }
+
+  async function waitForResourceDeletion(api: KasApi, path: string): Promise<void> {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      try {
+        await api.getResource(path);
+      } catch (cause) {
+        if (cause instanceof KasApiError && cause.status === 404) return;
+        throw cause;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    throw new Error('Agent deletion is still waiting for Driver reconciliation.');
   }
 
   async function sendMessage(): Promise<void> {
@@ -265,6 +352,20 @@
     return typeof message.spec.body === 'string' ? message.spec.body : '';
   }
 
+  function stringSpec(resource: Resource, key: string): string {
+    const value = resource.spec[key];
+    return typeof value === 'string' ? value : '';
+  }
+
+  function resourceState(resource: Resource): string {
+    const value = resource.status.state;
+    return typeof value === 'string' ? value : 'unknown';
+  }
+
+  function resourceConverged(resource: Resource): boolean {
+    return JSON.stringify(resource.spec) === JSON.stringify(resource.status);
+  }
+
   function timeOf(timestamp: string): string {
     return new Intl.DateTimeFormat(undefined, {
       hour: '2-digit',
@@ -289,7 +390,10 @@
 
     <div class="sidebar-section-title">
       <span>Agents</span>
-      <button class="icon-button" aria-label="Create Agent" onclick={openAgentDialog}>+</button>
+      <span class="sidebar-title-actions">
+        <button class="icon-button" aria-label="Manage Agents" onclick={openAgentManagement}>≡</button>
+        <button class="icon-button" aria-label="Create Agent" onclick={openAgentDialog}>+</button>
+      </span>
     </div>
 
     <nav class="agent-list" aria-label="Agents">
@@ -308,7 +412,7 @@
           <span class="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</span>
           <span class="agent-copy">
             <strong>{agent.name}</strong>
-            <small>{String(agent.status.ready ?? 'syncing')}</small>
+            <small class:syncing={!resourceConverged(agent)}>{resourceState(agent)}</small>
           </span>
         </button>
       {/each}
@@ -331,13 +435,21 @@
   <main class="workspace">
     <header class="workspace-header">
       <div>
-        <p class="eyebrow">Current Agent</p>
-        <h1>{selectedAgent?.name ?? 'Choose an Agent'}</h1>
+        <p class="eyebrow">{view === 'agents' ? 'Workspace' : 'Current Agent'}</p>
+        <h1>{view === 'agents' ? 'Agent management' : (selectedAgent?.name ?? 'Choose an Agent')}</h1>
       </div>
       <div class="header-actions">
-        <button class="quiet-button" disabled={!selectedAgent} onclick={startThread}>
-          New thread
-        </button>
+        {#if view === 'agents'}
+          <button class="quiet-button" disabled={!selectedAgent} onclick={() => (view = 'chat')}>
+            Open chat
+          </button>
+          <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
+        {:else}
+          <button class="quiet-button" onclick={openAgentManagement}>Manage Agents</button>
+          <button class="quiet-button" disabled={!selectedAgent} onclick={startThread}>
+            New thread
+          </button>
+        {/if}
         <button
           class="refresh-button"
           aria-label="Refresh"
@@ -349,7 +461,7 @@
       </div>
     </header>
 
-    {#if selectedAgent}
+    {#if view === 'chat' && selectedAgent}
       <div class="thread-strip" aria-label="Conversations">
         {#each threadEntries as [root, thread]}
           <button
@@ -378,43 +490,117 @@
       </div>
     {/if}
 
-    <section class="conversation" aria-live="polite">
-      {#if !selectedAgent}
-        <div class="empty-state">
-          <div class="empty-orbit"><span>K</span></div>
-          <p class="eyebrow">No Agent selected</p>
-          <h2>Give Codex a place to work.</h2>
-          <p>Create an Agent with a working directory, then start a conversation.</p>
-          <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
+    {#if view === 'agents'}
+      <section class="agent-management" aria-label="Agent management">
+        <div class="management-summary">
+          <div>
+            <strong>{agents.length}</strong>
+            <span>Agents</span>
+          </div>
+          <div>
+            <strong>{agents.filter(resourceConverged).length}</strong>
+            <span>Converged</span>
+          </div>
+          <div>
+            <strong>{driver?.state ?? 'offline'}</strong>
+            <span>Driver</span>
+          </div>
         </div>
-      {:else if activeMessages.length === 0}
-        <div class="empty-state compact">
-          <p class="eyebrow">New conversation</p>
-          <h2>What should {selectedAgent.name} work on?</h2>
-          <p>Your message becomes a Resource. The reply does too.</p>
-        </div>
-      {:else}
-        <div class="message-list">
-          {#each activeMessages as message}
-            <article class:assistant={roleOf(message) === 'assistant'} class="message">
-              <div class="message-meta">
-                <span>{roleOf(message) === 'assistant' ? selectedAgent.name : 'You'}</span>
-                <time datetime={message.created_at}>{timeOf(message.created_at)}</time>
-              </div>
-              <p>{bodyOf(message)}</p>
-            </article>
-          {/each}
-          {#if sending}
-            <article class="message assistant pending">
-              <div class="message-meta"><span>{selectedAgent.name}</span></div>
-              <div class="thinking"><i></i><i></i><i></i></div>
-            </article>
-          {/if}
-        </div>
-      {/if}
-    </section>
 
-    {#if selectedAgent}
+        {#if agents.length === 0 && !loading}
+          <div class="management-empty">
+            <p class="eyebrow">No Agents</p>
+            <h2>Create the first working context.</h2>
+            <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
+          </div>
+        {:else}
+          <div class="agent-grid">
+            {#each agents as agent}
+              <article class="agent-card">
+                <div class="agent-card-head">
+                  <span class="agent-avatar large">{agent.name.slice(0, 1).toUpperCase()}</span>
+                  <div>
+                    <h2>{agent.name}</h2>
+                    <code>{agent.path}</code>
+                  </div>
+                  <span
+                    class:pending={!resourceConverged(agent)}
+                    class="state-pill"
+                  >
+                    {resourceConverged(agent) ? resourceState(agent) : 'reconciling'}
+                  </span>
+                </div>
+                <dl class="agent-details">
+                  <div>
+                    <dt>Working directory</dt>
+                    <dd>{stringSpec(agent, 'working_directory')}</dd>
+                  </div>
+                  <div>
+                    <dt>Instructions</dt>
+                    <dd>{stringSpec(agent, 'instructions') || 'No custom instructions'}</dd>
+                  </div>
+                  <div>
+                    <dt>Revision</dt>
+                    <dd>{agent.revision}</dd>
+                  </div>
+                </dl>
+                <div class="agent-card-actions">
+                  <button class="quiet-button" onclick={() => chooseAgent(agent.path)}>
+                    Open chat
+                  </button>
+                  <button class="quiet-button" onclick={() => openEditAgent(agent)}>Edit</button>
+                  <button
+                    class="danger-button"
+                    disabled={deletingAgentPath === agent.path}
+                    onclick={() => (deleteTarget = agent)}
+                  >
+                    {deletingAgentPath === agent.path ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
+              </article>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    {:else}
+      <section class="conversation" aria-live="polite">
+        {#if !selectedAgent}
+          <div class="empty-state">
+            <div class="empty-orbit"><span>K</span></div>
+            <p class="eyebrow">No Agent selected</p>
+            <h2>Give Codex a place to work.</h2>
+            <p>Create an Agent with a working directory, then start a conversation.</p>
+            <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
+          </div>
+        {:else if activeMessages.length === 0}
+          <div class="empty-state compact">
+            <p class="eyebrow">New conversation</p>
+            <h2>What should {selectedAgent.name} work on?</h2>
+            <p>Your message becomes a Resource. The reply does too.</p>
+          </div>
+        {:else}
+          <div class="message-list">
+            {#each activeMessages as message}
+              <article class:assistant={roleOf(message) === 'assistant'} class="message">
+                <div class="message-meta">
+                  <span>{roleOf(message) === 'assistant' ? selectedAgent.name : 'You'}</span>
+                  <time datetime={message.created_at}>{timeOf(message.created_at)}</time>
+                </div>
+                <p>{bodyOf(message)}</p>
+              </article>
+            {/each}
+            {#if sending}
+              <article class="message assistant pending">
+                <div class="message-meta"><span>{selectedAgent.name}</span></div>
+                <div class="thinking"><i></i><i></i><i></i></div>
+              </article>
+            {/if}
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    {#if view === 'chat' && selectedAgent}
       <form class="composer" onsubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
         <textarea
           bind:value={composer}
@@ -515,6 +701,62 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+{#if showEditAgent}
+  <div class="modal-backdrop" role="presentation">
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="edit-agent-title">
+      <div class="modal-kicker">Agent Resource</div>
+      <h2 id="edit-agent-title">Edit Agent</h2>
+      <p>
+        Updating spec schedules reconciliation through the shared Agent Driver.
+      </p>
+      <form onsubmit={(event) => { event.preventDefault(); void saveAgent(); }}>
+        <label>
+          Resource path
+          <input value={editAgentPath} disabled />
+        </label>
+        <label>
+          Working directory
+          <input bind:value={editWorkingDirectory} required />
+        </label>
+        <label>
+          Instructions
+          <textarea bind:value={editInstructions} rows="5"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="quiet-button" onclick={() => (showEditAgent = false)}>
+            Cancel
+          </button>
+          <button type="submit" class="primary-button" disabled={savingAgent}>
+            {savingAgent ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+{#if deleteTarget}
+  <div class="modal-backdrop" role="presentation">
+    <div class="modal destructive-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-agent-title">
+      <div class="modal-kicker danger-text">Delete Resource</div>
+      <h2 id="delete-agent-title">Delete {deleteTarget.name}?</h2>
+      <p>
+        KAS will set its desired state to deleted. The Agent Driver will reconcile it before
+        the Resource and its Runs are removed.
+      </p>
+      <code class="delete-path">{deleteTarget.path}</code>
+      <div class="modal-actions">
+        <button type="button" class="quiet-button" onclick={() => (deleteTarget = null)}>
+          Cancel
+        </button>
+        <button type="button" class="danger-button solid" onclick={() => void deleteAgent()}>
+          Delete Agent
+        </button>
+      </div>
     </div>
   </div>
 {/if}

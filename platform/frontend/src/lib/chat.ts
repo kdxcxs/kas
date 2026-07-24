@@ -19,8 +19,8 @@ export function slugify(value: string): string {
 export function relationTarget(resource: Resource, relation: string): string | null {
   return (
     resource.links?.find(
-      (link) => link.relation_path === relation && link.source.path === resource.path
-    )?.target.path ?? null
+      (link) => link.relation_path === relation && link.source?.path === resource.path
+    )?.target?.path ?? null
   );
 }
 
@@ -100,4 +100,3 @@ export function link(
 export function hasRelation(link: Link, relation: string): boolean {
   return link.relation_path === relation;
 }
-

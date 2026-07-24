@@ -5,11 +5,15 @@ export interface ObjectRef {
 
 export interface Link {
   path: string;
-  source: ObjectRef;
+  source: ObjectRef | null;
   relation_path: string;
-  target: ObjectRef;
+  target: ObjectRef | null;
+  spec: Record<string, unknown>;
+  status: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  revision: number;
   created_at: string;
+  updated_at: string;
 }
 
 export interface Resource {
@@ -48,9 +52,11 @@ export interface Driver {
 
 export interface PlannedLink {
   path: string;
-  source: ObjectRef;
+  source: ObjectRef | null;
   relation_path: string;
-  target: ObjectRef;
+  target: ObjectRef | null;
+  spec?: Record<string, unknown>;
+  status?: Record<string, unknown>;
   metadata: Record<string, unknown>;
 }
 
@@ -62,3 +68,7 @@ export interface CreateResource {
   links?: PlannedLink[];
 }
 
+export interface UpdateResource {
+  expected_revision: number;
+  spec: Record<string, unknown>;
+}

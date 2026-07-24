@@ -1,4 +1,4 @@
-import type { CreateResource, Driver, Resource, Run } from './types';
+import type { CreateResource, Driver, Resource, Run, UpdateResource } from './types';
 
 export class KasApiError extends Error {
   constructor(
@@ -35,6 +35,23 @@ export class KasApi {
       method: 'POST',
       body: JSON.stringify(resource)
     });
+  }
+
+  async updateResource(path: string, update: UpdateResource): Promise<Resource> {
+    return this.request(`/resources/by-path?${new URLSearchParams({ path })}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update)
+    });
+  }
+
+  async deleteResource(path: string, expectedRevision: number): Promise<Resource> {
+    return this.request(
+      `/resources/by-path?${new URLSearchParams({
+        path,
+        expected_revision: String(expectedRevision)
+      })}`,
+      { method: 'DELETE' }
+    );
   }
 
   async createRun(run: {
@@ -86,4 +103,3 @@ export class KasApi {
     return `${this.baseUrl.replace(/\/$/, '')}${path}`;
   }
 }
-

@@ -109,6 +109,11 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
+.sidebar-title-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .icon-button,
 .settings-button,
 .refresh-button {
@@ -191,6 +196,10 @@ textarea:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agent-copy small.syncing {
+  color: var(--lime-deep);
 }
 
 .agent-copy strong {
@@ -322,7 +331,8 @@ textarea:focus-visible {
 }
 
 .quiet-button,
-.primary-button {
+.primary-button,
+.danger-button {
   padding: 9px 14px;
   border-radius: 9px;
   cursor: pointer;
@@ -349,6 +359,19 @@ textarea:focus-visible {
 
 .primary-button:hover:not(:disabled) {
   background: #d2ff80;
+}
+
+.danger-button {
+  color: #ffab9a;
+  background: transparent;
+  border: 1px solid rgba(255, 138, 115, 0.34);
+}
+
+.danger-button:hover:not(:disabled),
+.danger-button.solid {
+  color: #1a0d09;
+  background: var(--danger);
+  border-color: var(--danger);
 }
 
 button:disabled {
@@ -442,6 +465,163 @@ button:disabled {
 .conversation {
   min-height: 0;
   overflow-y: auto;
+}
+
+.agent-management {
+  min-height: 0;
+  padding: 8px 34px 36px;
+  overflow-y: auto;
+}
+
+.management-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.management-summary > div {
+  padding: 14px 16px;
+  background: rgba(27, 31, 24, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.management-summary strong,
+.management-summary span {
+  display: block;
+}
+
+.management-summary strong {
+  color: var(--warm);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.management-summary span {
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 14px;
+}
+
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 18px;
+  background: #181c15;
+  border: 1px solid #2d3429;
+  border-radius: 15px;
+}
+
+.agent-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-avatar.large {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+}
+
+.agent-card h2 {
+  margin: 0 0 4px;
+  color: var(--warm);
+  font-size: 15px;
+}
+
+.agent-card code,
+.delete-path {
+  color: var(--quiet);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.state-pill {
+  padding: 5px 8px;
+  color: #dff6b5;
+  background: rgba(97, 133, 41, 0.17);
+  border: 1px solid rgba(197, 246, 107, 0.17);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.state-pill.pending {
+  color: #f1d99a;
+  background: rgba(165, 125, 36, 0.15);
+  border-color: rgba(241, 217, 154, 0.2);
+}
+
+.agent-details {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.agent-details div {
+  min-width: 0;
+}
+
+.agent-details dt {
+  margin-bottom: 4px;
+  color: var(--quiet);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.agent-details dd {
+  margin: 0;
+  overflow: hidden;
+  color: #c8cec0;
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 2px;
+}
+
+.agent-card-actions .danger-button {
+  margin-left: auto;
+}
+
+.management-empty {
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  text-align: center;
+}
+
+.management-empty h2 {
+  margin: 0 0 18px;
+  color: var(--warm);
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
 }
 
 .message-list {
@@ -723,6 +903,22 @@ button:disabled {
   margin-top: 6px;
 }
 
+.destructive-modal {
+  border-color: rgba(255, 138, 115, 0.28);
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
+.delete-path {
+  display: block;
+  margin: -8px 0 22px;
+  padding: 10px 12px;
+  background: #11140f;
+  border-radius: 8px;
+}
+
 @media (max-width: 760px) {
   body {
     overflow: auto;
@@ -808,5 +1004,20 @@ button:disabled {
   .field-grid {
     grid-template-columns: 1fr;
   }
-}
 
+  .agent-management {
+    padding: 4px 18px 24px;
+  }
+
+  .management-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-card-actions {
+    flex-wrap: wrap;
+  }
+}
