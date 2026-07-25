@@ -1011,6 +1011,14 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn list_objects(&self, kind: Option<ObjectKind>) -> Result<Vec<ObjectRef>, StoreError> {
+        let mut objects = all_object_refs(&self.connection)?;
+        if let Some(kind) = kind {
+            objects.retain(|object| object.kind == kind);
+        }
+        Ok(objects)
+    }
+
     pub fn object_value(&self, object: &ObjectRef) -> Result<Value, StoreError> {
         ensure_object_exists(&self.connection, object)?;
         let value = match object.kind {
@@ -5327,5 +5335,26 @@ mod tests {
             }),
             Err(StoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn generic_object_listing_and_lookup_cover_manifest_objects() {
+        let mut store = Store::memory().unwrap();
+        store
+            .install_manifest(manifest("/manifests/object-test/v1"), 123)
+            .unwrap();
+
+        let manifests = store.list_objects(Some(ObjectKind::Manifest)).unwrap();
+        assert!(manifests.iter().any(|object| {
+            object.kind == ObjectKind::Manifest && object.path == "/manifests/object-test/v1"
+        }));
+
+        let value = store
+            .object_value(&ObjectRef {
+                kind: ObjectKind::Manifest,
+                path: "/manifests/object-test/v1".into(),
+            })
+            .unwrap();
+        assert_eq!(value["path"], "/manifests/object-test/v1");
     }
 }

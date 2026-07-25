@@ -85,4 +85,55 @@ describe('KasApi', () => {
       expect.objectContaining({ method: 'DELETE' })
     );
   });
+
+  it('lists and reads any KAS object with related links', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { kind: 'service_account', path: '/agents/demo/service-account' }
+          ]),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            kind: 'service_account',
+            path: '/agents/demo/service-account',
+            value: { path: '/agents/demo/service-account' },
+            links: []
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          }
+        )
+      );
+    vi.stubGlobal('fetch', request);
+    const api = new KasApi('/api', 'secret');
+
+    await expect(api.listObjects('service_account')).resolves.toHaveLength(1);
+    await expect(
+      api.getObject('service_account', '/agents/demo/service-account')
+    ).resolves.toMatchObject({
+      kind: 'service_account',
+      links: []
+    });
+
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      '/api/objects?kind=service_account',
+      expect.any(Object)
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      '/api/objects/by-path?kind=service_account&path=%2Fagents%2Fdemo%2Fservice-account&include=links',
+      expect.any(Object)
+    );
+  });
 });

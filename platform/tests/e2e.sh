@@ -253,6 +253,36 @@ jq -e \
     )
   ' >/dev/null <<<"$AGENT"
 
+OBJECTS="$(
+  curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    "$API/objects?kind=service_account"
+)"
+jq -e --arg path "$AGENT_PATH/service-account" '
+  any(.[]; .kind == "service_account" and .path == $path)
+' >/dev/null <<<"$OBJECTS"
+
+OBJECT_DETAIL="$(
+  curl --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "kind=service_account" \
+    --data-urlencode "path=$AGENT_PATH/service-account" \
+    --data-urlencode "include=links" \
+    "$API/objects/by-path"
+)"
+jq -e --arg path "$AGENT_PATH/service-account" --arg agent "$AGENT_PATH" '
+  .kind == "service_account"
+  and .path == $path
+  and .value.path == $path
+  and any(.links[];
+    .relation_path == "/manifests/agent/relations/service-account"
+    and .source.kind == "resource"
+    and .source.path == $agent
+    and .target.kind == "service_account"
+    and .target.path == $path
+  )
+' >/dev/null <<<"$OBJECT_DETAIL"
+
 MESSAGE_PATH="/messages/e2e-user"
 MESSAGE_PAYLOAD="$(
   jq -n --arg message "$MESSAGE_PATH" --arg agent "$AGENT_PATH" '{

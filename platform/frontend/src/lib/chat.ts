@@ -1,4 +1,4 @@
-import type { CreateResource, Link, PlannedLink, Resource } from './types';
+import type { CreateResource, Link, ObjectKind, PlannedLink, Resource } from './types';
 
 export const AGENT_MANIFEST = '/manifests/agent';
 export const MESSAGE_MANIFEST = '/manifests/message';
@@ -85,7 +85,7 @@ export function link(
   path: string,
   sourcePath: string,
   relationPath: string,
-  targetKind: string,
+  targetKind: ObjectKind,
   targetPath: string
 ): PlannedLink {
   return {

@@ -1,5 +1,19 @@
+export type ObjectKind =
+  | 'manifest'
+  | 'action'
+  | 'relation'
+  | 'resource'
+  | 'driver'
+  | 'run'
+  | 'link'
+  | 'user'
+  | 'service_account'
+  | 'role'
+  | 'role_binding'
+  | 'credential';
+
 export interface ObjectRef {
-  kind: string;
+  kind: ObjectKind;
   path: string;
 }
 
@@ -71,4 +85,11 @@ export interface CreateResource {
 export interface UpdateResource {
   expected_revision: number;
   spec: Record<string, unknown>;
+}
+
+export interface ObjectDetail {
+  kind: ObjectKind;
+  path: string;
+  value: unknown;
+  links: Link[];
 }

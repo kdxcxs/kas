@@ -123,6 +123,8 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
             "/credentials/by-path",
             axum::routing::delete(revoke_credential),
         )
+        .route("/objects", get(list_objects))
+        .route("/objects/by-path", get(get_object))
         .route("/roles", get(list_roles).post(create_role))
         .route(
             "/roles/by-path",
@@ -1468,6 +1470,10 @@ fn authorize_relation_use(auth: &AuthContext, relation_path: &str) -> ApiResult<
 }
 
 fn object_is_readable(store: &Store, auth: &AuthContext, object: &ObjectRef) -> bool {
+    object_is_allowed(store, auth, object, "get")
+}
+
+fn object_is_allowed(store: &Store, auth: &AuthContext, object: &ObjectRef, verb: &str) -> bool {
     let resource = match object.kind {
         ObjectKind::Manifest => "manifests".into(),
         ObjectKind::Resource => {
@@ -1487,7 +1493,76 @@ fn object_is_readable(store: &Store, auth: &AuthContext, object: &ObjectRef) -> 
         ObjectKind::RoleBinding => "rolebindings".into(),
         ObjectKind::Credential => "credentials".into(),
     };
-    kas_auth::allows(&auth.rules, &resource, "get", Some(&object.path))
+    kas_auth::allows(&auth.rules, &resource, verb, Some(&object.path))
+}
+
+#[derive(Debug, Deserialize)]
+struct ObjectListQuery {
+    kind: Option<ObjectKind>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObjectQuery {
+    kind: ObjectKind,
+    path: String,
+    include: Option<String>,
+}
+
+async fn list_objects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ObjectListQuery>,
+) -> ApiResult<Json<Vec<ObjectRef>>> {
+    let auth = authenticate(&state, &headers)?;
+    let store = lock(&state)?;
+    let objects = store
+        .list_objects(query.kind)?
+        .into_iter()
+        .filter(|object| object_is_allowed(&store, &auth, object, "list"))
+        .collect();
+    Ok(Json(objects))
+}
+
+async fn get_object(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ObjectQuery>,
+) -> ApiResult<Json<Value>> {
+    let auth = authenticate(&state, &headers)?;
+    let object = ObjectRef {
+        kind: query.kind,
+        path: query.path,
+    };
+    let store = lock(&state)?;
+    if !object_is_readable(&store, &auth, &object) {
+        return Err(forbidden());
+    }
+    let value = store.object_value(&object)?;
+    let links = if query.include.as_deref() == Some("links") {
+        store
+            .links_for_object(&object)?
+            .into_iter()
+            .filter(|link| {
+                object_is_allowed(
+                    &store,
+                    &auth,
+                    &ObjectRef {
+                        kind: ObjectKind::Link,
+                        path: link.path.clone(),
+                    },
+                    "get",
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    Ok(Json(json!({
+        "kind": object.kind,
+        "path": object.path,
+        "value": value,
+        "links": links
+    })))
 }
 
 fn authorize_link_endpoint(

@@ -1,4 +1,13 @@
-import type { CreateResource, Driver, Resource, Run, UpdateResource } from './types';
+import type {
+  CreateResource,
+  Driver,
+  ObjectDetail,
+  ObjectKind,
+  ObjectRef,
+  Resource,
+  Run,
+  UpdateResource
+} from './types';
 
 export class KasApiError extends Error {
   constructor(
@@ -74,6 +83,21 @@ export class KasApi {
   async getAgentDriver(): Promise<Driver | null> {
     return this.request(
       `/manifests/driver?${new URLSearchParams({ path: '/manifests/agent' })}`
+    );
+  }
+
+  async listObjects(kind?: ObjectKind): Promise<ObjectRef[]> {
+    const query = kind ? `?${new URLSearchParams({ kind })}` : '';
+    return this.request(`/objects${query}`);
+  }
+
+  async getObject(kind: ObjectKind, path: string): Promise<ObjectDetail> {
+    return this.request(
+      `/objects/by-path?${new URLSearchParams({
+        kind,
+        path,
+        include: 'links'
+      })}`
     );
   }
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { KasApi, KasApiError } from './lib/api';
   import {
     MESSAGE_ACTION,
@@ -10,7 +10,14 @@
     slugify,
     threadRootOf
   } from './lib/chat';
-  import type { Driver, Resource, Run } from './lib/types';
+  import type {
+    Driver,
+    ObjectDetail,
+    ObjectKind,
+    ObjectRef,
+    Resource,
+    Run
+  } from './lib/types';
 
   const SETTINGS_KEY = 'kas-platform-settings';
   const DEFAULT_API_BASE = import.meta.env.VITE_KAS_API_URL || '/api';
@@ -21,7 +28,22 @@
     userPath: string;
   }
 
-  type View = 'chat' | 'agents';
+  type View = 'chat' | 'agents' | 'objects';
+
+  const OBJECT_KINDS: ObjectKind[] = [
+    'resource',
+    'link',
+    'manifest',
+    'relation',
+    'action',
+    'driver',
+    'run',
+    'user',
+    'service_account',
+    'role',
+    'role_binding',
+    'credential'
+  ];
 
   let settings: Settings = {
     apiBase: DEFAULT_API_BASE,
@@ -54,6 +76,13 @@
   let deleteTarget: Resource | null = null;
   let savingAgent = false;
   let deletingAgentPath = '';
+  let objects: ObjectRef[] = [];
+  let objectKind: ObjectKind = 'resource';
+  let objectSearch = '';
+  let selectedObjectPath = '';
+  let objectDetail: ObjectDetail | null = null;
+  let loadingObjects = false;
+  let objectDetailElement: HTMLElement;
 
   $: selectedAgent = agents.find((agent) => agent.path === selectedAgentPath) ?? null;
   $: currentAgentMessages = selectedAgentPath
@@ -67,6 +96,23 @@
     activeThreadRoot === null
       ? []
       : currentAgentMessages.filter((message) => threadRootOf(message) === activeThreadRoot);
+  $: filteredObjects = objects.filter(
+    (object) =>
+      object.kind === objectKind &&
+      object.path.toLowerCase().includes(objectSearch.trim().toLowerCase())
+  );
+  $: objectCounts = Object.fromEntries(
+    OBJECT_KINDS.map((kind) => [
+      kind,
+      objects.filter((object) => object.kind === kind).length
+    ])
+  ) as Record<ObjectKind, number>;
+  $: pageTitle =
+    view === 'agents'
+      ? 'Agent management'
+      : view === 'objects'
+        ? 'Object explorer'
+        : (selectedAgent?.name ?? 'Choose an Agent');
 
   onMount(() => {
     const saved = localStorage.getItem(SETTINGS_KEY);
@@ -152,6 +198,85 @@
     view = 'agents';
     error = '';
     notice = '';
+  }
+
+  async function openObjectExplorer(): Promise<void> {
+    view = 'objects';
+    error = '';
+    notice = '';
+    await loadObjects();
+  }
+
+  async function loadObjects(api = client()): Promise<void> {
+    loadingObjects = true;
+    try {
+      objects = (await api.listObjects()).sort(
+        (left, right) =>
+          OBJECT_KINDS.indexOf(left.kind) - OBJECT_KINDS.indexOf(right.kind) ||
+          left.path.localeCompare(right.path)
+      );
+      const selected = objects.find(
+        (object) => object.kind === objectKind && object.path === selectedObjectPath
+      );
+      const next = selected ?? objects.find((object) => object.kind === objectKind) ?? objects[0];
+      if (!next) {
+        selectedObjectPath = '';
+        objectDetail = null;
+        return;
+      }
+      objectKind = next.kind;
+      await selectObject(next, api);
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      loadingObjects = false;
+    }
+  }
+
+  async function chooseObjectKind(kind: ObjectKind): Promise<void> {
+    objectKind = kind;
+    objectSearch = '';
+    const next = objects.find((object) => object.kind === kind);
+    if (next) {
+      await selectObject(next);
+    } else {
+      selectedObjectPath = '';
+      objectDetail = null;
+    }
+  }
+
+  async function selectObject(object: ObjectRef, api = client()): Promise<void> {
+    objectKind = object.kind;
+    selectedObjectPath = object.path;
+    loadingObjects = true;
+    error = '';
+    try {
+      objectDetail = await api.getObject(object.kind, object.path);
+      await tick();
+      objectDetailElement?.scrollTo({ top: 0 });
+    } catch (cause) {
+      error = messageOf(cause);
+      objectDetail = null;
+    } finally {
+      loadingObjects = false;
+    }
+  }
+
+  async function reloadObjectDetail(): Promise<void> {
+    if (!objectDetail) return;
+    await selectObject({ kind: objectDetail.kind, path: objectDetail.path });
+  }
+
+  async function selectEndpoint(object: ObjectRef | null): Promise<void> {
+    if (object) await selectObject(object);
+  }
+
+  async function refreshCurrentView(): Promise<void> {
+    if (view === 'objects') {
+      await loadObjects();
+    } else {
+      await loadData();
+    }
   }
 
   function startThread(): void {
@@ -366,6 +491,29 @@
     return JSON.stringify(resource.spec) === JSON.stringify(resource.status);
   }
 
+  function kindLabel(kind: ObjectKind): string {
+    return kind
+      .split('_')
+      .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+      .join(' ');
+  }
+
+  function detailName(detail: ObjectDetail): string {
+    if (
+      typeof detail.value === 'object' &&
+      detail.value !== null &&
+      'name' in detail.value &&
+      typeof detail.value.name === 'string'
+    ) {
+      return detail.value.name;
+    }
+    return detail.path.split('/').at(-1) || detail.path;
+  }
+
+  function formattedValue(value: unknown): string {
+    return JSON.stringify(value, null, 2);
+  }
+
   function timeOf(timestamp: string): string {
     return new Intl.DateTimeFormat(undefined, {
       hour: '2-digit',
@@ -375,7 +523,7 @@
 </script>
 
 <svelte:head>
-  <title>{selectedAgent ? `${selectedAgent.name} · KAS` : 'KAS Agent Console'}</title>
+  <title>{pageTitle} · KAS</title>
 </svelte:head>
 
 <div class="shell">
@@ -391,6 +539,7 @@
     <div class="sidebar-section-title">
       <span>Agents</span>
       <span class="sidebar-title-actions">
+        <button class="icon-button" aria-label="Object Explorer" onclick={() => void openObjectExplorer()}>⌘</button>
         <button class="icon-button" aria-label="Manage Agents" onclick={openAgentManagement}>≡</button>
         <button class="icon-button" aria-label="Create Agent" onclick={openAgentDialog}>+</button>
       </span>
@@ -435,8 +584,10 @@
   <main class="workspace">
     <header class="workspace-header">
       <div>
-        <p class="eyebrow">{view === 'agents' ? 'Workspace' : 'Current Agent'}</p>
-        <h1>{view === 'agents' ? 'Agent management' : (selectedAgent?.name ?? 'Choose an Agent')}</h1>
+        <p class="eyebrow">
+          {view === 'agents' ? 'Workspace' : view === 'objects' ? 'KAS Registry' : 'Current Agent'}
+        </p>
+        <h1>{pageTitle}</h1>
       </div>
       <div class="header-actions">
         {#if view === 'agents'}
@@ -444,8 +595,14 @@
             Open chat
           </button>
           <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
+        {:else if view === 'objects'}
+          <button class="quiet-button" disabled={!selectedAgent} onclick={() => (view = 'chat')}>
+            Open chat
+          </button>
+          <button class="quiet-button" onclick={openAgentManagement}>Manage Agents</button>
         {:else}
           <button class="quiet-button" onclick={openAgentManagement}>Manage Agents</button>
+          <button class="quiet-button" onclick={() => void openObjectExplorer()}>Objects</button>
           <button class="quiet-button" disabled={!selectedAgent} onclick={startThread}>
             New thread
           </button>
@@ -453,8 +610,8 @@
         <button
           class="refresh-button"
           aria-label="Refresh"
-          disabled={loading}
-          onclick={() => loadData().catch((cause) => (error = messageOf(cause)))}
+          disabled={loading || loadingObjects}
+          onclick={() => refreshCurrentView().catch((cause) => (error = messageOf(cause)))}
         >
           ↻
         </button>
@@ -561,6 +718,127 @@
             {/each}
           </div>
         {/if}
+      </section>
+    {:else if view === 'objects'}
+      <section class="object-explorer" aria-label="KAS object explorer">
+        <nav class="object-kind-strip" aria-label="Object kinds">
+          {#each OBJECT_KINDS as kind}
+            <button
+              class:active={kind === objectKind}
+              onclick={() => void chooseObjectKind(kind)}
+            >
+              <span>{kindLabel(kind)}</span>
+              <small>{objectCounts[kind]}</small>
+            </button>
+          {/each}
+        </nav>
+
+        <div class="object-browser">
+          <aside class="object-index">
+            <label class="object-search">
+              <span class="visually-hidden">Filter {kindLabel(objectKind)} objects</span>
+              <input bind:value={objectSearch} placeholder={`Filter ${kindLabel(objectKind)} paths…`} />
+              <small>{filteredObjects.length}</small>
+            </label>
+            <div class="object-list">
+              {#if filteredObjects.length === 0}
+                <div class="object-list-empty">
+                  No {kindLabel(objectKind)} objects are visible.
+                </div>
+              {:else}
+                {#each filteredObjects as object}
+                  <button
+                    class:active={object.path === selectedObjectPath}
+                    onclick={() => void selectObject(object)}
+                  >
+                    <strong>{object.path.split('/').at(-1) || object.path}</strong>
+                    <code>{object.path}</code>
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          </aside>
+
+          <article class="object-detail" bind:this={objectDetailElement}>
+            {#if loadingObjects && !objectDetail}
+              <div class="object-detail-empty">Loading object…</div>
+            {:else if objectDetail}
+              <header class="object-detail-header">
+                <div>
+                  <span class="object-kind-pill">{kindLabel(objectDetail.kind)}</span>
+                  <h2>{detailName(objectDetail)}</h2>
+                  <code>{objectDetail.path}</code>
+                </div>
+                <button
+                  class="quiet-button"
+                  onclick={() => void reloadObjectDetail()}
+                  disabled={loadingObjects}
+                >
+                  Reload
+                </button>
+              </header>
+
+              <section class="object-relations" aria-label="Related objects">
+                <div class="object-section-title">
+                  <span>Links &amp; related objects</span>
+                  <small>{objectDetail.links.length}</small>
+                </div>
+                {#if objectDetail.links.length === 0}
+                  <p>No visible links for this object.</p>
+                {:else}
+                  <div class="relation-list">
+                    {#each objectDetail.links as link}
+                      <article class="relation-card">
+                        <button
+                          class="relation-name"
+                          onclick={() => void selectObject({ kind: 'link', path: link.path })}
+                        >
+                          <strong>{link.path.split('/').at(-1) || link.path}</strong>
+                          <code>{link.path}</code>
+                        </button>
+                        <div class="relation-route">
+                          {#if link.source}
+                            <button onclick={() => void selectEndpoint(link.source)}>
+                              <small>{kindLabel(link.source.kind)}</small>
+                              <code>{link.source.path}</code>
+                            </button>
+                          {:else}
+                            <span class="empty-endpoint">Any source</span>
+                          {/if}
+                          <button
+                            class="relation-edge"
+                            onclick={() =>
+                              void selectObject({ kind: 'relation', path: link.relation_path })}
+                          >
+                            <span>→</span>
+                            <code>{link.relation_path}</code>
+                          </button>
+                          {#if link.target}
+                            <button onclick={() => void selectEndpoint(link.target)}>
+                              <small>{kindLabel(link.target.kind)}</small>
+                              <code>{link.target.path}</code>
+                            </button>
+                          {:else}
+                            <span class="empty-endpoint">Any target</span>
+                          {/if}
+                        </div>
+                      </article>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
+
+              <section class="object-payload">
+                <div class="object-section-title"><span>Object data</span></div>
+                <pre><code>{formattedValue(objectDetail.value)}</code></pre>
+              </section>
+            {:else}
+              <div class="object-detail-empty">
+                Select an object to inspect its data and relationships.
+              </div>
+            {/if}
+          </article>
+        </div>
       </section>
     {:else}
       <section class="conversation" aria-live="polite">
