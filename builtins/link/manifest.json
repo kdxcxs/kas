@@ -1,0 +1,30 @@
+{
+  "path": "/builtin/link",
+  "manifest": "/builtin/manifest",
+  "name": "link",
+  "version": 1,
+  "description": "Defines Link Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "relation"
+    ],
+    "properties": {
+      "relation": {
+        "type": "string"
+      },
+      "source": {
+        "type": "string"
+      },
+      "target": {
+        "type": "string"
+      },
+      "metadata": {
+        "type": "object"
+      }
+    }
+  },
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available"
+}

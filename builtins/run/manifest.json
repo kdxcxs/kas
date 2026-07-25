@@ -1,0 +1,25 @@
+{
+  "path": "/builtin/run",
+  "manifest": "/builtin/manifest",
+  "name": "run",
+  "version": 1,
+  "description": "Defines Action Run Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "request_id",
+      "resource",
+      "action",
+      "input"
+    ]
+  },
+  "states": [
+    "queued",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled"
+  ],
+  "default_state": "queued",
+  "initial_state": "queued"
+}

@@ -1,0 +1,29 @@
+{
+  "path": "/builtin/roles/editor",
+  "manifest": "/builtin/role",
+  "name": "system:editor",
+  "spec": {
+    "description": "Manage Resources",
+    "system_role": "editor",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete",
+          "invoke",
+          "use"
+        ],
+        "paths": []
+      }
+    ]
+  },
+  "status": {
+    "state": "available"
+  }
+}

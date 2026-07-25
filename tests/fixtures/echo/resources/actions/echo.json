@@ -1,0 +1,23 @@
+{
+  "path": "./actions/echo",
+  "manifest": "/builtin/action",
+  "name": "echo",
+  "spec": {
+    "description": "Echo the supplied message",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object"
+    }
+  }
+}

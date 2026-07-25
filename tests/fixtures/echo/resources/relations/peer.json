@@ -1,0 +1,23 @@
+{
+  "path": "./relations/peer",
+  "manifest": "/builtin/relation",
+  "name": "peer",
+  "spec": {
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "type": "many_to_many",
+    "ensure": false,
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object"
+    }
+  }
+}

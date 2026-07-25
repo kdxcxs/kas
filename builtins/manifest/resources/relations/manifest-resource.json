@@ -1,0 +1,27 @@
+{
+  "path": "/builtin/relations/manifest-resource",
+  "manifest": "/builtin/relation",
+  "name": "manifest-resource",
+  "spec": {
+    "role": "manifest_resource",
+    "sources": [
+      {
+        "manifest": "/builtin/manifest"
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "*"
+      }
+    ],
+    "type": "one_to_many",
+    "ensure": true,
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object"
+    }
+  },
+  "status": {
+    "state": "available"
+  }
+}

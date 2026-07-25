@@ -1,0 +1,18 @@
+{
+  "path": "./driver",
+  "manifest": "/builtin/driver",
+  "name": "echo-driver",
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-test-driver",
+    "service_account": "./service-accounts/driver",
+    "args": [],
+    "restart": "never"
+  },
+  "status": {
+    "desired_state": "running",
+    "state": "stopped",
+    "generation": 0,
+    "metadata": {}
+  }
+}

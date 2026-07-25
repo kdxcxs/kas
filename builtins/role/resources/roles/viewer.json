@@ -1,0 +1,24 @@
+{
+  "path": "/builtin/roles/viewer",
+  "manifest": "/builtin/role",
+  "name": "system:viewer",
+  "spec": {
+    "description": "Read Resources",
+    "system_role": "viewer",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": []
+      }
+    ]
+  },
+  "status": {
+    "state": "available"
+  }
+}

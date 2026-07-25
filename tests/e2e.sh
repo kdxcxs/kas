@@ -21,6 +21,7 @@ if (($# > 0)); then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-e2e.XXXXXX")"
 API_PID=""
 API_LOG="$E2E_DIR/kas-api.log"
@@ -155,7 +156,7 @@ curl() {
 }
 
 cd "$ROOT"
-cargo build --workspace
+cargo build -j 1 -p kas-api -p kas-migrate -p kas-admin -p kas-test-driver
 
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
@@ -164,10 +165,10 @@ export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
 
-target/debug/kas-migrate
-ADMIN_TOKEN="$(target/debug/kas-admin bootstrap e2e-admin)"
+"$TARGET_DIR/debug/kas-migrate"
+ADMIN_TOKEN="$("$TARGET_DIR/debug/kas-admin" bootstrap e2e-admin)"
 
-target/debug/kas-api >"$API_LOG" 2>&1 &
+"$TARGET_DIR/debug/kas-api" >"$API_LOG" 2>&1 &
 API_PID="$!"
 
 for _ in $(seq 1 100); do
@@ -178,108 +179,109 @@ for _ in $(seq 1 100); do
 done
 curl --fail --silent "$API/health" | jq -e '.ok == true' >/dev/null
 
-curl --fail --silent \
+curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$API/manifests" |
+  --data-urlencode "path=/builtin/manifest" \
+  "$API/resources/by-path" |
   jq -e '
-    ([.[].path] | sort) == ([
-      "/manifests/system/auth",
-      "/manifests/system/core"
-    ] | sort)
+    .path == "/builtin/manifest"
+    and .manifest == "/builtin/manifest"
+    and .spec.version == 1
+  ' >/dev/null
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/manifest" \
+  "$API/resources" |
+  jq -e '
+    ([.[].path] | index("/builtin/manifest")) != null
+    and ([.[].path] | index("/builtin/driver")) != null
+    and ([.[].path] | index("/builtin/run")) != null
+    and ([.[].path] | index("/builtin/link")) != null
   ' >/dev/null
 
 PACKAGE_ROOT="$E2E_DIR/package"
 mkdir -p "$PACKAGE_ROOT/driver/bin"
 cp tests/fixtures/echo/manifest.json "$PACKAGE_ROOT/manifest.json"
-cp target/debug/kas-test-driver "$PACKAGE_ROOT/driver/bin/kas-test-driver"
+cp -R tests/fixtures/echo/resources "$PACKAGE_ROOT/resources"
+cp "$TARGET_DIR/debug/kas-test-driver" "$PACKAGE_ROOT/driver/bin/kas-test-driver"
 chmod 755 "$PACKAGE_ROOT/driver/bin/kas-test-driver"
-tar -C "$PACKAGE_ROOT" -cf "$E2E_DIR/echo.kas" manifest.json driver
+COPYFILE_DISABLE=1 tar -C "$PACKAGE_ROOT" -cf "$E2E_DIR/echo.kas" manifest.json resources driver
 
-MANIFEST="$(
+PACKAGE="$(
   curl --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/vnd.kas.manifest+tar" \
     --data-binary "@$E2E_DIR/echo.kas" \
-    "$API/manifests"
+    "$API/packages"
 )"
-echo "$MANIFEST" | jq -e '
-  .path == "/manifests/echo"
-  and .driver.path == "/manifests/echo/driver"
-  and (.package_digest | startswith("sha256:"))
+echo "$PACKAGE" | jq -e '
+  (.path | startswith("/packages/sha256/"))
+  and .manifest == "/builtin/package"
+  and (.spec.digest | startswith("sha256:"))
+  and .spec.size_bytes > 0
+  and .spec.media_type == "application/vnd.kas.manifest+tar"
+  and .spec == .status
 ' >/dev/null || {
-  echo "Manifest installation failed: $MANIFEST" >&2
+  echo "Package installation failed: $PACKAGE" >&2
   false
 }
+PACKAGE_PATH="$(echo "$PACKAGE" | jq -r '.path')"
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=manifest" \
-  --data-urlencode "source_path=/manifests/echo" \
-  "$API/links" |
+  --data-urlencode "path=/manifests/echo" \
+  "$API/resources/by-path" |
   jq -e '
-    length == 5
-    and ([.[].relation_path] | unique) == [
-      "/manifests/system/core/relations/manifest-member"
-    ]
-    and ([.[].target.kind] | sort) == ([
-      "action",
-      "driver",
-      "role",
-      "role_binding",
-      "service_account"
-    ] | sort)
+    .path == "/manifests/echo"
+    and .manifest == "/builtin/manifest"
+    and (.spec | has("package_digest") | not)
+  ' >/dev/null
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e '
+    [.[] | select(
+      .spec.source == "/manifests/echo"
+      and (.spec.target | startswith("/manifests/echo/"))
+    )] | length == 6
+  ' >/dev/null
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e --arg package "$PACKAGE_PATH" '
+    [.[] | select(
+      .spec.relation == "/builtin/relations/package-manifest"
+      and .spec.source == $package
+      and .spec.target == "/manifests/echo"
+    )] | length == 1
   ' >/dev/null
 
 DRIVER_PATH="/manifests/echo/driver"
-DRIVER_URL="$API/drivers/by-path?path=$(jq -rn --arg value "$DRIVER_PATH" '$value | @uri')"
-
-curl --fail --silent --get \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=driver" \
-  --data-urlencode "source_path=$DRIVER_PATH" \
-  "$API/links" |
-  jq -e '
-    length == 1
-    and .[0].relation_path == "/manifests/system/core/relations/driver-service-account"
-    and .[0].target.kind == "service_account"
-    and .[0].target.path == "/manifests/echo/service-accounts/driver"
-  ' >/dev/null
-
-curl --fail --silent --get \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=role_binding" \
-  --data-urlencode "source_path=/manifests/echo/role-bindings/driver" \
-  "$API/links" |
-  jq -e '
-    length == 2
-    and ([.[].relation_path] | sort) == ([
-      "/manifests/system/auth/relations/role-binding-role",
-      "/manifests/system/auth/relations/role-binding-subject"
-    ] | sort)
-    and ([.[].target.kind] | sort) == ([
-      "role",
-      "service_account"
-    ] | sort)
-  ' >/dev/null
 
 DRIVER=""
 for _ in $(seq 1 200); do
   DRIVER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/manifests/echo" \
-      "$API/manifests/driver"
+      --data-urlencode "path=$DRIVER_PATH" \
+      "$API/resources/by-path"
   )"
-  if [[ "$(echo "$DRIVER" | jq -r '.state')" == "ready" ]]; then
+  if [[ "$(echo "$DRIVER" | jq -r '.status.state')" == "ready" ]]; then
     break
   fi
   sleep 0.05
 done
 echo "$DRIVER" | jq -e '
   .path == "/manifests/echo/driver"
-  and .desired_state == "running"
-  and .state == "ready"
-  and .process_id != null
+  and .manifest == "/builtin/driver"
+  and .status.desired_state == "running"
+  and .status.state == "ready"
+  and .status.process_id != null
 ' >/dev/null
 
 RESOURCE_PATH="/resources/e2e/echo"
@@ -317,19 +319,41 @@ for _ in $(seq 1 200); do
 done
 echo "$RESOURCE" | jq -e '.spec == .status and .status.state == "available"' >/dev/null
 
-curl --fail --silent --get \
+LINK_PATH="/links/e2e/echo-self"
+curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "path=$RESOURCE_PATH" \
-  --data-urlencode "include=relations" \
-  "$API/resources/by-path" |
-  jq -e '
-    .path == "/resources/e2e/echo"
-    and (.links | length) == 1
-    and .links[0].relation_path == "/manifests/system/core/relations/resource-manifest"
-    and (.related | length) == 1
-    and .related[0].kind == "manifest"
-    and .related[0].value.path == "/manifests/echo"
-  ' >/dev/null
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n --arg path "$LINK_PATH" --arg resource "$RESOURCE_PATH" '{
+      path: $path,
+      manifest: "/builtin/link",
+      name: "echo-self",
+      spec: {
+        relation: "/manifests/echo/relations/peer",
+        source: $resource,
+        target: $resource,
+        metadata: {}
+      }
+    }'
+  )" \
+  "$API/resources" >/dev/null
+LINK=""
+for _ in $(seq 1 200); do
+  LINK="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$LINK_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$LINK" | jq -r '.status.relation // empty')" == "/manifests/echo/relations/peer" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$LINK" | jq -e '
+  .manifest == "/builtin/link"
+  and .spec == .status
+' >/dev/null
 
 REQUEST_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 RUN_PATH="$RESOURCE_PATH/runs/$REQUEST_ID"
@@ -339,19 +363,22 @@ RUN_PAYLOAD="$(
     --arg request_id "$REQUEST_ID" \
     --arg resource "$RESOURCE_PATH" '{
       path: $run,
-      request_id: $request_id,
-      resource: $resource,
-      action: "/manifests/echo/actions/echo",
-      input: {message: "hello from e2e"},
-      links: []
+      manifest: "/builtin/run",
+      name: $request_id,
+      spec: {
+        request_id: $request_id,
+        resource: $resource,
+        action: "/manifests/echo/actions/echo",
+        input: {message: "hello from e2e"}
+      }
     }'
 )"
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$RUN_PAYLOAD" \
-  "$API/runs" |
-  jq -e '.status == "queued"' >/dev/null
+  "$API/resources" |
+  jq -e '.status.state == "queued"' >/dev/null
 
 RUN=""
 for _ in $(seq 1 200); do
@@ -359,31 +386,25 @@ for _ in $(seq 1 200); do
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       --data-urlencode "path=$RUN_PATH" \
-      "$API/runs/by-path"
+      "$API/resources/by-path"
   )"
-  if [[ "$(echo "$RUN" | jq -r '.status')" == "succeeded" ]]; then
+  if [[ "$(echo "$RUN" | jq -r '.status.state')" == "succeeded" ]]; then
     break
   fi
   sleep 0.05
 done
 echo "$RUN" | jq -e '
-  .status == "succeeded"
-  and .output.echo.message == "hello from e2e"
-  and .driver_generation == 1
+  .status.state == "succeeded"
+  and .status.output.echo.message == "hello from e2e"
+  and .status.driver_generation == 1
 ' >/dev/null
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=run" \
-  --data-urlencode "source_path=$RUN_PATH" \
-  "$API/links" |
-  jq -e '
-    length == 3
-    and ([.[].relation_path] | sort) == ([
-      "/manifests/system/core/relations/run-action",
-      "/manifests/system/core/relations/run-driver",
-      "/manifests/system/core/relations/run-resource"
-    ] | sort)
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e --arg run "$RUN_PATH" '
+    [.[] | select(.spec.source == $run)] | length == 3
   ' >/dev/null
 
 RESOURCE_REVISION="$(
@@ -427,28 +448,65 @@ curl --fail --silent \
     and .status.state == "pending"
   ' >/dev/null
 
-curl --fail --silent --request PATCH \
+curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"state":"stopping"}' \
-  "$DRIVER_URL" >/dev/null
+  -d '{"path":"/users/e2e-viewer","manifest":"/builtin/user","name":"e2e-viewer","spec":{"disabled":false}}' \
+  "$API/resources" >/dev/null
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/roles/e2e-viewer","manifest":"/builtin/role","name":"e2e-viewer","spec":{"rules":[{"manifests":["/manifests/echo"],"verbs":["get"],"paths":["/resources/e2e/**"]}]}}' \
+  "$API/resources" >/dev/null
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/role-bindings/e2e-viewer","manifest":"/builtin/role-binding","name":"e2e-viewer","spec":{"role":"/roles/e2e-viewer","subjects":["/users/e2e-viewer"]}}' \
+  "$API/resources" >/dev/null
+VIEWER_TOKEN="$(
+  curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"subject":"/users/e2e-viewer"}' \
+    "$API/credentials/issue" |
+    jq -r '.token'
+)"
+curl --fail --silent --get \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  --data-urlencode "path=$RESOURCE_PATH" \
+  "$API/resources/by-path" |
+  jq -e '.path == "/resources/e2e/echo"' >/dev/null
+RBAC_STATUS="$(
+  curl --silent --output "$E2E_DIR/rbac-denied.json" --write-out "%{http_code}" \
+    --get \
+    -H "Authorization: Bearer $VIEWER_TOKEN" \
+    --data-urlencode "path=$DRIVER_PATH" \
+    "$API/resources/by-path"
+)"
+[[ "$RBAC_STATUS" == "403" ]]
+
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"path\":\"$DRIVER_PATH\",\"desired_state\":\"stopped\"}" \
+  "$API/drivers/control" >/dev/null
 
 for _ in $(seq 1 100); do
   DRIVER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       --data-urlencode "path=$DRIVER_PATH" \
-      "$API/drivers/by-path"
+      "$API/resources/by-path"
   )"
-  if [[ "$(echo "$DRIVER" | jq -r '.state')" == "stopped" ]]; then
+  if [[ "$(echo "$DRIVER" | jq -r '.status.state')" == "stopped" ]]; then
     break
   fi
   sleep 0.05
 done
 echo "$DRIVER" | jq -e '
-  .desired_state == "stopped"
-  and .state == "stopped"
-  and .process_id == null
+  .status.desired_state == "stopped"
+  and .status.state == "stopped"
+  and .status.process_id == null
 ' >/dev/null
 
 echo "KAS end-to-end test passed"

@@ -1,0 +1,20 @@
+{
+  "path": "/builtin/user",
+  "manifest": "/builtin/manifest",
+  "name": "user",
+  "version": 1,
+  "description": "Defines User Resources",
+  "resource_schema": {
+    "type": "object",
+    "properties": {
+      "disabled": {
+        "type": "boolean"
+      }
+    }
+  },
+  "states": [
+    "disabled"
+  ],
+  "default_state": "available",
+  "initial_state": "available"
+}

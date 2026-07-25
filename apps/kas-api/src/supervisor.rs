@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use kas_core::{DriverDefinition, DriverState, RestartPolicy};
+use kas_core::{DriverSpec, DriverState, DriverStatus, Resource, RestartPolicy};
 use kas_store::Store;
 use tokio::{
     process::{Child, Command},
@@ -18,11 +18,20 @@ const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+fn driver_spec(launch: &DriverLaunch) -> DriverSpec {
+    serde_json::from_value(launch.driver.spec.clone())
+        .expect("Driver Resource was validated before supervisor launch")
+}
+
+fn driver_status(driver: &Resource) -> anyhow::Result<DriverStatus> {
+    serde_json::from_value(driver.status.clone()).map_err(Into::into)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DriverLaunch {
     pub manifest_path: String,
     pub package_root: PathBuf,
-    pub definition: DriverDefinition,
+    pub driver: Resource,
     pub prepared_generation: Option<u64>,
 }
 
@@ -74,7 +83,7 @@ async fn run_supervisor(
     while let Some(command) = receiver.recv().await {
         match command {
             SupervisorCommand::EnsureRunning(launch) => {
-                let driver_path = launch.definition.path.clone();
+                let driver_path = launch.driver.path.clone();
                 if drivers
                     .get(&driver_path)
                     .is_some_and(|(_, desired)| *desired.borrow())
@@ -144,12 +153,12 @@ async fn run_driver(
             return;
         }
         let started =
-            match prepare_generation(&store, &launch.definition.path, launch.prepared_generation) {
+            match prepare_generation(&store, &launch.driver.path, launch.prepared_generation) {
                 Ok(started) => started,
                 Err(error) => {
                     eprintln!(
                         "Driver {} could not prepare a generation: {error:#}",
-                        launch.definition.path
+                        launch.driver.path
                     );
                     return;
                 }
@@ -159,13 +168,8 @@ async fn run_driver(
         let mut child = match spawn_process(&api_url, &data_dir, &launch, generation, &token) {
             Ok(child) => child,
             Err(error) => {
-                mark_failed(
-                    &store,
-                    &launch.definition.path,
-                    generation,
-                    &error.to_string(),
-                );
-                if !should_restart(launch.definition.restart, true) {
+                mark_failed(&store, &launch.driver.path, generation, &error.to_string());
+                if !should_restart(driver_spec(&launch).restart, true) {
                     return;
                 }
                 if wait_backoff(&mut desired, backoff).await {
@@ -178,7 +182,7 @@ async fn run_driver(
 
         match wait_until_ready(
             &store,
-            &launch.definition.path,
+            &launch.driver.path,
             generation,
             &mut child,
             &mut desired,
@@ -187,18 +191,18 @@ async fn run_driver(
         {
             ReadyOutcome::Ready => backoff = Duration::from_millis(250),
             ReadyOutcome::Stopped => {
-                stop_child(&store, &launch.definition.path, generation, &mut child).await;
+                stop_child(&store, &launch.driver.path, generation, &mut child).await;
                 return;
             }
             ReadyOutcome::Exited(success) => {
                 record_exit(
                     &store,
-                    &launch.definition.path,
+                    &launch.driver.path,
                     generation,
                     success,
                     "Driver exited before becoming ready",
                 );
-                if !should_restart(launch.definition.restart, !success)
+                if !should_restart(driver_spec(&launch).restart, !success)
                     || wait_backoff(&mut desired, backoff).await
                 {
                     return;
@@ -210,11 +214,11 @@ async fn run_driver(
                 let _ = child.kill().await;
                 mark_failed(
                     &store,
-                    &launch.definition.path,
+                    &launch.driver.path,
                     generation,
                     "Driver ready timeout",
                 );
-                if !should_restart(launch.definition.restart, true)
+                if !should_restart(driver_spec(&launch).restart, true)
                     || wait_backoff(&mut desired, backoff).await
                 {
                     return;
@@ -230,12 +234,12 @@ async fn run_driver(
                 let failed = !success;
                 record_exit(
                     &store,
-                    &launch.definition.path,
+                    &launch.driver.path,
                     generation,
                     success,
                     "Driver process exited",
                 );
-                if !should_restart(launch.definition.restart, failed)
+                if !should_restart(driver_spec(&launch).restart, failed)
                     || wait_backoff(&mut desired, backoff).await
                 {
                     return;
@@ -244,7 +248,7 @@ async fn run_driver(
             }
             changed = desired.changed() => {
                 if changed.is_err() || !*desired.borrow() {
-                    stop_child(&store, &launch.definition.path, generation, &mut child).await;
+                    stop_child(&store, &launch.driver.path, generation, &mut child).await;
                     return;
                 }
             }
@@ -261,24 +265,26 @@ fn prepare_generation(
         .lock()
         .map_err(|_| anyhow::anyhow!("Store lock is poisoned"))?;
     let current = store.get_driver(driver_path)?;
+    let current_status = driver_status(&current)?;
     if prepared_generation.is_some_and(|generation| {
-        current.generation == generation && current.state == DriverState::Starting
+        current_status.generation == generation && current_status.state == DriverState::Starting
     }) {
         let credential = store.issue_driver_credential(driver_path)?;
-        return Ok((current.generation, credential.token));
+        return Ok((current_status.generation, credential.token));
     }
     if matches!(
-        current.state,
+        current_status.state,
         DriverState::Starting | DriverState::Ready | DriverState::Stopping
     ) {
-        if current.state != DriverState::Stopping {
+        if current_status.state != DriverState::Stopping {
             store.stop_driver(driver_path)?;
         }
-        store.mark_driver_stopped(driver_path, current.generation)?;
+        store.mark_driver_stopped(driver_path, current_status.generation)?;
     }
     let driver = store.start_driver(driver_path)?;
+    let status = driver_status(&driver)?;
     let credential = store.issue_driver_credential(driver_path)?;
-    Ok((driver.generation, credential.token))
+    Ok((status.generation, credential.token))
 }
 
 fn spawn_process(
@@ -288,16 +294,17 @@ fn spawn_process(
     generation: u64,
     token: &str,
 ) -> anyhow::Result<Child> {
-    let entrypoint = launch.package_root.join(&launch.definition.entrypoint);
+    let definition = driver_spec(launch);
+    let entrypoint = launch.package_root.join(&definition.entrypoint);
     let mut command = Command::new(&entrypoint);
     command
-        .args(&launch.definition.args)
+        .args(&definition.args)
         .current_dir(&launch.package_root)
         .env("KAS_API", api_url)
         .env("KAS_DATA_DIR", data_dir)
         .env("KAS_PACKAGE_ROOT", &launch.package_root)
         .env("KAS_MANIFEST_PATH", &launch.manifest_path)
-        .env("KAS_DRIVER_PATH", &launch.definition.path)
+        .env("KAS_DRIVER_PATH", &launch.driver.path)
         .env("KAS_DRIVER_GENERATION", generation.to_string())
         .env("KAS_DRIVER_TOKEN", token)
         .kill_on_drop(true);
@@ -325,9 +332,13 @@ async fn wait_until_ready(
                 .lock()
                 .ok()
                 .and_then(|store| store.get_driver(driver_path).ok());
-            if state.is_some_and(|driver| {
-                driver.generation == generation && driver.state == DriverState::Ready
-            }) {
+            if state
+                .as_ref()
+                .and_then(|driver| driver_status(driver).ok())
+                .is_some_and(|status| {
+                    status.generation == generation && status.state == DriverState::Ready
+                })
+            {
                 return ReadyOutcome::Ready;
             }
         }
@@ -351,7 +362,11 @@ async fn stop_child(
     if let Ok(mut store) = store.lock() {
         if store
             .get_driver(driver_path)
-            .is_ok_and(|driver| matches!(driver.state, DriverState::Starting | DriverState::Ready))
+            .ok()
+            .and_then(|driver| driver_status(&driver).ok())
+            .is_some_and(|status| {
+                matches!(status.state, DriverState::Starting | DriverState::Ready)
+            })
         {
             let _ = store.stop_driver(driver_path);
         }
@@ -363,7 +378,9 @@ async fn stop_child(
     if let Ok(mut store) = store.lock() {
         if store
             .get_driver(driver_path)
-            .is_ok_and(|driver| driver.state == DriverState::Stopping)
+            .ok()
+            .and_then(|driver| driver_status(&driver).ok())
+            .is_some_and(|status| status.state == DriverState::Stopping)
         {
             let _ = store.mark_driver_stopped(driver_path, generation);
         }
@@ -390,13 +407,19 @@ fn record_exit(
     if let Ok(mut store) = store.lock() {
         if store
             .get_driver(driver_path)
-            .is_ok_and(|driver| matches!(driver.state, DriverState::Starting | DriverState::Ready))
+            .ok()
+            .and_then(|driver| driver_status(&driver).ok())
+            .is_some_and(|status| {
+                matches!(status.state, DriverState::Starting | DriverState::Ready)
+            })
         {
             let _ = store.stop_driver(driver_path);
         }
         if store
             .get_driver(driver_path)
-            .is_ok_and(|driver| driver.state == DriverState::Stopping)
+            .ok()
+            .and_then(|driver| driver_status(&driver).ok())
+            .is_some_and(|status| status.state == DriverState::Stopping)
         {
             let _ = store.mark_driver_stopped(driver_path, generation);
         }
@@ -421,7 +444,7 @@ async fn wait_backoff(desired: &mut watch::Receiver<bool>, duration: Duration) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kas_core::DriverRuntime;
+    use serde_json::json;
 
     #[test]
     fn restart_policy_is_applied_to_exit_status() {
@@ -451,14 +474,28 @@ mod tests {
         let launch = DriverLaunch {
             manifest_path: "/manifests/echo".into(),
             package_root: package.path().to_owned(),
-            definition: DriverDefinition {
-                path: "/manifests/echo/driver".into(),
-                runtime: DriverRuntime::Process,
-                entrypoint: "./driver".into(),
-                service_account: "/manifests/echo/service-accounts/driver".into(),
-                args: vec!["argument".into()],
-                restart: RestartPolicy::Never,
-            },
+            driver: serde_json::from_value(json!({
+                "path": "/manifests/echo/driver",
+                "manifest": "/builtin/driver",
+                "name": "driver",
+                "spec": {
+                    "runtime": "process",
+                    "entrypoint": "./driver",
+                    "service_account": "/manifests/echo/service-accounts/driver",
+                    "args": ["argument"],
+                    "restart": "never"
+                },
+                "status": {
+                    "desired_state": "running",
+                    "state": "stopped",
+                    "generation": 0,
+                    "metadata": {}
+                },
+                "revision": 0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap(),
             prepared_generation: None,
         };
 

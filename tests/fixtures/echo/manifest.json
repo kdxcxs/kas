@@ -1,5 +1,6 @@
 {
   "path": "/manifests/echo",
+  "manifest": "/builtin/manifest",
   "name": "echo",
   "version": 1,
   "description": "Real-process end-to-end test Manifest",
@@ -11,94 +12,11 @@
     "properties": {
       "label": {
         "type": "string"
-      },
-      "state": {
-        "type": "string",
-        "enum": [
-          "pending",
-          "available",
-          "deleted"
-        ]
       }
     },
     "required": [
-      "label",
-      "state"
+      "label"
     ],
     "additionalProperties": false
-  },
-  "actions": [
-    {
-      "path": "./actions/echo",
-      "name": "echo",
-      "description": "Echo the supplied message",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "message"
-        ],
-        "additionalProperties": false
-      },
-      "output_schema": {
-        "type": "object"
-      }
-    }
-  ],
-  "relations": [],
-  "driver": {
-    "path": "./driver",
-    "runtime": "process",
-    "entrypoint": "./driver/bin/kas-test-driver",
-    "service_account": "./service-accounts/driver",
-    "args": [],
-    "restart": "never"
-  },
-  "rbac": {
-    "service_accounts": [
-      {
-        "path": "./service-accounts/driver",
-        "name": "echo-driver"
-      }
-    ],
-    "roles": [
-      {
-        "path": "./roles/driver",
-        "name": "echo-driver",
-        "description": "Echo Driver business permissions",
-        "rules": [
-          {
-            "resources": [
-              "resources/echo"
-            ],
-            "verbs": [
-              "get",
-              "list",
-              "link"
-            ],
-            "paths": [
-              "/resources/e2e/**"
-            ]
-          }
-        ]
-      }
-    ],
-    "role_bindings": [
-      {
-        "path": "./role-bindings/driver",
-        "name": "echo-driver",
-        "role_path": "./roles/driver",
-        "subjects": [
-          {
-            "kind": "service_account",
-            "path": "./service-accounts/driver"
-          }
-        ]
-      }
-    ]
   }
 }

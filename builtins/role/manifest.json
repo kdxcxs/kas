@@ -1,0 +1,16 @@
+{
+  "path": "/builtin/role",
+  "manifest": "/builtin/manifest",
+  "name": "role",
+  "version": 1,
+  "description": "Defines Role Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "rules"
+    ]
+  },
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available"
+}

@@ -1,0 +1,11 @@
+{
+  "path": "./role-bindings/driver",
+  "manifest": "/builtin/role-binding",
+  "name": "echo-driver",
+  "spec": {
+    "role": "./roles/driver",
+    "subjects": [
+      "./service-accounts/driver"
+    ]
+  }
+}

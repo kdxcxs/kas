@@ -1,4 +1,4 @@
-use kas_core::{Action, DriverExecution, Mutation, ReconcileObject, Resource, Run};
+use kas_core::{ActionSpec, DriverExecution, Mutation, Resource, RunSpec};
 use kas_driver::{Driver, DriverError};
 use serde_json::json;
 
@@ -9,33 +9,28 @@ impl Driver for TestDriver {
         "test-driver"
     }
 
-    fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
-        Ok(match object {
-            ReconcileObject::Resource(resource) => vec![Mutation::UpdateResourceStatus {
-                resource_path: resource.path.clone(),
-                expected_revision: resource.revision,
-                status: resource.spec.clone(),
-            }],
-            ReconcileObject::Link(link) => vec![Mutation::UpdateLink {
-                link_path: link.path.clone(),
-                expected_revision: link.revision,
-                source: link.source.clone(),
-                target: link.target.clone(),
-                status: link.spec.clone(),
-            }],
-        })
+    fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+        Ok(vec![Mutation::UpdateResourceStatus {
+            resource_path: resource.path.clone(),
+            expected_revision: resource.revision,
+            status: resource.spec.clone(),
+        }])
     }
 
     fn execute(
         &self,
         _resource: &Resource,
-        action: &Action,
-        run: &Run,
+        action: &Resource,
+        run: &Resource,
     ) -> Result<DriverExecution, DriverError> {
+        let _action_spec: ActionSpec = serde_json::from_value(action.spec.clone())
+            .map_err(|error| DriverError::Execution(error.to_string()))?;
+        let run_spec: RunSpec = serde_json::from_value(run.spec.clone())
+            .map_err(|error| DriverError::Execution(error.to_string()))?;
         if action.name != "echo" {
             return Err(DriverError::UnsupportedAction(action.path.clone()));
         }
-        Ok(json!({ "echo": run.input }).into())
+        Ok(json!({ "echo": run_spec.input }).into())
     }
 }
 
@@ -47,6 +42,7 @@ mod tests {
     fn echo_uses_hydrated_action() {
         let resource: Resource = serde_json::from_value(json!({
             "path": "/resources/source",
+            "manifest": "/manifests/echo",
             "name": "source",
             "spec": {},
             "status": {},
@@ -55,25 +51,36 @@ mod tests {
             "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap();
-        let run: Run = serde_json::from_value(json!({
+        let run: Resource = serde_json::from_value(json!({
             "path": "/runs/echo-1",
-            "request_id": "10000000-0000-0000-0000-000000000001",
-            "driver_generation": 1,
-            "input": {"message": "hello"},
-            "status": "running",
-            "output": null,
-            "error": null,
+            "manifest": "/builtin/run",
+            "name": "echo-1",
+            "spec": {
+                "request_id": "10000000-0000-0000-0000-000000000001",
+                "resource": "/resources/source",
+                "action": "/manifests/echo/actions/echo",
+                "driver": "/manifests/echo/driver",
+                "input": {"message": "hello"}
+            },
+            "status": {"state": "running", "driver_generation": 1},
+            "revision": 1,
             "created_at": "2026-01-01T00:00:00Z",
-            "started_at": "2026-01-01T00:00:01Z",
-            "finished_at": null
+            "updated_at": "2026-01-01T00:00:01Z"
         }))
         .unwrap();
-        let action: Action = serde_json::from_value(json!({
+        let action: Resource = serde_json::from_value(json!({
             "path": "/manifests/test/actions/echo",
+            "manifest": "/builtin/action",
             "name": "echo",
-            "description": "Echo",
-            "input_schema": {},
-            "output_schema": {}
+            "spec": {
+                "description": "Echo",
+                "input_schema": {},
+                "output_schema": {}
+            },
+            "status": {},
+            "revision": 0,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap();
 

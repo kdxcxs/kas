@@ -1,0 +1,24 @@
+{
+  "path": "/builtin/driver",
+  "manifest": "/builtin/manifest",
+  "name": "driver",
+  "version": 1,
+  "description": "Defines singleton Driver Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "runtime",
+      "entrypoint",
+      "service_account"
+    ]
+  },
+  "states": [
+    "stopped",
+    "starting",
+    "ready",
+    "stopping",
+    "failed"
+  ],
+  "default_state": "stopped",
+  "initial_state": "stopped"
+}
