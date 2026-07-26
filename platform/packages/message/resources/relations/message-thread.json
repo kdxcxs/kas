@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "path": "./relations/message-thread",
+    "manifest": "/builtin/relation",
+    "name": "message-thread"
+  },
+  "spec": {
+    "inverse_name": "messages",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/messages/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/manifests/thread",
+        "paths": [
+          "/threads/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

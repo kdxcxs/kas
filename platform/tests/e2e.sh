@@ -4,24 +4,19 @@ set -euo pipefail
 VERBOSE=false
 while getopts ":v" option; do
   case "$option" in
-    v)
-      VERBOSE=true
-      ;;
-    \?)
+    v) VERBOSE=true ;;
+    *)
       echo "usage: $0 [-v]" >&2
       exit 2
       ;;
   esac
 done
-shift "$((OPTIND - 1))"
-if (($# > 0)); then
-  echo "usage: $0 [-v]" >&2
-  exit 2
-fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PLATFORM_ROOT="$ROOT/platform"
 E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-platform-e2e.XXXXXX")"
+CORE_TARGET="${KAS_CORE_TARGET_DIR:-$E2E_DIR/core-target}"
+PLATFORM_TARGET="${KAS_PLATFORM_TARGET_DIR:-$E2E_DIR/platform-target}"
 API_PID=""
 API_LOG="$E2E_DIR/kas-api.log"
 
@@ -30,18 +25,15 @@ cleanup() {
     kill "$API_PID" 2>/dev/null || true
     wait "$API_PID" 2>/dev/null || true
   fi
-  if [[ "$E2E_DIR" == "${TMPDIR:-/tmp}"/kas-platform-e2e.* ]]; then
+  if [[ "${KAS_E2E_KEEP:-false}" != true ]] &&
+    [[ "$E2E_DIR" == "${TMPDIR:-/tmp}"/kas-platform-e2e.* ]]; then
     rm -rf "$E2E_DIR"
   fi
 }
 
 failed() {
-  local line="$1"
-  echo "Platform E2E failed at line $line" >&2
-  if [[ -f "$API_LOG" ]]; then
-    echo "kas-api output:" >&2
-    sed -n '1,260p' "$API_LOG" >&2
-  fi
+  echo "Platform E2E failed at line $1" >&2
+  [[ -f "$API_LOG" ]] && sed -n '1,360p' "$API_LOG" >&2
 }
 
 trap 'failed "$LINENO"' ERR
@@ -59,46 +51,101 @@ if [[ -z "$CODEX_BIN" || ! -x "$CODEX_BIN" ]]; then
   exit 1
 fi
 
-curl() {
-  if [[ "$VERBOSE" != true ]]; then
-    command curl "$@"
-    return
+request() {
+  local response status
+  if [[ "$VERBOSE" == true ]]; then
+    printf '\n>>> curl' >&2
+    local argument displayed
+    for argument in "$@"; do
+      displayed="$argument"
+      [[ "$displayed" == "Authorization: Bearer "* ]] &&
+        displayed="Authorization: Bearer <redacted>"
+      printf ' %q' "$displayed" >&2
+    done
+    printf '\n' >&2
   fi
-
-  local argument
-  local displayed
-  local response
-  local status
-
-  printf '\n>>> Request: curl' >&2
-  for argument in "$@"; do
-    displayed="$argument"
-    if [[ "$displayed" == "Authorization: Bearer "* ]]; then
-      displayed="Authorization: Bearer <redacted>"
-    fi
-    printf ' %q' "$displayed" >&2
-  done
-  printf '\n' >&2
-
   set +e
   response="$(command curl "$@")"
   status=$?
   set -e
-  printf '<<< Response (curl exit %d):\n' "$status" >&2
-  if [[ -z "$response" ]]; then
-    printf '<empty body>\n' >&2
-  elif jq -e . >/dev/null 2>&1 <<<"$response"; then
-    jq . <<<"$response" >&2
-  else
-    printf '%s\n' "$response" >&2
+  if [[ "$VERBOSE" == true ]]; then
+    printf '<<<\n' >&2
+    jq . <<<"$response" >&2 2>/dev/null || printf '%s\n' "$response" >&2
   fi
   printf '%s\n' "$response"
   return "$status"
 }
 
+get_resource() {
+  request --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "path=$1" \
+    "$API/resources/by-path"
+}
+
+post_resource() {
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$1" \
+    "$API/resources"
+}
+
+wait_for_state() {
+  local path="$1" state="$2" value=""
+  for _ in $(seq 1 800); do
+    value="$(get_resource "$path" 2>/dev/null || true)"
+    if [[ "$(jq -r '.status.metadata.state // empty' <<<"$value")" == "$state" ]]; then
+      printf '%s\n' "$value"
+      return
+    fi
+    sleep 0.05
+  done
+  printf '%s\n' "$value"
+  return 1
+}
+
+create_link() {
+  local path="$1" relation="$2" source="$3" target="$4"
+  post_resource "$(
+    jq -n \
+      --arg path "$path" \
+      --arg relation "$relation" \
+      --arg source "$source" \
+      --arg target "$target" '{
+        metadata: {
+          path: $path,
+          manifest: "/builtin/link",
+          name: ($path | split("/") | last)
+        },
+        spec: {
+          relation: $relation,
+          source: $source,
+          target: $target,
+          metadata: {}
+        }
+      }'
+  )" >/dev/null
+}
+
+wait_for_run() {
+  local path="$1" value="" state=""
+  for _ in $(seq 1 3600); do
+    value="$(get_resource "$path" 2>/dev/null || true)"
+    state="$(jq -r '.status.metadata.state // empty' <<<"$value")"
+    if [[ "$state" =~ ^(succeeded|failed|cancelled)$ ]]; then
+      printf '%s\n' "$value"
+      return
+    fi
+    sleep 0.05
+  done
+  printf '%s\n' "$value"
+  return 1
+}
+
 cd "$ROOT"
-cargo build --workspace
-"$PLATFORM_ROOT/scripts/build-packages.sh" "$E2E_DIR/packages"
+CARGO_TARGET_DIR="$CORE_TARGET" cargo build --workspace
+CARGO_TARGET_DIR="$PLATFORM_TARGET" "$PLATFORM_ROOT/scripts/build-packages.sh" "$E2E_DIR/packages"
 
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
@@ -108,377 +155,197 @@ export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
 export KAS_CODEX_BIN="$CODEX_BIN"
 
-target/debug/kas-migrate
-ADMIN_TOKEN="$(target/debug/kas-admin bootstrap platform-admin)"
-
-target/debug/kas-api >"$API_LOG" 2>&1 &
+"$CORE_TARGET/debug/kas-migrate"
+ADMIN_TOKEN="$("$CORE_TARGET/debug/kas-admin" bootstrap platform-admin)"
+"$CORE_TARGET/debug/kas-api" >"$API_LOG" 2>&1 &
 API_PID="$!"
-for _ in $(seq 1 100); do
-  if curl --fail --silent "$API/health" >/dev/null; then
+trap - ERR
+for _ in $(seq 1 200); do
+  if command curl --fail --silent "$API/health" >/dev/null 2>&1; then
     break
   fi
   sleep 0.05
 done
-curl --fail --silent "$API/health" | jq -e '.ok == true' >/dev/null
+trap 'failed "$LINENO"' ERR
+command curl --fail --silent "$API/health" | jq -e '.ok == true' >/dev/null
 
 install_package() {
-  local package="$1"
-  curl --fail --silent \
+  request --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/vnd.kas.manifest+tar" \
-    --data-binary "@$package" \
-    "$API/manifests"
+    --data-binary "@$1" \
+    "$API/packages"
 }
 
-MESSAGE_MANIFEST="$(install_package "$E2E_DIR/packages/message.kas")"
-echo "$MESSAGE_MANIFEST" | jq -e '
-  .path == "/manifests/message"
-  and .driver == null
-  and ([.relations[].name] | sort) == ([
-    "addressed_to",
-    "authored_by",
-    "replies_to",
-    "thread_root"
-  ] | sort)
-' >/dev/null
-
-AGENT_MANIFEST="$(install_package "$E2E_DIR/packages/agent.kas")"
-echo "$AGENT_MANIFEST" | jq -e '
-  .path == "/manifests/agent"
-  and .actions[0].path == "/manifests/agent/actions/message"
-  and .driver.path == "/manifests/agent/driver"
-  and .driver.service_account == "/manifests/agent/service-accounts/driver"
-  and .rbac.service_accounts[0].path == "/manifests/agent/service-accounts/driver"
-  and any(.relations[];
-    .path == "/manifests/agent/relations/service-account"
-    and .type == "one_to_one"
-    and .ensure == true
-    and .on_source_delete == "cascade"
-  )
-  and any(.rbac.roles[]; .path == "/manifests/agent/roles/runtime")
-' >/dev/null
-
-DRIVER=""
-for _ in $(seq 1 200); do
-  DRIVER="$(
-    curl --fail --silent --get \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/manifests/agent" \
-      "$API/manifests/driver"
-  )"
-  if [[ "$(echo "$DRIVER" | jq -r '.state')" == "ready" ]]; then
-    break
-  fi
-  sleep 0.05
+AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
+THREAD_PACKAGE="$(install_package "$E2E_DIR/packages/thread.kas")"
+MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
+for package in "$AGENT_PACKAGE" "$THREAD_PACKAGE" "$MESSAGE_PACKAGE"; do
+  jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
-echo "$DRIVER" | jq -e '
-  .path == "/manifests/agent/driver"
-  and .state == "ready"
-  and .metadata.implementation == "codex-cli"
-' >/dev/null
+
+for path in \
+  /manifests/agent \
+  /manifests/agent/actions/message \
+  /manifests/thread \
+  /manifests/thread/relations/participants \
+  /manifests/message \
+  /manifests/message/relations/authored-by \
+  /manifests/message/relations/message-thread \
+  /manifests/message/relations/mentioned \
+  /manifests/message/relations/replies-to; do
+  get_resource "$path" >/dev/null
+done
+if get_resource "/manifests/message/relations/thread-root" >/dev/null 2>&1; then
+  echo "obsolete thread-root Relation still exists" >&2
+  false
+fi
+
+AGENT_DRIVER="$(wait_for_state "/manifests/agent/driver" running)"
+MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
+jq -e '.spec == .status.spec' <<<"$AGENT_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$MESSAGE_DRIVER" >/dev/null
 
 mkdir -p "$E2E_DIR/workspace"
 AGENT_PATH="/agents/e2e"
+OBSERVER_PATH="/agents/observer"
 PROOF_PATH="/messages/e2e-agent-network-proof"
 KAS_PROOF="KAS_NETWORK_$(uuidgen | tr '[:lower:]' '[:upper:]')"
 
-AGENT_PAYLOAD="$(
-  jq -n \
-    --arg path "$AGENT_PATH" \
-    --arg cwd "$E2E_DIR/workspace" \
-    --arg proof_path "$PROOF_PATH" \
-    --arg proof "$KAS_PROOF" '{
-    path: $path,
-    manifest: "/manifests/agent",
-    name: "e2e-agent",
-    spec: {
-      instructions: ("Use curl with $KAS_API and $KAS_TOKEN to POST a new Message Resource to KAS. Use path " + $proof_path + ", manifest /manifests/message, name e2e-agent-network-proof, and spec {\"role\":\"system\",\"body\":\"" + $proof + "\"}. After the POST succeeds, reply with exactly CREATED and no other text."),
-      working_directory: $cwd
-    }
-  }'
-)"
-curl --fail --silent \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$AGENT_PAYLOAD" \
-  "$API/resources" |
-  jq -e '.path == "/agents/e2e"' >/dev/null
+create_agent() {
+  local path="$1" name="$2" instructions="$3"
+  post_resource "$(
+    jq -n \
+      --arg path "$path" \
+      --arg name "$name" \
+      --arg cwd "$E2E_DIR/workspace" \
+      --arg instructions "$instructions" '{
+        metadata: {
+          path: $path,
+          manifest: "/manifests/agent",
+          name: $name
+        },
+        spec: {
+          instructions: $instructions,
+          working_directory: $cwd
+        }
+      }'
+  )" >/dev/null
+}
 
-AGENT=""
-for _ in $(seq 1 400); do
-  AGENT="$(
-    curl --fail --silent --get \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=$AGENT_PATH" \
-      --data-urlencode "include=relations" \
-      "$API/resources/by-path"
-  )"
-  SERVICE_ACCOUNTS="$(
-    curl --fail --silent \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      "$API/service-accounts"
-  )"
-  ROLE_BINDINGS="$(
-    curl --fail --silent \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      "$API/role-bindings"
-  )"
-  if jq -e \
-    --arg service_account "$AGENT_PATH/service-account" '
-      .spec == .status
-      and any(.links[];
-        .relation_path == "/manifests/agent/relations/service-account"
-        and .target.kind == "service_account"
-        and .target.path == $service_account
-        and .spec == .status
-      )
-    ' >/dev/null <<<"$AGENT" \
-    && jq -e --arg path "$AGENT_PATH/service-account" \
-      'any(.[]; .path == $path and .managed_by == "driver")' \
-      >/dev/null <<<"$SERVICE_ACCOUNTS" \
-    && jq -e --arg path "$AGENT_PATH/role-binding" \
-      'any(.[]; .path == $path and .managed_by == "driver")' \
-      >/dev/null <<<"$ROLE_BINDINGS"; then
-    break
-  fi
-  sleep 0.05
+create_agent "$AGENT_PATH" "e2e-agent" \
+  "Use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec {\"role\":\"system\",\"body\":\"$KAS_PROOF\"}. After the POST succeeds, reply with exactly CREATED and no other text."
+create_agent "$OBSERVER_PATH" "observer" "Reply with exactly OBSERVER."
+wait_for_state "$AGENT_PATH" available >/dev/null
+wait_for_state "$OBSERVER_PATH" available >/dev/null
+
+for path in \
+  "$AGENT_PATH/service-account" \
+  "$AGENT_PATH/role-binding" \
+  "$AGENT_PATH/links/service-account" \
+  "$OBSERVER_PATH/service-account" \
+  "$OBSERVER_PATH/role-binding" \
+  "$OBSERVER_PATH/links/service-account"; do
+  get_resource "$path" >/dev/null
 done
-jq -e \
-  --arg service_account "$AGENT_PATH/service-account" '
-    .spec == .status
-    and any(.links[];
-      .relation_path == "/manifests/agent/relations/service-account"
-      and .target.path == $service_account
-      and .spec == .status
-    )
-  ' >/dev/null <<<"$AGENT"
 
-OBJECTS="$(
-  curl --fail --silent \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    "$API/objects?kind=service_account"
-)"
-jq -e --arg path "$AGENT_PATH/service-account" '
-  any(.[]; .kind == "service_account" and .path == $path)
-' >/dev/null <<<"$OBJECTS"
-
-OBJECT_DETAIL="$(
-  curl --fail --silent --get \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "kind=service_account" \
-    --data-urlencode "path=$AGENT_PATH/service-account" \
-    --data-urlencode "include=links" \
-    "$API/objects/by-path"
-)"
-jq -e --arg path "$AGENT_PATH/service-account" --arg agent "$AGENT_PATH" '
-  .kind == "service_account"
-  and .path == $path
-  and .value.path == $path
-  and any(.links[];
-    .relation_path == "/manifests/agent/relations/service-account"
-    and .source.kind == "resource"
-    and .source.path == $agent
-    and .target.kind == "service_account"
-    and .target.path == $path
-  )
-' >/dev/null <<<"$OBJECT_DETAIL"
+THREAD_PATH="/threads/e2e"
+post_resource "$(
+  jq -n --arg path "$THREAD_PATH" '{
+    metadata: {
+      path: $path,
+      manifest: "/manifests/thread",
+      name: "e2e-thread"
+    },
+    spec: {title: "E2E multi-Agent Thread"}
+  }'
+)" >/dev/null
+create_link "$THREAD_PATH/links/participants/user" \
+  "/manifests/thread/relations/participants" "$THREAD_PATH" "/users/platform-admin"
+create_link "$THREAD_PATH/links/participants/observer" \
+  "/manifests/thread/relations/participants" "$THREAD_PATH" "$OBSERVER_PATH"
 
 MESSAGE_PATH="/messages/e2e-user"
-MESSAGE_PAYLOAD="$(
-  jq -n --arg message "$MESSAGE_PATH" --arg agent "$AGENT_PATH" '{
-    path: $message,
-    manifest: "/manifests/message",
-    name: "e2e-user-message",
+post_resource "$(
+  jq -n --arg path "$MESSAGE_PATH" '{
+    metadata: {
+      path: $path,
+      manifest: "/manifests/message",
+      name: "e2e-user-message"
+    },
     spec: {
       role: "user",
-      body: "hello from platform e2e"
-    },
-    links: [
-      {
-        path: ($message + "/links/authored-by"),
-        source: {kind: "resource", path: $message},
-        relation_path: "/manifests/message/relations/authored-by",
-        target: {kind: "user", path: "/users/platform-admin"},
-        metadata: {}
-      },
-      {
-        path: ($message + "/links/addressed-to"),
-        source: {kind: "resource", path: $message},
-        relation_path: "/manifests/message/relations/addressed-to",
-        target: {kind: "resource", path: $agent},
-        metadata: {}
-      },
-      {
-        path: ($message + "/links/thread-root"),
-        source: {kind: "resource", path: $message},
-        relation_path: "/manifests/message/relations/thread-root",
-        target: {kind: "resource", path: $message},
-        metadata: {}
-      }
-    ]
+      body: "@e2e hello from platform e2e"
+    }
   }'
-)"
-curl --fail --silent \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$MESSAGE_PAYLOAD" \
-  "$API/resources" |
-  jq -e '.spec.body == "hello from platform e2e"' >/dev/null
+)" >/dev/null
+create_link "$MESSAGE_PATH/links/authored-by" \
+  "/manifests/message/relations/authored-by" "$MESSAGE_PATH" "/users/platform-admin"
+MENTION_LINK="$MESSAGE_PATH/links/mentioned/agents-e2e"
+create_link "$MENTION_LINK" \
+  "/manifests/message/relations/mentioned" "$MESSAGE_PATH" "$AGENT_PATH"
 
-REQUEST_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-RUN_PATH="$AGENT_PATH/runs/$REQUEST_ID"
-RUN_PAYLOAD="$(
-  jq -n \
-    --arg path "$RUN_PATH" \
-    --arg request_id "$REQUEST_ID" \
-    --arg agent "$AGENT_PATH" \
-    --arg message "$MESSAGE_PATH" '{
-      path: $path,
-      request_id: $request_id,
-      resource: $agent,
-      action: "/manifests/agent/actions/message",
-      input: {message_path: $message}
-    }'
-)"
-curl --fail --silent \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$RUN_PAYLOAD" \
-  "$API/runs" |
-  jq -e '.status == "queued"' >/dev/null
-
-RUN=""
-for _ in $(seq 1 2400); do
-  RUN="$(
-    curl --fail --silent --get \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=$RUN_PATH" \
-      "$API/runs/by-path"
-  )"
-  if [[ "$(echo "$RUN" | jq -r '.status')" =~ ^(succeeded|failed)$ ]]; then
-    break
-  fi
-  sleep 0.05
-done
-if [[ "$(echo "$RUN" | jq -r '.status')" != "succeeded" ]]; then
-  echo "Agent Run failed: $(echo "$RUN" | jq -c '.')" >&2
+RUN_PATH="$MENTION_LINK/run"
+create_link "$MESSAGE_PATH/links/message-thread" \
+  "/manifests/message/relations/message-thread" "$MESSAGE_PATH" "$THREAD_PATH"
+if get_resource "$RUN_PATH" >/dev/null 2>&1; then
+  echo "Agent received a Run before it became a Thread participant" >&2
   false
 fi
-echo "$RUN" | jq -e '
-  .status == "succeeded"
-  and .output.reply_message_path != null
-  and .driver_generation == 1
-' >/dev/null
-REPLY_PATH="$(echo "$RUN" | jq -r '.output.reply_message_path')"
+create_link "$THREAD_PATH/links/participants/e2e" \
+  "/manifests/thread/relations/participants" "$THREAD_PATH" "$AGENT_PATH"
 
-PROOF="$(
-  curl --fail --silent --get \
+RUN="$(wait_for_run "$RUN_PATH")"
+if [[ "$(jq -r '.status.metadata.state' <<<"$RUN")" != "succeeded" ]]; then
+  echo "Agent Run failed: $(jq -c . <<<"$RUN")" >&2
+  false
+fi
+jq -e --arg message "$MESSAGE_PATH" --arg thread "$THREAD_PATH" --arg agent "$AGENT_PATH" '
+  .spec.resource == $agent
+  and .spec.input == {message_path: $message, thread_path: $thread}
+' <<<"$RUN" >/dev/null
+
+OBSERVER_RUN="$MESSAGE_PATH/links/mentioned/agents-observer/run"
+if get_resource "$OBSERVER_RUN" >/dev/null 2>&1; then
+  echo "unmentioned observer Agent received a Run" >&2
+  false
+fi
+
+PROOF="$(get_resource "$PROOF_PATH")"
+jq -e --arg proof "$KAS_PROOF" '
+  .metadata.manifest == "/manifests/message"
+  and .spec == {role: "system", body: $proof}
+' <<<"$PROOF" >/dev/null
+
+REPLY_PATH="$(jq -r '.spec.output.reply_message_path' <<<"$RUN")"
+REPLY="$(get_resource "$REPLY_PATH")"
+jq -e '.spec == {role: "assistant", body: "CREATED"}' <<<"$REPLY" >/dev/null
+LINKS="$(
+  request --fail --silent --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "path=$PROOF_PATH" \
-    "$API/resources/by-path"
+    --data-urlencode "manifest=/builtin/link" \
+    "$API/resources"
 )"
-echo "$PROOF" | jq -e --arg proof "$KAS_PROOF" '
-  .path == "/messages/e2e-agent-network-proof"
-  and .spec == {
-    role: "system",
-    body: $proof,
-    state: "available"
-  }
-' >/dev/null
+jq -e --arg reply "$REPLY_PATH" --arg agent "$AGENT_PATH" --arg parent "$MESSAGE_PATH" --arg thread "$THREAD_PATH" '
+  any(.[]; .spec.relation == "/manifests/message/relations/authored-by"
+    and .spec.source == $reply and .spec.target == $agent)
+  and any(.[]; .spec.relation == "/manifests/message/relations/replies-to"
+    and .spec.source == $reply and .spec.target == $parent)
+  and any(.[]; .spec.relation == "/manifests/message/relations/message-thread"
+    and .spec.source == $reply and .spec.target == $thread)
+  and ([.[] | select(.spec.relation == "/manifests/message/relations/thread-root")] | length) == 0
+' <<<"$LINKS" >/dev/null
 
-REPLY="$(
-  curl --fail --silent --get \
+stop_driver() {
+  local path="$1"
+  request --fail --silent \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "path=$REPLY_PATH" \
-    --data-urlencode "include=relations" \
-    "$API/resources/by-path"
-)"
-echo "$REPLY" | jq -e \
-  --arg agent "$AGENT_PATH" \
-  --arg parent "$MESSAGE_PATH" '
-    .spec == {
-      role: "assistant",
-      body: "CREATED",
-      state: "available"
-    }
-    and ([.links[].relation_path] | sort) == ([
-      "/manifests/message/relations/authored-by",
-      "/manifests/message/relations/replies-to",
-      "/manifests/message/relations/thread-root",
-      "/manifests/system/core/relations/resource-manifest"
-    ] | sort)
-    and any(.links[];
-      .relation_path == "/manifests/message/relations/authored-by"
-      and .target.path == $agent
-    )
-    and any(.links[];
-      .relation_path == "/manifests/message/relations/replies-to"
-      and .target.path == $parent
-    )
-    and any(.links[];
-      .relation_path == "/manifests/message/relations/thread-root"
-      and .target.path == $parent
-    )
-  ' >/dev/null
+    -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg path "$path" '{path: $path, state: "stopped"}')" \
+    "$API/drivers/control" >/dev/null
+  wait_for_state "$path" stopped >/dev/null
+}
+stop_driver "/manifests/message/driver"
+stop_driver "/manifests/agent/driver"
 
-AGENT_REVISION="$(jq -r '.revision' <<<"$AGENT")"
-curl --fail --silent --request DELETE --get \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "path=$AGENT_PATH" \
-  --data-urlencode "expected_revision=$AGENT_REVISION" \
-  "$API/resources/by-path" >/dev/null
-
-for _ in $(seq 1 400); do
-  AGENTS="$(
-    curl --fail --silent --get \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "manifest=/manifests/agent" \
-      "$API/resources"
-  )"
-  SERVICE_ACCOUNTS="$(
-    curl --fail --silent \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      "$API/service-accounts"
-  )"
-  ROLE_BINDINGS="$(
-    curl --fail --silent \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      "$API/role-bindings"
-  )"
-  if jq -e --arg path "$AGENT_PATH" 'all(.[]; .path != $path)' >/dev/null <<<"$AGENTS" \
-    && jq -e --arg path "$AGENT_PATH/service-account" \
-      'all(.[]; .path != $path)' >/dev/null <<<"$SERVICE_ACCOUNTS" \
-    && jq -e --arg path "$AGENT_PATH/role-binding" \
-      'all(.[]; .path != $path)' >/dev/null <<<"$ROLE_BINDINGS"; then
-    break
-  fi
-  sleep 0.05
-done
-jq -e --arg path "$AGENT_PATH" 'all(.[]; .path != $path)' >/dev/null <<<"$AGENTS"
-jq -e --arg path "$AGENT_PATH/service-account" \
-  'all(.[]; .path != $path)' >/dev/null <<<"$SERVICE_ACCOUNTS"
-jq -e --arg path "$AGENT_PATH/role-binding" \
-  'all(.[]; .path != $path)' >/dev/null <<<"$ROLE_BINDINGS"
-
-DRIVER_URL="$API/drivers/by-path?path=$(jq -rn --arg value "/manifests/agent/driver" '$value | @uri')"
-curl --fail --silent --request PATCH \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data '{"state":"stopping"}' \
-  "$DRIVER_URL" >/dev/null
-
-for _ in $(seq 1 100); do
-  DRIVER="$(
-    curl --fail --silent --get \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/manifests/agent/driver" \
-      "$API/drivers/by-path"
-  )"
-  if [[ "$(echo "$DRIVER" | jq -r '.state')" == "stopped" ]]; then
-    break
-  fi
-  sleep 0.05
-done
-echo "$DRIVER" | jq -e '.state == "stopped" and .process_id == null' >/dev/null
-
-echo "KAS platform end-to-end test passed"
+echo "KAS platform Thread/@mention end-to-end test passed"

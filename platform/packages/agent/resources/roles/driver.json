@@ -1,0 +1,85 @@
+{
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "agent-driver"
+  },
+  "spec": {
+    "description": "Reconcile Agent identities and create Message replies.",
+    "rules": [
+      {
+        "manifests": [
+          "/manifests/agent"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/thread",
+          "/manifests/message"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create"
+        ],
+        "paths": [
+          "/threads/**",
+          "/messages/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/agents/**",
+          "/threads/**",
+          "/messages/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/service-account"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/agents/**/service-account"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/role-binding"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/agents/**/role-binding"
+        ]
+      }
+    ]
+  }
+}

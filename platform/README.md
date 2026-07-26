@@ -8,14 +8,45 @@ Each directory under `packages/` is an independent Manifest package root:
 
 ```text
 packages/
+├── thread/
+│   ├── manifest.json
+│   └── resources/
+│       └── relations/
 ├── message/
-│   └── manifest.json
+│   ├── manifest.json
+│   ├── resources/
+│   │   ├── drivers/
+│   │   ├── relations/
+│   │   ├── role-bindings/
+│   │   ├── roles/
+│   │   └── service-accounts/
+│   └── driver/
+│       ├── Cargo.toml
+│       └── src/
 └── agent/
     ├── manifest.json
+    ├── resources/
+    │   ├── actions/
+    │   ├── drivers/
+    │   ├── relations/
+    │   ├── role-bindings/
+    │   ├── roles/
+    │   └── service-accounts/
     └── driver/
         ├── Cargo.toml
         └── src/
 ```
+
+`manifest.json` defines only the package Manifest. Each Action, Relation,
+Driver, ServiceAccount, Role, and RoleBinding installed with the package is an
+ordinary Resource stored as one JSON file under `resources/`. `thread` is
+data-only. `message` owns the fanout Driver that turns validated `mentioned`
+Links into Agent Runs. `agent` owns the Codex Driver that executes those Runs.
+
+Threads are independent Resources under `/threads/{id}`. Their `participants`
+Links may reference multiple Agents, but only Agents referenced by a Message
+`mentioned` Link receive a Run. Message membership uses `message-thread`;
+the old convention where a root Message doubled as a Thread no longer exists.
 
 Build installable `.kas` archives:
 
@@ -23,9 +54,11 @@ Build installable `.kas` archives:
 platform/scripts/build-packages.sh
 ```
 
-This writes `platform/dist/message.kas` and `platform/dist/agent.kas`. The
-Agent package contains a singleton Driver that invokes the `codex` executable
-available in its environment. Set `KAS_CODEX_BIN` to override its path.
+This writes `platform/dist/thread.kas`, `platform/dist/message.kas`, and
+`platform/dist/agent.kas`. The Message package contains the singleton fanout
+Driver. The Agent package contains a singleton Driver that invokes the `codex`
+executable available in its environment. Set `KAS_CODEX_BIN` to override its
+path.
 
 Run the complete platform flow with the real Codex CLI:
 
@@ -36,9 +69,10 @@ platform/tests/e2e.sh -v
 
 The E2E test requires an authenticated `codex` executable on `PATH`. Set
 `KAS_CODEX_BIN` to select another real Codex executable. It starts KAS with a
-temporary database, installs both packages, creates an Agent and a user
-Message, invokes the Agent Action through Codex, and verifies the assistant
-Message and its Links.
+temporary database, installs all three packages, creates a multi-Agent Thread
+and a user Message, verifies that only the mentioned Agent receives a Run,
+invokes that Agent through real Codex, and verifies the assistant Message and
+its Links.
 
 ## Frontend
 
@@ -59,5 +93,6 @@ behind the same-origin reverse proxy. `VITE_KAS_API_URL` can select another
 API base at build time when that endpoint permits browser cross-origin access.
 
 The UI stores its KAS Bearer token and User path in browser-local settings. It
-can create Agents, start Message threads, enqueue the Agent `message` Action,
-wait for the real Codex Run, and display the linked assistant Message.
+can create Agents and independent Threads, add multiple Agent participants,
+turn `@handle` mentions into structured Links, wait for Driver-created real
+Codex Runs, and display the linked assistant Messages.

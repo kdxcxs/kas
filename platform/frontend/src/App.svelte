@@ -2,13 +2,23 @@
   import { onMount, tick } from 'svelte';
   import { KasApi, KasApiError } from './lib/api';
   import {
-    MESSAGE_ACTION,
+    AGENT_MANIFEST,
+    AUTHORED_BY,
+    MESSAGE_MANIFEST,
+    PARTICIPANTS,
+    THREAD_MANIFEST,
+    buildThread,
     buildUserMessage,
-    firstMessageBody,
-    groupThreads,
-    messagesForAgent,
+    mentionHandle,
+    mentionedAgentPaths,
+    mentionRunPath,
+    messagesForThread,
+    participantAgentPaths,
+    participantsForThread,
+    relationTarget,
     slugify,
-    threadRootOf
+    threadParticipantLink,
+    threadsForAgent
   } from './lib/chat';
   import type {
     Driver,
@@ -28,7 +38,7 @@
     userPath: string;
   }
 
-  type View = 'chat' | 'agents' | 'objects';
+  type View = 'chat' | 'agents' | 'threads' | 'objects';
 
   const OBJECT_KINDS: ObjectKind[] = [
     'resource',
@@ -42,7 +52,8 @@
     'service_account',
     'role',
     'role_binding',
-    'credential'
+    'credential',
+    'package'
   ];
 
   let settings: Settings = {
@@ -52,9 +63,10 @@
   };
   let draftSettings: Settings = { ...settings };
   let agents: Resource[] = [];
+  let threads: Resource[] = [];
   let messages: Resource[] = [];
   let selectedAgentPath = '';
-  let activeThreadRoot: string | null = null;
+  let activeThreadPath: string | null = null;
   let driver: Driver | null = null;
   let loading = false;
   let sending = false;
@@ -64,6 +76,13 @@
   let composer = '';
   let showSettings = false;
   let showCreateAgent = false;
+  let showCreateThread = false;
+  let createThreadTitle = '';
+  let createThreadAgents: string[] = [];
+  let selectedManagedThreadPath = '';
+  let editThreadTitle = '';
+  let editThreadAgents: string[] = [];
+  let savingThread = false;
   let createName = '';
   let createPath = '';
   let createWorkingDirectory = '';
@@ -84,18 +103,14 @@
   let loadingObjects = false;
   let objectDetailElement: HTMLElement;
 
-  $: selectedAgent = agents.find((agent) => agent.path === selectedAgentPath) ?? null;
-  $: currentAgentMessages = selectedAgentPath
-    ? messagesForAgent(messages, selectedAgentPath)
-    : [];
-  $: threadEntries = Array.from(groupThreads(currentAgentMessages).entries()).sort(
-    ([, left], [, right]) =>
-      (right.at(-1)?.created_at ?? '').localeCompare(left.at(-1)?.created_at ?? '')
-  );
-  $: activeMessages =
-    activeThreadRoot === null
-      ? []
-      : currentAgentMessages.filter((message) => threadRootOf(message) === activeThreadRoot);
+  $: activeThread =
+    activeThreadPath === null
+      ? null
+      : threads.find((thread) => thread.path === activeThreadPath) ?? null;
+  $: activeMessages = activeThread ? messagesForThread(messages, activeThread.path) : [];
+  $: activeParticipants = activeThread ? participantsForThread(activeThread, agents) : [];
+  $: managedThread =
+    threads.find((thread) => thread.path === selectedManagedThreadPath) ?? null;
   $: filteredObjects = objects.filter(
     (object) =>
       object.kind === objectKind &&
@@ -110,9 +125,13 @@
   $: pageTitle =
     view === 'agents'
       ? 'Agent management'
-      : view === 'objects'
-        ? 'Object explorer'
-        : (selectedAgent?.name ?? 'Choose an Agent');
+      : view === 'threads'
+        ? 'Thread management'
+        : view === 'objects'
+          ? 'Object explorer'
+          : activeThread
+            ? titleOf(activeThread)
+            : 'Choose a Thread';
 
   onMount(() => {
     const saved = localStorage.getItem(SETTINGS_KEY);
@@ -152,20 +171,29 @@
   async function loadData(api = client()): Promise<void> {
     loading = true;
     try {
-      const resources = await api.listResources();
-      agents = resources
-        .filter((resource) => resource.path.startsWith('/agents/'))
+      const [agentResources, threadResources, messageResources] = await Promise.all([
+        api.listResources(AGENT_MANIFEST),
+        api.listResources(THREAD_MANIFEST),
+        api.listResources(MESSAGE_MANIFEST)
+      ]);
+      agents = agentResources
+        .filter((resource) => resource.manifest === AGENT_MANIFEST)
         .sort((left, right) => left.name.localeCompare(right.name));
-      const messageResources = resources.filter((resource) =>
-        resource.path.startsWith('/messages/')
-      );
+      threads = (
+        await Promise.all(
+          threadResources
+            .filter((resource) => resource.manifest === THREAD_MANIFEST)
+            .map((resource) => api.getResource(resource.path, true))
+        )
+      ).sort((left, right) => right.updated_at.localeCompare(left.updated_at));
       messages = await Promise.all(
-        messageResources.map((resource) => api.getResource(resource.path, true))
+        messageResources
+          .filter((resource) => resource.manifest === MESSAGE_MANIFEST)
+          .map((resource) => api.getResource(resource.path, true))
       );
       driver = await api.getAgentDriver();
       if (!agents.some((agent) => agent.path === selectedAgentPath)) {
         selectedAgentPath = agents[0]?.path ?? '';
-        activeThreadRoot = null;
       }
       syncThreadSelection();
     } finally {
@@ -174,28 +202,103 @@
   }
 
   function syncThreadSelection(): void {
-    if (!selectedAgentPath) {
-      activeThreadRoot = null;
-      return;
-    }
-    const grouped = groupThreads(messagesForAgent(messages, selectedAgentPath));
-    if (activeThreadRoot && grouped.has(activeThreadRoot)) return;
-    const latest = Array.from(grouped.entries()).sort(([, left], [, right]) =>
-      (right.at(-1)?.created_at ?? '').localeCompare(left.at(-1)?.created_at ?? '')
-    )[0];
-    activeThreadRoot = latest?.[0] ?? null;
+    if (activeThreadPath && threads.some((thread) => thread.path === activeThreadPath)) return;
+    activeThreadPath = threads[0]?.path ?? null;
+  }
+
+  function chooseThread(path: string): void {
+    activeThreadPath = path;
+    view = 'chat';
+    error = '';
+    notice = '';
   }
 
   function chooseAgent(path: string): void {
     selectedAgentPath = path;
     view = 'chat';
-    activeThreadRoot = null;
-    syncThreadSelection();
+    activeThreadPath = threadsForAgent(threads, path)[0]?.path ?? null;
     error = '';
   }
 
   function openAgentManagement(): void {
     view = 'agents';
+    error = '';
+    notice = '';
+  }
+
+  function openThreadManagement(path = activeThreadPath): void {
+    view = 'threads';
+    const requested = path ? threads.find((thread) => thread.path === path) : null;
+    selectManagedThread(requested?.path ?? threads[0]?.path ?? '');
+    error = '';
+    notice = '';
+  }
+
+  function selectManagedThread(path: string): void {
+    selectedManagedThreadPath = path;
+    const thread = threads.find((candidate) => candidate.path === path);
+    editThreadTitle = thread ? titleOf(thread) : '';
+    editThreadAgents = thread ? participantAgentPaths(thread) : [];
+  }
+
+  function toggleManagedThreadAgent(path: string): void {
+    editThreadAgents = editThreadAgents.includes(path)
+      ? editThreadAgents.filter((candidate) => candidate !== path)
+      : [...editThreadAgents, path];
+  }
+
+  async function saveManagedThread(): Promise<void> {
+    if (!managedThread) return;
+    const title = editThreadTitle.trim();
+    if (!title || editThreadAgents.length === 0) {
+      error = 'A Thread title and at least one Agent are required.';
+      return;
+    }
+
+    savingThread = true;
+    error = '';
+    try {
+      const api = client();
+      const currentLinks =
+        managedThread.links?.filter(
+          (entry) =>
+            entry.relation_path === PARTICIPANTS &&
+            entry.source.path === managedThread?.path &&
+            entry.target.path.startsWith('/agents/')
+        ) ?? [];
+      const currentPaths = new Set(currentLinks.map((entry) => entry.target.path));
+      const nextPaths = new Set(editThreadAgents);
+
+      await api.updateResource(managedThread.path, {
+        expected_revision: managedThread.revision,
+        spec: { ...managedThread.spec, title }
+      });
+      await Promise.all(
+        editThreadAgents
+          .filter((path) => !currentPaths.has(path))
+          .map((path) => api.createLink(threadParticipantLink(managedThread!.path, path)))
+      );
+      await Promise.all(
+        currentLinks
+          .filter((entry) => !nextPaths.has(entry.target.path))
+          .map((entry) => api.deleteResource(entry.path, entry.revision))
+      );
+
+      const path = managedThread.path;
+      await loadData(api);
+      selectManagedThread(path);
+      notice = `${title} was updated`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingThread = false;
+    }
+  }
+
+  function openManagedThreadChat(): void {
+    if (!managedThread) return;
+    activeThreadPath = managedThread.path;
+    view = 'chat';
     error = '';
     notice = '';
   }
@@ -276,12 +379,57 @@
       await loadObjects();
     } else {
       await loadData();
+      if (view === 'threads') {
+        selectManagedThread(selectedManagedThreadPath || threads[0]?.path || '');
+      }
     }
   }
 
   function startThread(): void {
-    activeThreadRoot = null;
-    composer = '';
+    if (agents.length === 0) {
+      openAgentDialog();
+      return;
+    }
+    createThreadTitle = 'New conversation';
+    createThreadAgents = [];
+    showCreateThread = true;
+    error = '';
+  }
+
+  function toggleThreadAgent(path: string): void {
+    createThreadAgents = createThreadAgents.includes(path)
+      ? createThreadAgents.filter((candidate) => candidate !== path)
+      : [...createThreadAgents, path];
+  }
+
+  async function createThread(): Promise<void> {
+    const title = createThreadTitle.trim();
+    if (!title || createThreadAgents.length === 0) {
+      error = 'A Thread title and at least one Agent are required.';
+      return;
+    }
+    loading = true;
+    error = '';
+    try {
+      const resource = buildThread(
+        crypto.randomUUID(),
+        title,
+        settings.userPath,
+        createThreadAgents
+      );
+      await client().createResource(resource);
+      await loadData();
+      activeThreadPath = resource.path;
+      selectedAgentPath = createThreadAgents[0];
+      showCreateThread = false;
+      composer = '';
+      if (view === 'threads') selectManagedThread(resource.path);
+      notice = `${title} was created`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      loading = false;
+    }
   }
 
   async function saveSettings(): Promise<void> {
@@ -328,7 +476,6 @@
       });
       await loadData();
       selectedAgentPath = path;
-      activeThreadRoot = null;
       showCreateAgent = false;
       notice = `${name} was created`;
     } catch (cause) {
@@ -410,43 +557,41 @@
 
   async function sendMessage(): Promise<void> {
     const body = composer.trim();
-    if (!body || !selectedAgent || sending) return;
+    if (!body || !activeThread || sending) return;
     sending = true;
     error = '';
-    notice = 'Codex is working…';
+    const mentioned = mentionedAgentPaths(body, activeParticipants);
+    notice = mentioned.length > 0 ? 'Mentioned Agents are working…' : 'Sending Message…';
     const parent = activeMessages.at(-1)?.path ?? null;
     const messageId = crypto.randomUUID();
     const userMessage = buildUserMessage(
       messageId,
       body,
       settings.userPath,
-      selectedAgent.path,
-      activeThreadRoot,
+      activeThread.path,
+      mentioned,
       parent
     );
-    const root = activeThreadRoot ?? userMessage.path;
     try {
       const api = client();
       await api.createResource(userMessage);
       composer = '';
-      activeThreadRoot = root;
       await loadData(api);
-      const requestId = crypto.randomUUID();
-      const runPath = `${selectedAgent.path}/runs/${requestId}`;
-      await api.createRun({
-        path: runPath,
-        request_id: requestId,
-        resource: selectedAgent.path,
-        action: MESSAGE_ACTION,
-        input: { message_path: userMessage.path }
-      });
-      const run = await waitForRun(api, runPath);
-      if (run.status !== 'succeeded') {
-        throw new Error(run.error || `Agent Run ended as ${run.status}.`);
+      activeThreadPath = activeThread.path;
+      if (mentioned.length === 0) {
+        notice = 'Message sent; no Agent was mentioned';
+        return;
       }
+      const runs = await Promise.all(
+        mentioned.map((agentPath) =>
+          waitForRun(api, mentionRunPath(userMessage.path, agentPath))
+        )
+      );
+      const failed = runs.find((run) => run.status !== 'succeeded');
+      if (failed) throw new Error(failed.error || `Agent Run ended as ${failed.status}.`);
       await loadData(api);
-      activeThreadRoot = root;
-      notice = 'Reply received';
+      activeThreadPath = activeThread.path;
+      notice = runs.length === 1 ? 'Reply received' : `${runs.length} replies received`;
     } catch (cause) {
       error = messageOf(cause);
       await loadData().catch(() => undefined);
@@ -458,8 +603,12 @@
   async function waitForRun(api: KasApi, path: string): Promise<Run> {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
-      const run = await api.getRun(path);
-      if (['succeeded', 'failed', 'cancelled'].includes(run.status)) return run;
+      try {
+        const run = await api.getRun(path);
+        if (['succeeded', 'failed', 'cancelled'].includes(run.status)) return run;
+      } catch (cause) {
+        if (!(cause instanceof KasApiError && cause.status === 404)) throw cause;
+      }
       await new Promise((resolve) => setTimeout(resolve, 600));
     }
     throw new Error('Codex did not reply within three minutes.');
@@ -477,14 +626,29 @@
     return typeof message.spec.body === 'string' ? message.spec.body : '';
   }
 
+  function titleOf(thread: Resource): string {
+    return typeof thread.spec.title === 'string' ? thread.spec.title : thread.name;
+  }
+
+  function authorOf(message: Resource): string {
+    const authorPath = relationTarget(message, AUTHORED_BY);
+    if (!authorPath || authorPath === settings.userPath) return 'You';
+    return agents.find((agent) => agent.path === authorPath)?.name ?? authorPath;
+  }
+
+  function insertMention(agent: Resource): void {
+    const mention = `@${mentionHandle(agent)}`;
+    const separator = composer.length > 0 && !composer.endsWith(' ') ? ' ' : '';
+    composer = `${composer}${separator}${mention} `;
+  }
+
   function stringSpec(resource: Resource, key: string): string {
     const value = resource.spec[key];
     return typeof value === 'string' ? value : '';
   }
 
   function resourceState(resource: Resource): string {
-    const value = resource.status.state;
-    return typeof value === 'string' ? value : 'unknown';
+    return resource.status_state;
   }
 
   function resourceConverged(resource: Resource): boolean {
@@ -502,10 +666,9 @@
     if (
       typeof detail.value === 'object' &&
       detail.value !== null &&
-      'name' in detail.value &&
-      typeof detail.value.name === 'string'
+      typeof detail.value.metadata?.name === 'string'
     ) {
-      return detail.value.name;
+      return detail.value.metadata.name;
     }
     return detail.path.split('/').at(-1) || detail.path;
   }
@@ -532,36 +695,40 @@
       <div class="brand-mark">K</div>
       <div>
         <strong>KAS</strong>
-        <span>Agent console</span>
+        <span>Collaboration console</span>
       </div>
     </header>
 
     <div class="sidebar-section-title">
-      <span>Agents</span>
+      <span>Threads</span>
       <span class="sidebar-title-actions">
         <button class="icon-button" aria-label="Object Explorer" onclick={() => void openObjectExplorer()}>⌘</button>
-        <button class="icon-button" aria-label="Manage Agents" onclick={openAgentManagement}>≡</button>
-        <button class="icon-button" aria-label="Create Agent" onclick={openAgentDialog}>+</button>
+        <button class="icon-button" aria-label="Manage Threads" onclick={() => openThreadManagement()}>≡</button>
+        <button class="icon-button" aria-label="Manage Agents" onclick={openAgentManagement}>A</button>
+        <button class="icon-button" aria-label="Create Thread" onclick={startThread}>+</button>
       </span>
     </div>
 
-    <nav class="agent-list" aria-label="Agents">
-      {#if agents.length === 0 && !loading}
-        <button class="empty-agent" onclick={openAgentDialog}>
+    <nav class="thread-list" aria-label="Threads">
+      {#if threads.length === 0 && !loading}
+        <button class="empty-thread" onclick={startThread}>
           <span>+</span>
-          Create your first Agent
+          Create your first Thread
         </button>
       {/if}
-      {#each agents as agent}
+      {#each threads as thread}
         <button
-          class:active={agent.path === selectedAgentPath}
-          class="agent-item"
-          onclick={() => chooseAgent(agent.path)}
+          class:active={thread.path === activeThreadPath}
+          class="thread-item"
+          onclick={() => chooseThread(thread.path)}
         >
-          <span class="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</span>
-          <span class="agent-copy">
-            <strong>{agent.name}</strong>
-            <small class:syncing={!resourceConverged(agent)}>{resourceState(agent)}</small>
+          <span class="thread-avatar">#</span>
+          <span class="thread-copy">
+            <strong>{titleOf(thread)}</strong>
+            <small>
+              {participantAgentPaths(thread).length} Agents ·
+              {messagesForThread(messages, thread.path).length} Messages
+            </small>
           </span>
         </button>
       {/each}
@@ -569,7 +736,7 @@
 
     <footer class="sidebar-footer">
       <div class="connection">
-        <span class:online={driver?.state === 'ready'} class="status-dot"></span>
+        <span class:online={driver?.state === 'running'} class="status-dot"></span>
         <span>
           <strong>{driver?.state ?? 'disconnected'}</strong>
           <small>Agent Driver</small>
@@ -585,26 +752,49 @@
     <header class="workspace-header">
       <div>
         <p class="eyebrow">
-          {view === 'agents' ? 'Workspace' : view === 'objects' ? 'KAS Registry' : 'Current Agent'}
+          {view === 'agents'
+            ? 'Workspace'
+            : view === 'threads'
+              ? 'Conversations'
+              : view === 'objects'
+                ? 'KAS Registry'
+                : 'Current Thread'}
         </p>
         <h1>{pageTitle}</h1>
       </div>
       <div class="header-actions">
         {#if view === 'agents'}
-          <button class="quiet-button" disabled={!selectedAgent} onclick={() => (view = 'chat')}>
+          <button class="quiet-button" disabled={!activeThread} onclick={() => (view = 'chat')}>
             Open chat
           </button>
+          <button class="quiet-button" onclick={() => openThreadManagement()}>Manage Threads</button>
           <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
-        {:else if view === 'objects'}
-          <button class="quiet-button" disabled={!selectedAgent} onclick={() => (view = 'chat')}>
+        {:else if view === 'threads'}
+          <button class="quiet-button" disabled={!managedThread} onclick={openManagedThreadChat}>
             Open chat
           </button>
+          <button class="quiet-button" onclick={openAgentManagement}>Manage Agents</button>
+          <button class="primary-button" disabled={agents.length === 0} onclick={startThread}>
+            New Thread
+          </button>
+        {:else if view === 'objects'}
+          <button class="quiet-button" disabled={!activeThread} onclick={() => (view = 'chat')}>
+            Open chat
+          </button>
+          <button class="quiet-button" onclick={() => openThreadManagement()}>Manage Threads</button>
           <button class="quiet-button" onclick={openAgentManagement}>Manage Agents</button>
         {:else}
+          <button
+            class="quiet-button"
+            disabled={!activeThread}
+            onclick={() => openThreadManagement(activeThreadPath)}
+          >
+            Thread settings
+          </button>
           <button class="quiet-button" onclick={openAgentManagement}>Manage Agents</button>
           <button class="quiet-button" onclick={() => void openObjectExplorer()}>Objects</button>
-          <button class="quiet-button" disabled={!selectedAgent} onclick={startThread}>
-            New thread
+          <button class="quiet-button" disabled={agents.length === 0} onclick={startThread}>
+            New Thread
           </button>
         {/if}
         <button
@@ -617,23 +807,6 @@
         </button>
       </div>
     </header>
-
-    {#if view === 'chat' && selectedAgent}
-      <div class="thread-strip" aria-label="Conversations">
-        {#each threadEntries as [root, thread]}
-          <button
-            class:active={root === activeThreadRoot}
-            onclick={() => (activeThreadRoot = root)}
-          >
-            <span>{firstMessageBody(thread)}</span>
-            <small>{thread.length}</small>
-          </button>
-        {/each}
-        {#if threadEntries.length === 0}
-          <span class="thread-hint">No conversations yet</span>
-        {/if}
-      </div>
-    {/if}
 
     {#if error}
       <div class="banner error-banner" role="alert">
@@ -716,6 +889,105 @@
                 </div>
               </article>
             {/each}
+          </div>
+        {/if}
+      </section>
+    {:else if view === 'threads'}
+      <section class="thread-management" aria-label="Thread management">
+        <div class="management-summary">
+          <div>
+            <strong>{threads.length}</strong>
+            <span>Threads</span>
+          </div>
+          <div>
+            <strong>{messages.length}</strong>
+            <span>Messages</span>
+          </div>
+          <div>
+            <strong>{agents.length}</strong>
+            <span>Available Agents</span>
+          </div>
+        </div>
+
+        {#if threads.length === 0 && !loading}
+          <div class="management-empty">
+            <p class="eyebrow">No Threads</p>
+            <h2>Create a shared conversation.</h2>
+            <button class="primary-button" disabled={agents.length === 0} onclick={startThread}>
+              Create Thread
+            </button>
+          </div>
+        {:else}
+          <div class="thread-manager-layout">
+            <nav class="thread-manager-list" aria-label="Threads">
+              {#each threads as thread}
+                <button
+                  class:active={thread.path === selectedManagedThreadPath}
+                  onclick={() => selectManagedThread(thread.path)}
+                >
+                  <span>
+                    <strong>{titleOf(thread)}</strong>
+                    <code>{thread.path}</code>
+                  </span>
+                  <small>
+                    {participantAgentPaths(thread).length} Agents ·
+                    {messagesForThread(messages, thread.path).length} Messages
+                  </small>
+                </button>
+              {/each}
+            </nav>
+
+            {#if managedThread}
+              <form
+                class="thread-editor"
+                onsubmit={(event) => { event.preventDefault(); void saveManagedThread(); }}
+              >
+                <header>
+                  <div>
+                    <p class="eyebrow">Thread Resource</p>
+                    <h2>{titleOf(managedThread)}</h2>
+                    <code>{managedThread.path}</code>
+                  </div>
+                  <span class="state-pill">{resourceState(managedThread)}</span>
+                </header>
+
+                <label class="thread-title-field">
+                  Thread name
+                  <input bind:value={editThreadTitle} required />
+                </label>
+
+                <fieldset class="participant-picker">
+                  <legend>Agent participants</legend>
+                  {#each agents as agent}
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={editThreadAgents.includes(agent.path)}
+                        onchange={() => toggleManagedThreadAgent(agent.path)}
+                      />
+                      <span>
+                        <strong>{agent.name}</strong>
+                        <code>{agent.path}</code>
+                      </span>
+                    </label>
+                  {/each}
+                </fieldset>
+
+                <p class="thread-editor-note">
+                  User participants are retained. Agent membership is represented by
+                  <code>participants</code> Links.
+                </p>
+
+                <div class="modal-actions">
+                  <button type="button" class="quiet-button" onclick={openManagedThreadChat}>
+                    Open chat
+                  </button>
+                  <button type="submit" class="primary-button" disabled={savingThread}>
+                    {savingThread ? 'Saving…' : 'Save changes'}
+                  </button>
+                </div>
+              </form>
+            {/if}
           </div>
         {/if}
       </section>
@@ -842,26 +1114,29 @@
       </section>
     {:else}
       <section class="conversation" aria-live="polite">
-        {#if !selectedAgent}
-          <div class="empty-state">
-            <div class="empty-orbit"><span>K</span></div>
-            <p class="eyebrow">No Agent selected</p>
-            <h2>Give Codex a place to work.</h2>
-            <p>Create an Agent with a working directory, then start a conversation.</p>
-            <button class="primary-button" onclick={openAgentDialog}>Create Agent</button>
+        {#if !activeThread}
+          <div class="empty-state compact">
+            <p class="eyebrow">No Thread selected</p>
+            <h2>Create a place for Agents to collaborate.</h2>
+            <p>A Thread is an independent Resource and may contain one or many Agents.</p>
+            {#if agents.length === 0}
+              <button class="primary-button" onclick={openAgentDialog}>Create an Agent first</button>
+            {:else}
+              <button class="primary-button" onclick={startThread}>Create Thread</button>
+            {/if}
           </div>
         {:else if activeMessages.length === 0}
           <div class="empty-state compact">
-            <p class="eyebrow">New conversation</p>
-            <h2>What should {selectedAgent.name} work on?</h2>
-            <p>Your message becomes a Resource. The reply does too.</p>
+            <p class="eyebrow">New Thread</p>
+            <h2>{titleOf(activeThread)}</h2>
+            <p>Mention an Agent with @handle to ask it to work.</p>
           </div>
         {:else}
           <div class="message-list">
             {#each activeMessages as message}
               <article class:assistant={roleOf(message) === 'assistant'} class="message">
                 <div class="message-meta">
-                  <span>{roleOf(message) === 'assistant' ? selectedAgent.name : 'You'}</span>
+                  <span>{authorOf(message)}</span>
                   <time datetime={message.created_at}>{timeOf(message.created_at)}</time>
                 </div>
                 <p>{bodyOf(message)}</p>
@@ -869,7 +1144,7 @@
             {/each}
             {#if sending}
               <article class="message assistant pending">
-                <div class="message-meta"><span>{selectedAgent.name}</span></div>
+                <div class="message-meta"><span>Mentioned Agents</span></div>
                 <div class="thinking"><i></i><i></i><i></i></div>
               </article>
             {/if}
@@ -878,12 +1153,20 @@
       </section>
     {/if}
 
-    {#if view === 'chat' && selectedAgent}
+    {#if view === 'chat' && activeThread}
       <form class="composer" onsubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
+        <div class="mention-picker" aria-label="Thread Agents">
+          <span>Mention:</span>
+          {#each activeParticipants as agent}
+            <button type="button" onclick={() => insertMention(agent)}>
+              @{mentionHandle(agent)}
+            </button>
+          {/each}
+        </div>
         <textarea
           bind:value={composer}
           aria-label="Message"
-          placeholder={`Message ${selectedAgent.name}…`}
+          placeholder="Message this Thread… use @handle to trigger an Agent"
           rows="1"
           disabled={sending}
           onkeydown={(event) => {
@@ -896,11 +1179,51 @@
         <button class="send-button" type="submit" disabled={sending || !composer.trim()}>
           {sending ? '···' : '↑'}
         </button>
-        <div class="composer-note">Enter to send · Shift + Enter for a new line</div>
+        <div class="composer-note">Only mentioned Agents run · Enter to send</div>
       </form>
     {/if}
   </main>
 </div>
+
+{#if showCreateThread}
+  <div class="modal-backdrop" role="presentation">
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="thread-title">
+      <div class="modal-kicker">New Resource</div>
+      <h2 id="thread-title">Create a Thread</h2>
+      <p>Select every Agent that may participate. Only Agents mentioned in a Message will run.</p>
+      <form onsubmit={(event) => { event.preventDefault(); void createThread(); }}>
+        <label>
+          Title
+          <input bind:value={createThreadTitle} placeholder="New conversation" required />
+        </label>
+        <fieldset class="participant-picker">
+          <legend>Agent participants</legend>
+          {#each agents as agent}
+            <label>
+              <input
+                type="checkbox"
+                checked={createThreadAgents.includes(agent.path)}
+                onchange={() => toggleThreadAgent(agent.path)}
+              />
+              <span>
+                <strong>{agent.name}</strong>
+                <code>{agent.path}</code>
+              </span>
+            </label>
+          {/each}
+        </fieldset>
+        <div class="modal-actions">
+          <button type="button" class="quiet-button" onclick={() => (showCreateThread = false)}>
+            Cancel
+          </button>
+          <button type="submit" class="primary-button" disabled={loading}>
+            {loading ? 'Creating…' : 'Create Thread'}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
 
 {#if showSettings}
   <div class="modal-backdrop" role="presentation">

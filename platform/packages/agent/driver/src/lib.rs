@@ -4,19 +4,24 @@ use std::{
     process::{Command, Stdio},
 };
 
+use async_trait::async_trait;
 use kas_core::{
-    Action, DriverExecution, Mutation, ObjectKind, ObjectRef, PlannedLink, PlannedResource,
-    RbacSubjectDefinition, RbacSubjectKind, ReconcileObject, Resource, Run,
+    DriverExecution, LinkSpec, Mutation, PlannedResource, PlannedResourceMetadata, Resource,
+    ResourceStatus, RoleBindingSpec, RunSpec, ServiceAccountSpec,
 };
 use kas_driver::{Driver, DriverError};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 const MESSAGE_MANIFEST: &str = "/manifests/message";
 const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
+const LINK_MANIFEST: &str = "/builtin/link";
+const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
+const ROLE_BINDING_MANIFEST: &str = "/builtin/role-binding";
 const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
 const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
-const THREAD_ROOT: &str = "/manifests/message/relations/thread-root";
+const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
 const SERVICE_ACCOUNT_RELATION: &str = "/manifests/agent/relations/service-account";
 const AGENT_RUNTIME_ROLE: &str = "/manifests/agent/roles/runtime";
 
@@ -36,7 +41,6 @@ struct AgentSpec {
 
 #[derive(Debug, Deserialize)]
 struct IssuedCredential {
-    path: String,
     token: String,
 }
 
@@ -53,22 +57,57 @@ impl AgentDriver {
         }
     }
 
-    fn fetch_message(&self, path: &str) -> Result<Value, DriverError> {
+    fn fetch_resource(&self, path: &str) -> Result<Option<Resource>, DriverError> {
         let api = self.api.clone();
         let token = self.token.clone();
         let path = path.to_owned();
         std::thread::spawn(move || {
-            reqwest::blocking::Client::new()
+            let response = reqwest::blocking::Client::new()
                 .get(format!("{api}/resources/by-path"))
                 .bearer_auth(token)
-                .query(&[("path", path.as_str()), ("include", "relations")])
+                .query(&[("path", path.as_str())])
+                .send()
+                .map_err(|error| format!("could not load Resource {path}: {error}"))?;
+            if response.status() == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            response
+                .error_for_status()
+                .and_then(reqwest::blocking::Response::json)
+                .map(Some)
+                .map_err(|error| format!("could not load Resource {path}: {error}"))
+        })
+        .join()
+        .map_err(|_| execution_error("Resource REST worker panicked"))?
+        .map_err(execution_error)
+    }
+
+    fn fetch_links(&self, resource_path: &str) -> Result<Vec<Resource>, DriverError> {
+        let api = self.api.clone();
+        let token = self.token.clone();
+        let resource_path = resource_path.to_owned();
+        std::thread::spawn(move || {
+            let resources: Vec<Resource> = reqwest::blocking::Client::new()
+                .get(format!("{api}/resources"))
+                .bearer_auth(token)
+                .query(&[("manifest", LINK_MANIFEST)])
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)
                 .and_then(reqwest::blocking::Response::json)
-                .map_err(|error| format!("could not load Message {path}: {error}"))
+                .map_err(|error| format!("could not list Links: {error}"))?;
+            Ok::<Vec<Resource>, String>(
+                resources
+                    .into_iter()
+                    .filter(|resource| {
+                        serde_json::from_value::<LinkSpec>(resource.spec.clone()).is_ok_and(
+                            |link| link.source == resource_path || link.target == resource_path,
+                        )
+                    })
+                    .collect(),
+            )
         })
         .join()
-        .map_err(|_| execution_error("Message REST worker panicked"))?
+        .map_err(|_| execution_error("Link REST worker panicked"))?
         .map_err(execution_error)
     }
 
@@ -81,9 +120,9 @@ impl AgentDriver {
         let service_account_path = service_account_path.to_owned();
         std::thread::spawn(move || {
             reqwest::blocking::Client::new()
-                .post(format!("{api}/service-accounts/credentials"))
+                .post(format!("{api}/credentials/issue"))
                 .bearer_auth(token)
-                .query(&[("path", service_account_path.as_str())])
+                .json(&json!({"subject": service_account_path}))
                 .send()
                 .and_then(reqwest::blocking::Response::error_for_status)
                 .and_then(reqwest::blocking::Response::json)
@@ -95,27 +134,6 @@ impl AgentDriver {
         })
         .join()
         .map_err(|_| execution_error("Credential REST worker panicked"))?
-        .map_err(execution_error)
-    }
-
-    fn revoke_agent_credential(&self, credential_path: &str) -> Result<(), DriverError> {
-        let api = self.api.clone();
-        let token = self.token.clone();
-        let credential_path = credential_path.to_owned();
-        std::thread::spawn(move || {
-            reqwest::blocking::Client::new()
-                .delete(format!("{api}/credentials/by-path"))
-                .bearer_auth(token)
-                .query(&[("path", credential_path.as_str())])
-                .send()
-                .and_then(reqwest::blocking::Response::error_for_status)
-                .map(|_| ())
-                .map_err(|error| {
-                    format!("could not revoke Agent credential {credential_path}: {error}")
-                })
-        })
-        .join()
-        .map_err(|_| execution_error("Credential revoke REST worker panicked"))?
         .map_err(execution_error)
     }
 
@@ -138,16 +156,21 @@ impl AgentDriver {
             .map_err(|error| execution_error(format!("could not create output file: {error}")))?;
         let platform_context = format!(
             r#"KAS platform context:
-- KAS is the resource management and reconciliation platform hosting this Agent.
-- Its core objects are Manifest, Resource, Relation, Link, Action, and Run.
+- KAS is the Resource management and reconciliation platform hosting this Agent.
+- Every persistent object is a Resource selected by its metadata.manifest path.
 - Your Agent Resource path is {agent_path}.
 - Your ServiceAccount path is {service_account_path}.
 - Use the KAS REST API at $KAS_API with `Authorization: Bearer $KAS_TOKEN`.
 - Read your own Resource with:
-  curl -sS -H "Authorization: Bearer $KAS_TOKEN" "$KAS_API/resources/by-path?path=$KAS_AGENT_PATH&include=relations"
+  curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "path=$KAS_AGENT_PATH" "$KAS_API/resources/by-path"
 - List Message Resources with:
   curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "manifest=/manifests/message" "$KAS_API/resources"
-- Create Resources with JSON POST requests to $KAS_API/resources.
+- List Thread Resources with:
+  curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "manifest=/manifests/thread" "$KAS_API/resources"
+- Create a Message with:
+  curl -sS -H "Authorization: Bearer $KAS_TOKEN" -H "Content-Type: application/json" \
+    -d '{{"metadata":{{"path":"/messages/example","manifest":"/manifests/message","name":"example"}},"spec":{{"role":"system","body":"example"}}}}' \
+    "$KAS_API/resources"
 - Operations are restricted by the RBAC permissions of your ServiceAccount.
 - Never print, persist, or place $KAS_TOKEN in a Resource, Message, Link, or file."#
         );
@@ -223,115 +246,135 @@ impl AgentDriver {
         }
         Ok(reply.to_owned())
     }
+
+    fn identity_mutations(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+        let service_account_path = format!("{}/service-account", resource.path);
+        let role_binding_path = format!("{}/role-binding", resource.path);
+        let link_path = format!("{}/links/service-account", resource.path);
+        let mut mutations = Vec::new();
+        for path in [&link_path, &role_binding_path, &service_account_path] {
+            if let Some(child) = self.fetch_resource(path)? {
+                if child.metadata.state != kas_core::STATE_DELETED {
+                    mutations.push(Mutation::DeleteResource {
+                        resource_path: child.path.clone(),
+                        expected_revision: child.revision,
+                    });
+                }
+            }
+        }
+        if resource.metadata.state == kas_core::STATE_DELETED {
+            return Ok(mutations);
+        }
+        mutations.clear();
+        if self.fetch_resource(&service_account_path)?.is_none() {
+            mutations.push(Mutation::CreateResource {
+                resource: planned(
+                    service_account_path.clone(),
+                    SERVICE_ACCOUNT_MANIFEST,
+                    format!("{}-agent", resource_name(&resource.path)),
+                    serde_json::to_value(ServiceAccountSpec::default())
+                        .map_err(|error| execution_error(error.to_string()))?,
+                ),
+            });
+        }
+        if self.fetch_resource(&role_binding_path)?.is_none() {
+            mutations.push(Mutation::CreateResource {
+                resource: planned(
+                    role_binding_path,
+                    ROLE_BINDING_MANIFEST,
+                    format!("{}-agent-runtime", resource_name(&resource.path)),
+                    serde_json::to_value(RoleBindingSpec {
+                        role: AGENT_RUNTIME_ROLE.into(),
+                        subjects: vec![service_account_path.clone()],
+                    })
+                    .map_err(|error| execution_error(error.to_string()))?,
+                ),
+            });
+        }
+        if self.fetch_resource(&link_path)?.is_none() {
+            mutations.push(Mutation::CreateResource {
+                resource: link_resource(
+                    link_path,
+                    SERVICE_ACCOUNT_RELATION,
+                    resource.path.clone(),
+                    service_account_path,
+                )?,
+            });
+        }
+        Ok(mutations)
+    }
 }
 
+#[async_trait]
 impl Driver for AgentDriver {
     fn name(&self) -> &str {
         "codex-cli"
     }
 
-    fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
-        match object {
-            ReconcileObject::Resource(resource) => {
-                let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
-                    .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
-                if resource.spec.get("state").and_then(Value::as_str) != Some("deleted")
-                    && !spec.working_directory.is_dir()
-                {
-                    return Err(execution_error(format!(
-                        "working directory {} does not exist or is not a directory",
-                        spec.working_directory.display()
-                    )));
-                }
-                Ok(vec![Mutation::UpdateResourceStatus {
-                    resource_path: resource.path.clone(),
-                    expected_revision: resource.revision,
-                    status: resource.spec.clone(),
-                }])
-            }
-            ReconcileObject::Link(link) => {
-                if link.relation_path != SERVICE_ACCOUNT_RELATION {
-                    return Err(execution_error(format!(
-                        "Agent Driver cannot reconcile Relation {}",
-                        link.relation_path
-                    )));
-                }
-                let agent = link.source.as_ref().ok_or_else(|| {
-                    execution_error("Agent ServiceAccount Link has no Agent source")
-                })?;
-                if agent.kind != ObjectKind::Resource {
-                    return Err(execution_error(
-                        "Agent ServiceAccount Link source is not a Resource",
-                    ));
-                }
-                let service_account_path = format!("{}/service-account", agent.path);
-                let role_binding_path = format!("{}/role-binding", agent.path);
-                let service_account = ObjectRef {
-                    kind: ObjectKind::ServiceAccount,
-                    path: service_account_path.clone(),
-                };
-                let mut mutations = Vec::new();
-                if link.target.as_ref() != Some(&service_account) {
-                    mutations.push(Mutation::CreateServiceAccount {
-                        path: service_account_path.clone(),
-                        name: format!("{}-agent", resource_name(&agent.path)),
-                    });
-                    mutations.push(Mutation::CreateRoleBinding {
-                        path: role_binding_path,
-                        name: format!("{}-agent-runtime", resource_name(&agent.path)),
-                        role_path: AGENT_RUNTIME_ROLE.into(),
-                        subjects: vec![RbacSubjectDefinition {
-                            kind: RbacSubjectKind::ServiceAccount,
-                            path: service_account_path,
-                        }],
-                    });
-                }
-                mutations.push(Mutation::UpdateLink {
-                    link_path: link.path.clone(),
-                    expected_revision: link.revision,
-                    source: link.source.clone(),
-                    target: Some(service_account),
-                    status: link.spec.clone(),
-                });
-                Ok(mutations)
-            }
+    async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+        let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
+            .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
+        if resource.metadata.state != kas_core::STATE_DELETED && !spec.working_directory.is_dir() {
+            return Err(execution_error(format!(
+                "working directory {} does not exist or is not a directory",
+                spec.working_directory.display()
+            )));
         }
+        let mut mutations = self.identity_mutations(resource)?;
+        mutations.push(Mutation::UpdateResourceStatus {
+            resource_path: resource.path.clone(),
+            expected_revision: resource.revision,
+            status: ResourceStatus {
+                metadata: resource.status_metadata(resource.metadata.state.clone()),
+                spec: resource.spec.clone(),
+            },
+        });
+        Ok(mutations)
     }
 
-    fn execute(
+    async fn execute(
         &self,
         resource: &Resource,
-        action: &Action,
-        run: &Run,
+        action: &Resource,
+        run: &Resource,
     ) -> Result<DriverExecution, DriverError> {
         if action.path != MESSAGE_ACTION {
             return Err(DriverError::UnsupportedAction(action.path.clone()));
         }
         let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
             .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
-        let message_path = run
+        let run_spec: RunSpec = serde_json::from_value(run.spec.clone())
+            .map_err(|error| execution_error(format!("invalid Run spec: {error}")))?;
+        let message_path = run_spec
             .input
             .get("message_path")
             .and_then(Value::as_str)
             .ok_or_else(|| execution_error("message action requires input.message_path"))?;
-        let message = self.fetch_message(message_path)?;
+        let thread_path = run_spec
+            .input
+            .get("thread_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| execution_error("message action requires input.thread_path"))?;
+        let message = self
+            .fetch_resource(message_path)?
+            .ok_or_else(|| execution_error(format!("Message {message_path} does not exist")))?;
         let body = message
-            .pointer("/spec/body")
+            .spec
+            .get("body")
             .and_then(Value::as_str)
             .ok_or_else(|| execution_error(format!("Message {message_path} has no spec.body")))?;
-        let thread_root = message
-            .get("links")
-            .and_then(Value::as_array)
-            .and_then(|links| {
-                links.iter().find(|link| {
-                    link.get("relation_path").and_then(Value::as_str) == Some(THREAD_ROOT)
-                        && link.pointer("/source/path").and_then(Value::as_str)
-                            == Some(message_path)
-                })
+        let belongs_to_thread = self.fetch_links(message_path)?.into_iter().any(|link| {
+            serde_json::from_value::<LinkSpec>(link.spec).is_ok_and(|spec| {
+                spec.relation == MESSAGE_THREAD
+                    && spec.source == message_path
+                    && spec.target == thread_path
             })
-            .and_then(|link| link.pointer("/target/path"))
-            .and_then(Value::as_str)
-            .unwrap_or(message_path);
+        });
+        if !belongs_to_thread {
+            return Err(execution_error(format!(
+                "Message {message_path} does not belong to Thread {thread_path}"
+            )));
+        }
         let service_account_path = format!("{}/service-account", resource.path);
         let credential = self.issue_agent_credential(&service_account_path)?;
         let reply = self.run_codex(
@@ -341,86 +384,83 @@ impl Driver for AgentDriver {
             &spec.working_directory,
             &spec.instructions,
             body,
-        );
-        let revoke = self.revoke_agent_credential(&credential.path);
-        let reply = match (reply, revoke) {
-            (Ok(reply), Ok(())) => reply,
-            (Err(error), _) => return Err(error),
-            (Ok(_), Err(error)) => return Err(error),
-        };
-        let reply_path = format!("/messages/{}/assistant", run.request_id);
-        let reply_ref = ObjectRef {
-            kind: ObjectKind::Resource,
-            path: reply_path.clone(),
-        };
-        let links = vec![
-            planned_link(
-                format!("{reply_path}/links/authored-by"),
-                reply_ref.clone(),
-                AUTHORED_BY,
-                ObjectRef {
-                    kind: ObjectKind::Resource,
-                    path: resource.path.clone(),
-                },
+        )?;
+        let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
+        let mut mutations = vec![Mutation::CreateResource {
+            resource: planned(
+                reply_path.clone(),
+                MESSAGE_MANIFEST,
+                "assistant-reply",
+                json!({
+                    "role": "assistant",
+                    "body": reply
+                }),
             ),
-            planned_link(
-                format!("{reply_path}/links/replies-to"),
-                reply_ref.clone(),
-                REPLIES_TO,
-                ObjectRef {
-                    kind: ObjectKind::Resource,
-                    path: message_path.to_owned(),
-                },
-            ),
-            planned_link(
-                format!("{reply_path}/links/thread-root"),
-                reply_ref,
-                THREAD_ROOT,
-                ObjectRef {
-                    kind: ObjectKind::Resource,
-                    path: thread_root.to_owned(),
-                },
-            ),
-        ];
+        }];
+        for (suffix, relation, target) in [
+            ("authored-by", AUTHORED_BY, resource.path.as_str()),
+            ("replies-to", REPLIES_TO, message_path),
+            ("message-thread", MESSAGE_THREAD, thread_path),
+        ] {
+            mutations.push(Mutation::CreateResource {
+                resource: link_resource(
+                    format!("{reply_path}/links/{suffix}"),
+                    relation,
+                    reply_path.clone(),
+                    target.to_owned(),
+                )?,
+            });
+        }
         Ok(DriverExecution {
             output: json!({ "reply_message_path": reply_path }),
-            mutations: vec![Mutation::CreateResource {
-                resource: PlannedResource {
-                    path: reply_path,
-                    manifest: MESSAGE_MANIFEST.into(),
-                    name: "assistant-reply".into(),
-                    spec: json!({
-                        "role": "assistant",
-                        "body": reply
-                    }),
-                    links,
-                },
-            }],
+            mutations,
         })
     }
+}
+
+fn planned(
+    path: impl Into<String>,
+    manifest: impl Into<String>,
+    name: impl Into<String>,
+    spec: Value,
+) -> PlannedResource {
+    PlannedResource {
+        metadata: PlannedResourceMetadata {
+            path: path.into(),
+            manifest: manifest.into(),
+            name: name.into(),
+            state: String::new(),
+        },
+        spec,
+        status: ResourceStatus::default(),
+    }
+}
+
+fn link_resource(
+    path: impl Into<String>,
+    relation: impl Into<String>,
+    source: impl Into<String>,
+    target: impl Into<String>,
+) -> Result<PlannedResource, DriverError> {
+    let path = path.into();
+    Ok(planned(
+        path.clone(),
+        LINK_MANIFEST,
+        resource_name(&path),
+        serde_json::to_value(LinkSpec {
+            relation: relation.into(),
+            source: source.into(),
+            target: target.into(),
+            metadata: json!({}),
+        })
+        .map_err(|error| execution_error(error.to_string()))?,
+    ))
 }
 
 fn resource_name(path: &str) -> &str {
     path.rsplit('/')
         .find(|segment| !segment.is_empty())
-        .unwrap_or("agent")
-}
-
-fn planned_link(
-    path: String,
-    source: ObjectRef,
-    relation_path: &str,
-    target: ObjectRef,
-) -> PlannedLink {
-    PlannedLink {
-        path,
-        source: Some(source),
-        relation_path: relation_path.into(),
-        target: Some(target),
-        spec: json!({ "state": "available" }),
-        status: json!({ "state": "available" }),
-        metadata: json!({}),
-    }
+        .unwrap_or("resource")
 }
 
 fn execution_error(message: impl Into<String>) -> DriverError {

@@ -1,0 +1,7 @@
+{
+  "metadata": {
+    "path": "./service-accounts/driver",
+    "manifest": "/builtin/service-account",
+    "name": "agent-driver"
+  }
+}

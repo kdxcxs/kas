@@ -4,6 +4,7 @@ set -euo pipefail
 PLATFORM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${1:-$PLATFORM_ROOT/dist}"
 PROFILE="${KAS_PLATFORM_PROFILE:-debug}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PLATFORM_ROOT/target}"
 STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/kas-platform-packages.XXXXXX")"
 
 cleanup() {
@@ -17,12 +18,14 @@ case "$PROFILE" in
   debug)
     cargo build \
       --manifest-path "$PLATFORM_ROOT/Cargo.toml" \
-      -p kas-agent-driver
+      -p kas-agent-driver \
+      -p kas-message-driver
     ;;
   release)
     cargo build \
       --manifest-path "$PLATFORM_ROOT/Cargo.toml" \
       -p kas-agent-driver \
+      -p kas-message-driver \
       --release
     ;;
   *)
@@ -31,16 +34,30 @@ case "$PROFILE" in
     ;;
 esac
 
-mkdir -p "$OUTPUT_DIR" "$STAGING_ROOT/agent/driver/bin" "$STAGING_ROOT/message"
+mkdir -p \
+  "$OUTPUT_DIR" \
+  "$STAGING_ROOT/agent/driver/bin" \
+  "$STAGING_ROOT/message/driver/bin" \
+  "$STAGING_ROOT/thread"
 cp "$PLATFORM_ROOT/packages/agent/manifest.json" "$STAGING_ROOT/agent/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/agent/resources" "$STAGING_ROOT/agent/resources"
 cp \
-  "$PLATFORM_ROOT/target/$PROFILE/kas-agent-driver" \
+  "$TARGET_DIR/$PROFILE/kas-agent-driver" \
   "$STAGING_ROOT/agent/driver/bin/kas-agent-driver"
 chmod 755 "$STAGING_ROOT/agent/driver/bin/kas-agent-driver"
 cp "$PLATFORM_ROOT/packages/message/manifest.json" "$STAGING_ROOT/message/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/message/resources" "$STAGING_ROOT/message/resources"
+cp \
+  "$TARGET_DIR/$PROFILE/kas-message-driver" \
+  "$STAGING_ROOT/message/driver/bin/kas-message-driver"
+chmod 755 "$STAGING_ROOT/message/driver/bin/kas-message-driver"
+cp "$PLATFORM_ROOT/packages/thread/manifest.json" "$STAGING_ROOT/thread/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/thread/resources" "$STAGING_ROOT/thread/resources"
 
-tar -C "$STAGING_ROOT/agent" -cf "$OUTPUT_DIR/agent.kas" manifest.json driver
-tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" manifest.json
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/agent" -cf "$OUTPUT_DIR/agent.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/thread" -cf "$OUTPUT_DIR/thread.kas" manifest.json resources
 
+echo "$OUTPUT_DIR/thread.kas"
 echo "$OUTPUT_DIR/message.kas"
 echo "$OUTPUT_DIR/agent.kas"

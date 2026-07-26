@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "path": "./relations/participants",
+    "manifest": "/builtin/relation",
+    "name": "participants"
+  },
+  "spec": {
+    "inverse_name": "participates-in",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/threads/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/builtin/user",
+          "/manifests/agent"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

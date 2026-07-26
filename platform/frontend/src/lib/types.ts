@@ -10,18 +10,46 @@ export type ObjectKind =
   | 'service_account'
   | 'role'
   | 'role_binding'
-  | 'credential';
+  | 'credential'
+  | 'package';
 
 export interface ObjectRef {
   kind: ObjectKind;
   path: string;
 }
 
+export interface DriverObservation {
+  driver_revision: number;
+  resource_revision: number;
+}
+
+export interface ResourceMetadata {
+  path: string;
+  manifest: string;
+  name: string;
+  state: string;
+  '[kas]': {
+    revision: number;
+    observed: Record<string, DriverObservation>;
+    created_at: string;
+    updated_at: string;
+  };
+}
+
+export interface ResourceDocument {
+  metadata: ResourceMetadata;
+  spec: Record<string, unknown>;
+  status: {
+    metadata: ResourceMetadata;
+    spec: Record<string, unknown>;
+  };
+}
+
 export interface Link {
   path: string;
-  source: ObjectRef | null;
+  source: ObjectRef;
   relation_path: string;
-  target: ObjectRef | null;
+  target: ObjectRef;
   spec: Record<string, unknown>;
   status: Record<string, unknown>;
   metadata: Record<string, unknown>;
@@ -32,45 +60,36 @@ export interface Link {
 
 export interface Resource {
   path: string;
+  manifest: string;
   name: string;
+  state: string;
+  status_state: string;
   spec: Record<string, unknown>;
   status: Record<string, unknown>;
   revision: number;
   created_at: string;
   updated_at: string;
+  document: ResourceDocument;
   links?: Link[];
 }
 
 export interface Run {
-  path: string;
-  request_id: string;
-  driver_generation: number | null;
-  input: Record<string, unknown>;
+  resource: Resource;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   output: Record<string, unknown> | null;
   error: string | null;
-  created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
 }
 
 export interface Driver {
   path: string;
-  desired_state: 'running' | 'stopped';
-  state: 'stopped' | 'starting' | 'ready' | 'stopping' | 'failed';
-  generation: number;
-  process_id: number | null;
-  metadata: Record<string, unknown>;
-  error: string | null;
+  state: 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
 }
 
 export interface PlannedLink {
   path: string;
-  source: ObjectRef | null;
+  source: ObjectRef;
   relation_path: string;
-  target: ObjectRef | null;
-  spec?: Record<string, unknown>;
-  status?: Record<string, unknown>;
+  target: ObjectRef;
   metadata: Record<string, unknown>;
 }
 
@@ -90,6 +109,6 @@ export interface UpdateResource {
 export interface ObjectDetail {
   kind: ObjectKind;
   path: string;
-  value: unknown;
+  value: ResourceDocument;
   links: Link[];
 }

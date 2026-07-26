@@ -1,0 +1,63 @@
+{
+  "metadata": {
+    "path": "./roles/runtime",
+    "manifest": "/builtin/role",
+    "name": "agent-runtime"
+  },
+  "spec": {
+    "description": "Allow an Agent to inspect Agents and exchange Messages through KAS.",
+    "rules": [
+      {
+        "manifests": [
+          "/manifests/agent"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/thread"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/threads/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/message"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create"
+        ],
+        "paths": [
+          "/threads/**",
+          "/messages/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create"
+        ],
+        "paths": [
+          "/messages/**"
+        ]
+      }
+    ]
+  }
+}

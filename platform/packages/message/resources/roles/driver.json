@@ -1,0 +1,53 @@
+{
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "message-driver"
+  },
+  "spec": {
+    "description": "Reconcile Messages and fan out mentions into Agent Runs.",
+    "rules": [
+      {
+        "manifests": [
+          "/manifests/message",
+          "/manifests/thread",
+          "/manifests/agent"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/messages/**",
+          "/threads/**",
+          "/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/messages/**",
+          "/threads/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/run"
+        ],
+        "verbs": [
+          "get",
+          "create"
+        ],
+        "paths": [
+          "/messages/**/links/mentioned/**/run"
+        ]
+      }
+    ]
+  }
+}

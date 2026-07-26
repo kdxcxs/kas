@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "path": "./actions/message",
+    "manifest": "/builtin/action",
+    "name": "message"
+  },
+  "spec": {
+    "description": "Send a stored user Message to this Agent and create its assistant reply.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "message_path",
+        "thread_path"
+      ],
+      "properties": {
+        "message_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "thread_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "reply_message_path"
+      ],
+      "properties": {
+        "reply_message_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

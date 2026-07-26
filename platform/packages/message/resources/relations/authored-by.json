@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "path": "./relations/authored-by",
+    "manifest": "/builtin/relation",
+    "name": "authored-by"
+  },
+  "spec": {
+    "inverse_name": "authored",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/messages/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/builtin/user",
+          "/manifests/agent"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

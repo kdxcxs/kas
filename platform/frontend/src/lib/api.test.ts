@@ -25,6 +25,23 @@ describe('KasApi', () => {
     });
   });
 
+  it('asks KAS to filter Resources by exact Manifest', async () => {
+    const request = vi.fn().mockResolvedValue(
+      new Response('[]', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', request);
+
+    await new KasApi('/api', 'secret').listResources('/manifests/agent');
+
+    expect(request).toHaveBeenCalledWith(
+      '/api/resources?manifest=%2Fmanifests%2Fagent',
+      expect.any(Object)
+    );
+  });
+
   it('surfaces the KAS JSON error message', async () => {
     vi.stubGlobal(
       'fetch',
@@ -45,13 +62,34 @@ describe('KasApi', () => {
     const request = vi.fn().mockImplementation(async () =>
       new Response(
         JSON.stringify({
-          path: '/agents/demo',
-          name: 'demo',
-          spec: { state: 'available' },
-          status: { state: 'available' },
-          revision: 3,
-          created_at: '2026-01-01T00:00:00Z',
-          updated_at: '2026-01-01T00:00:00Z'
+          metadata: {
+            path: '/agents/demo',
+            manifest: '/manifests/agent',
+            name: 'demo',
+            state: 'available',
+            '[kas]': {
+              revision: 3,
+              observed: {},
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z'
+            }
+          },
+          spec: { working_directory: '/tmp/demo' },
+          status: {
+            metadata: {
+              path: '/agents/demo',
+              manifest: '/manifests/agent',
+              name: 'demo',
+              state: 'available',
+              '[kas]': {
+                revision: 3,
+                observed: {},
+                created_at: '2026-01-01T00:00:00Z',
+                updated_at: '2026-01-01T00:00:00Z'
+              }
+            },
+            spec: { working_directory: '/tmp/demo' }
+          }
         }),
         {
           status: 200,
@@ -92,7 +130,11 @@ describe('KasApi', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify([
-            { kind: 'service_account', path: '/agents/demo/service-account' }
+            resourceDocument(
+              '/agents/demo/service-account',
+              '/builtin/service-account',
+              'service-account'
+            )
           ]),
           {
             status: 200,
@@ -102,12 +144,13 @@ describe('KasApi', () => {
       )
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({
-            kind: 'service_account',
-            path: '/agents/demo/service-account',
-            value: { path: '/agents/demo/service-account' },
-            links: []
-          }),
+          JSON.stringify([
+            resourceDocument(
+              '/agents/demo/service-account',
+              '/builtin/service-account',
+              'service-account'
+            )
+          ]),
           {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
@@ -125,15 +168,27 @@ describe('KasApi', () => {
       links: []
     });
 
-    expect(request).toHaveBeenNthCalledWith(
-      1,
-      '/api/objects?kind=service_account',
-      expect.any(Object)
-    );
-    expect(request).toHaveBeenNthCalledWith(
-      2,
-      '/api/objects/by-path?kind=service_account&path=%2Fagents%2Fdemo%2Fservice-account&include=links',
-      expect.any(Object)
-    );
+    expect(request).toHaveBeenNthCalledWith(1, '/api/resources', expect.any(Object));
+    expect(request).toHaveBeenNthCalledWith(2, '/api/resources', expect.any(Object));
   });
 });
+
+function resourceDocument(path: string, manifest: string, name: string) {
+  const metadata = {
+    path,
+    manifest,
+    name,
+    state: 'available',
+    '[kas]': {
+      revision: 0,
+      observed: {},
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z'
+    }
+  };
+  return {
+    metadata,
+    spec: {},
+    status: { metadata, spec: {} }
+  };
+}

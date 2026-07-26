@@ -1,29 +1,20 @@
 {
-  "path": "/manifests/message",
+  "path": "/manifests/thread",
   "manifest": "/builtin/manifest",
-  "name": "message",
+  "name": "thread",
   "version": 1,
-  "description": "An immutable message belonging to a Thread.",
+  "description": "A conversation containing Messages and participants.",
   "states": [],
   "default_state": "available",
-  "initial_state": "pending",
+  "initial_state": "available",
   "resource_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "required": [
-      "role",
-      "body"
+      "title"
     ],
     "properties": {
-      "role": {
-        "type": "string",
-        "enum": [
-          "user",
-          "assistant",
-          "system"
-        ]
-      },
-      "body": {
+      "title": {
         "type": "string",
         "minLength": 1
       }

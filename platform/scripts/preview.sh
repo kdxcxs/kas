@@ -47,7 +47,8 @@ cleanup() {
   fi
   exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 for command in cargo curl jq npm python3; do
   command -v "$command" >/dev/null || {
@@ -125,37 +126,42 @@ install_package() {
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/vnd.kas.manifest+tar" \
     --data-binary "@$1" \
-    "$API/manifests"
+    "$API/packages"
 }
 
-echo "Installing Message and Agent packages..."
-install_package "$PACKAGES_DIR/message.kas" >/dev/null
+echo "Installing Agent, Thread, and Message packages..."
 install_package "$PACKAGES_DIR/agent.kas" >/dev/null
+install_package "$PACKAGES_DIR/thread.kas" >/dev/null
+install_package "$PACKAGES_DIR/message.kas" >/dev/null
 
-driver_ready=false
-for _ in $(seq 1 200); do
-  DRIVER="$(
+wait_for_driver() {
+  local path="$1" driver
+  for _ in $(seq 1 200); do
+    driver="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/manifests/agent" \
-      "$API/manifests/driver"
+        --data-urlencode "path=$path" \
+      "$API/resources/by-path"
   )"
-  if [[ "$(jq -r '.state' <<<"$DRIVER")" == "ready" ]]; then
-    driver_ready=true
-    break
-  fi
-  sleep 0.05
-done
-if [[ "$driver_ready" != true ]]; then
-  echo "Agent Driver did not become ready" >&2
-  exit 1
-fi
+    if [[ "$(jq -r '.status.metadata.state' <<<"$driver")" == "running" ]]; then
+      return
+    fi
+    sleep 0.05
+  done
+  echo "Driver did not become ready: $path" >&2
+  return 1
+}
+
+wait_for_driver "/manifests/agent/driver"
+wait_for_driver "/manifests/message/driver"
 
 AGENT_PAYLOAD="$(
   jq -n --arg cwd "$ROOT" '{
-    path: "/agents/preview",
-    manifest: "/manifests/agent",
-    name: "Preview Agent",
+    metadata: {
+      path: "/agents/preview",
+      manifest: "/manifests/agent",
+      name: "Preview Agent"
+    },
     spec: {
       instructions: "Be concise and helpful. Work only when the user explicitly asks you to change files.",
       working_directory: $cwd
@@ -174,17 +180,23 @@ for _ in $(seq 1 400); do
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       --data-urlencode "path=/agents/preview" \
-      --data-urlencode "include=relations" \
+      "$API/resources/by-path"
+  )"
+  LINK="$(
+    curl --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/agents/preview/links/service-account" \
       "$API/resources/by-path"
   )"
   if jq -e '
-    .spec == .status
-    and any(.links[];
-      .relation_path == "/manifests/agent/relations/service-account"
-      and .target.path == "/agents/preview/service-account"
-      and .spec == .status
-    )
-  ' >/dev/null <<<"$AGENT"; then
+    .spec == .status.spec
+    and .status.metadata.state == "available"
+  ' >/dev/null <<<"$AGENT" &&
+    jq -e '
+      .spec.relation == "/manifests/agent/relations/service-account"
+      and .spec.target == "/agents/preview/service-account"
+      and .status.metadata.state == "available"
+    ' >/dev/null <<<"$LINK"; then
     agent_ready=true
     break
   fi
@@ -194,6 +206,64 @@ if [[ "$agent_ready" != true ]]; then
   echo "Preview Agent did not finish identity reconciliation" >&2
   exit 1
 fi
+
+THREAD_PAYLOAD="$(
+  jq -n '{
+    metadata: {
+      path: "/threads/preview",
+      manifest: "/manifests/thread",
+      name: "Preview Thread"
+    },
+    spec: {
+      title: "Preview Thread"
+    }
+  }'
+)"
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$THREAD_PAYLOAD" \
+  "$API/resources" >/dev/null
+
+create_link() {
+  local path="$1" target="$2"
+  curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(
+      jq -cn \
+        --arg path "$path" \
+        --arg target "$target" '{
+          metadata: {
+            path: $path,
+            manifest: "/builtin/link",
+            name: ($path | split("/") | last)
+          },
+          spec: {
+            relation: "/manifests/thread/relations/participants",
+            source: "/threads/preview",
+            target: $target,
+            metadata: {}
+          }
+        }'
+    )" \
+    "$API/resources" >/dev/null
+}
+create_link "/threads/preview/links/participants/user" "/users/preview-admin"
+create_link "/threads/preview/links/participants/agent" "/agents/preview"
+for _ in $(seq 1 200); do
+  PARTICIPANT_LINK="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/threads/preview/links/participants/agent" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(jq -r '.status.metadata.state' <<<"$PARTICIPANT_LINK")" == "available" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e '.status.metadata.state == "available"' <<<"$PARTICIPANT_LINK" >/dev/null
 
 (
   cd "$FRONTEND_ROOT"

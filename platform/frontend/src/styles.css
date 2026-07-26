@@ -141,7 +141,7 @@ textarea:focus-visible {
   font-size: 18px;
 }
 
-.agent-list {
+.thread-list {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -149,15 +149,15 @@ textarea:focus-visible {
   overflow: auto;
 }
 
-.agent-item,
-.empty-agent {
+.thread-item,
+.empty-thread {
   width: 100%;
   border: 0;
   cursor: pointer;
   text-align: left;
 }
 
-.agent-item {
+.thread-item {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -169,19 +169,20 @@ textarea:focus-visible {
     transform 140ms ease;
 }
 
-.agent-item:hover {
+.thread-item:hover {
   background: #1d211a;
 }
 
-.agent-item.active {
+.thread-item.active {
   background: #252b20;
 }
 
-.agent-item.active .agent-avatar {
+.thread-item.active .thread-avatar {
   color: #14170f;
   background: var(--lime);
 }
 
+.thread-avatar,
 .agent-avatar {
   display: grid;
   place-items: center;
@@ -195,35 +196,30 @@ textarea:focus-visible {
   font-weight: 750;
 }
 
-.agent-copy {
+.thread-copy {
   min-width: 0;
 }
 
-.agent-copy strong,
-.agent-copy small {
+.thread-copy strong,
+.thread-copy small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-copy small.syncing {
-  color: var(--lime-deep);
-}
-
-.agent-copy strong {
+.thread-copy strong {
   font-size: 13px;
   font-weight: 650;
 }
 
-.agent-copy small {
+.thread-copy small {
   margin-top: 3px;
   color: var(--quiet);
   font-size: 11px;
-  text-transform: capitalize;
 }
 
-.empty-agent {
+.empty-thread {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -234,7 +230,7 @@ textarea:focus-visible {
   border-radius: 12px;
 }
 
-.empty-agent span {
+.empty-thread span {
   font-size: 20px;
 }
 
@@ -391,59 +387,6 @@ button:disabled {
   opacity: 0.45;
 }
 
-.thread-strip {
-  grid-row: 2;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 46px;
-  padding: 0 34px 13px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--line);
-}
-
-.thread-strip button {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  max-width: 220px;
-  padding: 7px 10px;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-.thread-strip button.active {
-  color: var(--warm);
-  background: #1c2119;
-  border-color: #30372a;
-}
-
-.thread-strip button span {
-  overflow: hidden;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.thread-strip button small {
-  display: grid;
-  place-items: center;
-  min-width: 18px;
-  height: 18px;
-  color: var(--quiet);
-  background: #2a3026;
-  border-radius: 999px;
-  font-size: 9px;
-}
-
-.thread-hint {
-  color: var(--quiet);
-  font-size: 11px;
-}
-
 .banner {
   grid-row: 3;
   display: flex;
@@ -484,11 +427,146 @@ button:disabled {
   scrollbar-gutter: stable;
 }
 
-.agent-management {
+.agent-management,
+.thread-management {
   grid-row: 4;
   min-height: 0;
   padding: 8px 34px 36px;
   overflow-y: auto;
+}
+
+.thread-manager-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.75fr) minmax(380px, 1.25fr);
+  gap: 16px;
+  min-height: 430px;
+}
+
+.thread-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px;
+  background: #131610;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+}
+
+.thread-manager-list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  padding: 13px;
+  color: var(--muted);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.thread-manager-list button:hover,
+.thread-manager-list button.active {
+  color: var(--warm);
+  background: #20251c;
+  border-color: #30372a;
+}
+
+.thread-manager-list span,
+.thread-manager-list strong,
+.thread-manager-list code {
+  display: block;
+  min-width: 0;
+}
+
+.thread-manager-list strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-manager-list code,
+.thread-manager-list small {
+  color: var(--quiet);
+  font-size: 9px;
+}
+
+.thread-manager-list code {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.thread-manager-list small {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.thread-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 19px;
+  min-width: 0;
+  padding: 24px;
+  background: #181c15;
+  border: 1px solid #2d3429;
+  border-radius: 15px;
+}
+
+.thread-editor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.thread-editor h2 {
+  margin: 0 0 5px;
+  color: var(--warm);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.thread-editor header code,
+.thread-editor-note code {
+  color: var(--quiet);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.thread-title-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: #adb5a5;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.thread-title-field input {
+  width: 100%;
+  padding: 11px 12px;
+  color: var(--warm);
+  background: #11140f;
+  border: 1px solid #30372a;
+  border-radius: 9px;
+}
+
+.thread-editor-note {
+  margin: -5px 0 0;
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.thread-editor .modal-actions {
+  margin-top: auto;
 }
 
 .object-explorer {
@@ -1121,6 +1199,28 @@ button:disabled {
   padding: 0 0 28px;
 }
 
+.mention-picker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 4px 7px;
+  overflow-x: auto;
+  color: var(--quiet);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.mention-picker button {
+  padding: 4px 8px;
+  color: var(--lime);
+  background: rgba(197, 246, 107, 0.06);
+  border: 1px solid rgba(197, 246, 107, 0.18);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 10px;
+}
+
 .composer textarea {
   display: block;
   width: 100%;
@@ -1142,7 +1242,7 @@ button:disabled {
 
 .send-button {
   position: absolute;
-  top: 12px;
+  top: 46px;
   right: 12px;
   display: grid;
   place-items: center;
@@ -1280,6 +1380,50 @@ button:disabled {
   resize: vertical;
 }
 
+.participant-picker {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 13px;
+  border: 1px solid #343b2f;
+  border-radius: 12px;
+}
+
+.participant-picker legend {
+  padding: 0 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.participant-picker label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: #171a14;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.participant-picker input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.participant-picker span,
+.participant-picker strong,
+.participant-picker code {
+  display: block;
+}
+
+.participant-picker code {
+  margin-top: 2px;
+  color: var(--quiet);
+  font-size: 9px;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1349,17 +1493,17 @@ button:disabled {
     display: none;
   }
 
-  .agent-list {
+  .thread-list {
     flex-direction: row;
     padding-bottom: 3px;
   }
 
-  .agent-item {
+  .thread-item {
     width: auto;
     min-width: 150px;
   }
 
-  .empty-agent {
+  .empty-thread {
     width: auto;
   }
 
@@ -1386,10 +1530,6 @@ button:disabled {
     padding: 20px 18px 14px;
   }
 
-  .thread-strip {
-    padding: 0 18px 10px;
-  }
-
   .banner {
     margin-right: 18px;
     margin-left: 18px;
@@ -1408,9 +1548,19 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .agent-management {
+  .agent-management,
+  .thread-management {
     padding: 4px 18px 24px;
     overflow-y: visible;
+  }
+
+  .thread-manager-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .thread-manager-list {
+    max-height: 260px;
+    overflow-y: auto;
   }
 
   .object-explorer {

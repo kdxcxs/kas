@@ -1,13 +1,33 @@
 import type {
   CreateResource,
   Driver,
+  Link,
   ObjectDetail,
   ObjectKind,
   ObjectRef,
+  PlannedLink,
   Resource,
+  ResourceDocument,
   Run,
   UpdateResource
 } from './types';
+
+const LINK_MANIFEST = '/builtin/link';
+
+const KIND_BY_MANIFEST: Record<string, ObjectKind> = {
+  '/builtin/manifest': 'manifest',
+  '/builtin/action': 'action',
+  '/builtin/relation': 'relation',
+  '/builtin/driver': 'driver',
+  '/builtin/run': 'run',
+  '/builtin/link': 'link',
+  '/builtin/user': 'user',
+  '/builtin/service-account': 'service_account',
+  '/builtin/role': 'role',
+  '/builtin/role-binding': 'role_binding',
+  '/builtin/credential': 'credential',
+  '/builtin/package': 'package'
+};
 
 export class KasApiError extends Error {
   constructor(
@@ -29,76 +49,111 @@ export class KasApi {
     return response.ok;
   }
 
-  async listResources(): Promise<Resource[]> {
-    return this.request('/resources');
+  async listResources(manifest?: string): Promise<Resource[]> {
+    const query = manifest ? `?${new URLSearchParams({ manifest })}` : '';
+    const documents = await this.request<ResourceDocument[]>(`/resources${query}`);
+    return documents.map(resourceFromDocument);
   }
 
   async getResource(path: string, includeRelations = false): Promise<Resource> {
-    const query = new URLSearchParams({ path });
-    if (includeRelations) query.set('include', 'relations');
-    return this.request(`/resources/by-path?${query}`);
+    const document = await this.request<ResourceDocument>(
+      `/resources/by-path?${new URLSearchParams({ path })}`
+    );
+    const resource = resourceFromDocument(document);
+    if (includeRelations) {
+      const all = await this.listResources();
+      resource.links = linksFor(path, all);
+    }
+    return resource;
   }
 
   async createResource(resource: CreateResource): Promise<Resource> {
-    return this.request('/resources', {
-      method: 'POST',
-      body: JSON.stringify(resource)
-    });
+    const created = resourceFromDocument(
+      await this.request<ResourceDocument>('/resources', {
+        method: 'POST',
+        body: JSON.stringify(resourcePayload(resource))
+      })
+    );
+    for (const link of resource.links ?? []) {
+      await this.createLink(link);
+    }
+    return created;
   }
 
   async updateResource(path: string, update: UpdateResource): Promise<Resource> {
-    return this.request(`/resources/by-path?${new URLSearchParams({ path })}`, {
-      method: 'PATCH',
-      body: JSON.stringify(update)
-    });
+    const document = await this.request<ResourceDocument>(
+      `/resources/by-path?${new URLSearchParams({ path })}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(update)
+      }
+    );
+    return resourceFromDocument(document);
   }
 
   async deleteResource(path: string, expectedRevision: number): Promise<Resource> {
-    return this.request(
+    const document = await this.request<ResourceDocument>(
       `/resources/by-path?${new URLSearchParams({
         path,
         expected_revision: String(expectedRevision)
       })}`,
       { method: 'DELETE' }
     );
-  }
-
-  async createRun(run: {
-    path: string;
-    request_id: string;
-    resource: string;
-    action: string;
-    input: Record<string, unknown>;
-  }): Promise<Run> {
-    return this.request('/runs', {
-      method: 'POST',
-      body: JSON.stringify(run)
-    });
+    return resourceFromDocument(document);
   }
 
   async getRun(path: string): Promise<Run> {
-    return this.request(`/runs/by-path?${new URLSearchParams({ path })}`);
+    return runFromResource(await this.getResource(path));
   }
 
   async getAgentDriver(): Promise<Driver | null> {
-    return this.request(
-      `/manifests/driver?${new URLSearchParams({ path: '/manifests/agent' })}`
-    );
+    try {
+      const driver = await this.getResource('/manifests/agent/driver');
+      return {
+        path: driver.path,
+        state: driver.status_state as Driver['state']
+      };
+    } catch (cause) {
+      if (cause instanceof KasApiError && cause.status === 404) return null;
+      throw cause;
+    }
   }
 
   async listObjects(kind?: ObjectKind): Promise<ObjectRef[]> {
-    const query = kind ? `?${new URLSearchParams({ kind })}` : '';
-    return this.request(`/objects${query}`);
+    return (await this.listResources())
+      .map((resource) => ({
+        kind: kindForManifest(resource.manifest),
+        path: resource.path
+      }))
+      .filter((object) => !kind || object.kind === kind);
   }
 
   async getObject(kind: ObjectKind, path: string): Promise<ObjectDetail> {
-    return this.request(
-      `/objects/by-path?${new URLSearchParams({
-        kind,
-        path,
-        include: 'links'
-      })}`
-    );
+    const all = await this.listResources();
+    const resource = all.find((candidate) => candidate.path === path);
+    if (!resource) throw new KasApiError(`Resource ${path} was not found`, 404);
+    return {
+      kind,
+      path,
+      value: resource.document,
+      links: linksFor(path, all)
+    };
+  }
+
+  async createLink(link: PlannedLink): Promise<Resource> {
+    const source = link.source.path;
+    const target = link.target.path;
+    return this.createResource({
+      path: link.path,
+      manifest: LINK_MANIFEST,
+      name: link.path.split('/').at(-1) || 'link',
+      spec: {
+        relation: link.relation_path,
+        source,
+        target,
+        metadata: link.metadata
+      }
+    });
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -126,4 +181,93 @@ export class KasApi {
   private url(path: string): string {
     return `${this.baseUrl.replace(/\/$/, '')}${path}`;
   }
+}
+
+function resourcePayload(resource: CreateResource): unknown {
+  return {
+    metadata: {
+      path: resource.path,
+      manifest: resource.manifest,
+      name: resource.name
+    },
+    spec: resource.spec
+  };
+}
+
+function resourceFromDocument(document: ResourceDocument): Resource {
+  return {
+    path: document.metadata.path,
+    manifest: document.metadata.manifest,
+    name: document.metadata.name,
+    state: document.metadata.state,
+    status_state: document.status.metadata.state,
+    spec: document.spec,
+    status: document.status.spec,
+    revision: document.metadata['[kas]'].revision,
+    created_at: document.metadata['[kas]'].created_at,
+    updated_at: document.metadata['[kas]'].updated_at,
+    document
+  };
+}
+
+function kindForManifest(manifest: string): ObjectKind {
+  return KIND_BY_MANIFEST[manifest] ?? 'resource';
+}
+
+function linksFor(path: string, resources: Resource[]): Link[] {
+  const byPath = new Map(resources.map((resource) => [resource.path, resource]));
+  return resources
+    .filter((resource) => resource.manifest === LINK_MANIFEST && resource.state !== 'deleted')
+    .flatMap((resource) => {
+      const relation = stringValue(resource.spec.relation);
+      const sourcePath = stringValue(resource.spec.source);
+      const targetPath = stringValue(resource.spec.target);
+      if (!relation || !sourcePath || !targetPath || (sourcePath !== path && targetPath !== path)) {
+        return [];
+      }
+      const source = byPath.get(sourcePath);
+      const target = byPath.get(targetPath);
+      return [
+        {
+          path: resource.path,
+          source: {
+            kind: kindForManifest(source?.manifest ?? ''),
+            path: sourcePath
+          },
+          relation_path: relation,
+          target: {
+            kind: kindForManifest(target?.manifest ?? ''),
+            path: targetPath
+          },
+          spec: resource.spec,
+          status: resource.status,
+          metadata: objectValue(resource.spec.metadata) ?? {},
+          revision: resource.revision,
+          created_at: resource.created_at,
+          updated_at: resource.updated_at
+        }
+      ];
+    });
+}
+
+function runFromResource(resource: Resource): Run {
+  return {
+    resource,
+    status: resource.status_state as Run['status'],
+    output: objectValue(resource.spec.output, null),
+    error: typeof resource.spec.error === 'string' ? resource.spec.error : null
+  };
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function objectValue(value: unknown, fallback: Record<string, unknown> | null = {}): Record<
+  string,
+  unknown
+> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : fallback;
 }

@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "path": "./driver",
+    "manifest": "/builtin/driver",
+    "name": "agent-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-agent-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      "."
+    ],
+    "args": [],
+    "watches": [],
+    "restart": "on_failure"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}
