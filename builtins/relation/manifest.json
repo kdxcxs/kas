@@ -1,0 +1,19 @@
+{
+  "path": "/builtin/relation",
+  "manifest": "/builtin/manifest",
+  "name": "relation",
+  "version": 1,
+  "description": "Defines Relation Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "sources",
+      "targets"
+    ]
+  },
+  "states": [
+    "invalid"
+  ],
+  "default_state": "available",
+  "initial_state": "pending"
+}

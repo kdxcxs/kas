@@ -1,0 +1,19 @@
+{
+  "path": "/builtin/manifest",
+  "manifest": ".",
+  "name": "manifest",
+  "version": 1,
+  "description": "Defines KAS Manifest Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "version",
+      "resource_schema",
+      "default_state",
+      "initial_state"
+    ]
+  },
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available"
+}

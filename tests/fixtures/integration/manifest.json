@@ -1,0 +1,22 @@
+{
+  "path": "/manifests/integration-demo",
+  "manifest": "/builtin/manifest",
+  "name": "integration-demo",
+  "version": 1,
+  "description": "Data-only Manifest registered after a wildcard Driver",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
+  "resource_schema": {
+    "type": "object",
+    "properties": {
+      "value": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "value"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "path": "/builtin/package",
+  "manifest": "/builtin/manifest",
+  "name": "package",
+  "version": 1,
+  "description": "Defines installed Package artifact metadata",
+  "resource_schema": {
+    "type": "object",
+    "properties": {
+      "digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "size_bytes": {
+        "type": "integer",
+        "minimum": 0
+      },
+    "media_type": {
+      "type": "string"
+    }
+    },
+    "required": [
+      "digest",
+      "size_bytes",
+    "media_type"
+    ],
+    "additionalProperties": false
+  },
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available"
+}

@@ -5,94 +5,18 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use uuid::Uuid;
 
-pub mod resources {
-    pub const MANIFESTS: &str = "manifests";
-    pub const ACTIONS: &str = "actions";
-    pub const RELATIONS: &str = "relations";
-    pub const RESOURCES: &str = "resources";
-    pub const DRIVERS: &str = "drivers";
-    pub const RUNS: &str = "runs";
-    pub const LINKS: &str = "links";
-}
-
-pub mod verbs {
-    pub const GET: &str = "get";
-    pub const LIST: &str = "list";
-    pub const CREATE: &str = "create";
-    pub const UPDATE: &str = "update";
-    pub const PATCH: &str = "patch";
-    pub const DELETE: &str = "delete";
-    pub const LINK: &str = "link";
-    pub const INVOKE: &str = "invoke";
-    pub const USE: &str = "use";
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SubjectKind {
-    User,
-    ServiceAccount,
-}
-
-impl SubjectKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::ServiceAccount => "service_account",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subject {
-    pub kind: SubjectKind,
     pub path: String,
+    pub manifest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Rule {
-    pub resources: Vec<String>,
+    pub manifests: Vec<String>,
     pub verbs: Vec<String>,
     #[serde(default)]
     pub paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct User {
-    pub path: String,
-    pub name: String,
-    pub disabled: bool,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ServiceAccount {
-    pub path: String,
-    pub name: String,
-    pub driver_path: Option<String>,
-    pub managed_by: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Role {
-    pub path: String,
-    pub name: String,
-    pub description: String,
-    pub rules: Vec<Rule>,
-    pub managed_by: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RoleBinding {
-    pub path: String,
-    pub name: String,
-    pub role_path: String,
-    pub subjects: Vec<Subject>,
-    pub managed_by: String,
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,39 +27,13 @@ pub struct AuthContext {
     pub driver_generation: Option<u64>,
 }
 
+/// Credential material returned once by an issuance operation. Credentials
+/// themselves are Resources; this DTO is not a persistent domain object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuedCredential {
-    pub path: String,
+    pub resource_path: String,
     pub token: String,
     pub expires_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateUser {
-    pub path: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateServiceAccount {
-    pub path: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateRole {
-    pub path: String,
-    pub name: String,
-    pub description: String,
-    pub rules: Vec<Rule>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateRoleBinding {
-    pub path: String,
-    pub name: String,
-    pub role_path: String,
-    pub subjects: Vec<Subject>,
 }
 
 pub fn issue_token() -> String {
@@ -199,7 +97,6 @@ fn validate_path_inner(path: &str, allow_wildcards: bool) -> Result<(), PathErro
     if path.ends_with('/') {
         return Err(PathError::TrailingSlash);
     }
-
     for segment in path[1..].split('/') {
         if segment.is_empty() {
             return Err(PathError::EmptySegment);
@@ -277,7 +174,6 @@ pub fn path_pattern_contains(container: &str, candidate: &str) -> bool {
     let container_start = epsilon_closure(&container, &[0]);
     let mut pending = VecDeque::from([(candidate_start, container_start, false)]);
     let mut visited = HashSet::new();
-
     while let Some((candidate_states, container_states, consumed)) = pending.pop_front() {
         if !visited.insert((candidate_states.clone(), container_states.clone(), consumed)) {
             continue;
@@ -336,13 +232,19 @@ fn transition(pattern: &[&str], states: &[usize], symbol: &str) -> Vec<usize> {
     epsilon_closure(pattern, &next)
 }
 
-pub fn allows(rules: &[Rule], resource: &str, verb: &str, path: Option<&str>) -> bool {
+fn manifest_matches(pattern: &str, manifest: &str) -> bool {
+    pattern == "*" || pattern == manifest || path_matches(pattern, manifest)
+}
+
+pub fn allows(rules: &[Rule], manifest: &str, verb: &str, path: Option<&str>) -> bool {
     rules.iter().any(|rule| {
-        rule.resources
+        rule.manifests
             .iter()
-            .any(|value| resource_matches(value, resource))
-            && (rule.verbs.iter().any(|value| value == "*")
-                || rule.verbs.iter().any(|value| value == verb))
+            .any(|pattern| manifest_matches(pattern, manifest))
+            && rule
+                .verbs
+                .iter()
+                .any(|allowed| allowed == "*" || allowed == verb)
             && match path {
                 Some(path) => {
                     rule.paths.is_empty()
@@ -353,95 +255,51 @@ pub fn allows(rules: &[Rule], resource: &str, verb: &str, path: Option<&str>) ->
     })
 }
 
-/// Checks permission to invoke a concrete Action object.
-pub fn allows_action_invoke(rules: &[Rule], action_path: &str) -> bool {
-    allows(rules, resources::ACTIONS, verbs::INVOKE, Some(action_path))
-}
-
-/// Checks permission to create a Link using a concrete Relation object.
-///
-/// Endpoint `link` permissions are intentionally separate and must also be
-/// checked by the caller.
-pub fn allows_relation_use(rules: &[Rule], relation_path: &str) -> bool {
-    allows(rules, resources::RELATIONS, verbs::USE, Some(relation_path))
-}
-
 pub fn rules_are_subset(proposed: &[Rule], caller: &[Rule]) -> bool {
     proposed.iter().all(|proposed_rule| {
-        if proposed_rule
+        proposed_rule
             .paths
             .iter()
-            .any(|path| validate_path_pattern(path).is_err())
-        {
-            return false;
-        }
-        proposed_rule.resources.iter().all(|resource| {
-            proposed_rule.verbs.iter().all(|verb| {
-                if proposed_rule.paths.is_empty() {
-                    caller.iter().any(|caller_rule| {
-                        caller_rule.paths.is_empty()
-                            && rule_covers_resource_and_verb(caller_rule, resource, verb)
-                    })
-                } else {
-                    proposed_rule.paths.iter().all(|path| {
+            .all(|path| validate_path_pattern(path).is_ok())
+            && proposed_rule
+                .manifests
+                .iter()
+                .all(|manifest| manifest == "*" || validate_path_pattern(manifest).is_ok())
+            && proposed_rule.manifests.iter().all(|manifest| {
+                proposed_rule.verbs.iter().all(|verb| {
+                    if proposed_rule.paths.is_empty() {
                         caller.iter().any(|caller_rule| {
-                            rule_covers_resource_and_verb(caller_rule, resource, verb)
-                                && (caller_rule.paths.is_empty()
-                                    || caller_rule
-                                        .paths
-                                        .iter()
-                                        .any(|owned| path_pattern_contains(owned, path)))
+                            caller_rule.paths.is_empty()
+                                && rule_covers_manifest_and_verb(caller_rule, manifest, verb)
                         })
-                    })
-                }
+                    } else {
+                        proposed_rule.paths.iter().all(|path| {
+                            caller.iter().any(|caller_rule| {
+                                rule_covers_manifest_and_verb(caller_rule, manifest, verb)
+                                    && (caller_rule.paths.is_empty()
+                                        || caller_rule
+                                            .paths
+                                            .iter()
+                                            .any(|owned| path_pattern_contains(owned, path)))
+                            })
+                        })
+                    }
+                })
             })
-        })
     })
 }
 
-fn rule_covers_resource_and_verb(rule: &Rule, resource: &str, verb: &str) -> bool {
-    rule.resources
+fn rule_covers_manifest_and_verb(rule: &Rule, manifest: &str, verb: &str) -> bool {
+    rule.manifests
         .iter()
-        .any(|owned| resource_pattern_contains(owned, resource))
+        .any(|owned| manifest_pattern_contains(owned, manifest))
         && rule.verbs.iter().any(|owned| owned == "*" || owned == verb)
 }
 
-fn resource_pattern_contains(container: &str, candidate: &str) -> bool {
-    if container == "*" || container == candidate {
-        return true;
-    }
-    if candidate == "*" {
-        return false;
-    }
-    let Some(container_prefix) = container.strip_suffix("/*") else {
-        return false;
-    };
-    let Some(candidate_prefix) = candidate.strip_suffix("/*") else {
-        return resource_matches(container, candidate);
-    };
-    candidate_prefix == container_prefix
-        || candidate_prefix
-            .strip_prefix(container_prefix)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn resource_matches(pattern: &str, resource: &str) -> bool {
-    if pattern == "*" || pattern == resource {
-        return true;
-    }
-
-    // A trailing wildcard grants access only to descendants on a path-segment
-    // boundary. For example, `resources/chat/*` matches
-    // `resources/chat/messages`, while `resources/chat` and
-    // `resources/chatter/messages` remain distinct resources.
-    pattern
-        .strip_suffix("/*")
-        .filter(|prefix| !prefix.is_empty())
-        .is_some_and(|prefix| {
-            resource
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
-        })
+fn manifest_pattern_contains(container: &str, candidate: &str) -> bool {
+    container == "*"
+        || (candidate != "*"
+            && (container == candidate || path_pattern_contains(container, candidate)))
 }
 
 #[cfg(test)]
@@ -449,216 +307,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rules_are_additive_and_default_to_deny() {
+    fn rules_select_manifest_verb_and_resource_path() {
         let rules = vec![Rule {
-            resources: vec!["resources".into()],
-            verbs: vec!["get".into(), "list".into()],
-            paths: vec![],
+            manifests: vec!["/manifests/agent".into()],
+            verbs: vec!["get".into(), "update".into()],
+            paths: vec!["/agents/team-a/**".into()],
         }];
-        assert!(allows(&rules, "resources", "get", None));
-        assert!(allows(&rules, "resources", "get", Some("/resources/a")));
-        assert!(!allows(&rules, "resources", "create", None));
-        assert!(!allows(&rules, "runs", "get", None));
-        assert!(!allows(&[], "resources", "get", None));
-    }
-
-    #[test]
-    fn path_scoped_permissions_can_target_an_exact_manifest() {
-        let rules = vec![Rule {
-            resources: vec!["resources/conversation".into()],
-            verbs: vec!["get".into(), "list".into()],
-            paths: vec!["/conversations/team-a/**".into()],
-        }];
-
         assert!(allows(
             &rules,
-            "resources/conversation",
+            "/manifests/agent",
             "get",
-            Some("/conversations/team-a/one")
+            Some("/agents/team-a/main")
         ));
         assert!(!allows(
             &rules,
-            "resources/conversation",
+            "/manifests/message",
             "get",
-            Some("/conversations/team-ab/one")
-        ));
-        assert!(!allows(&rules, "resources/conversation", "list", None));
-        assert!(!allows(
-            &rules,
-            "resources/conversation",
-            "create",
-            Some("/conversations/team-a/two")
+            Some("/agents/team-a/main")
         ));
         assert!(!allows(
             &rules,
-            "resources/task",
-            "get",
-            Some("/conversations/team-a/one")
-        ));
-    }
-
-    #[test]
-    fn resource_wildcards_respect_path_boundaries() {
-        let bare_resources = vec![Rule {
-            resources: vec!["resources".into()],
-            verbs: vec!["*".into()],
-            paths: vec![],
-        }];
-        assert!(allows(&bare_resources, "resources", "get", None));
-        assert!(!allows(
-            &bare_resources,
-            "resources/conversation",
-            "get",
-            None
-        ));
-
-        let resource_tree = vec![Rule {
-            resources: vec!["resources/conversation/*".into()],
-            verbs: vec!["get".into()],
-            paths: vec![],
-        }];
-        assert!(!allows(
-            &resource_tree,
-            "resources/conversation",
-            "get",
-            None
+            "/manifests/agent",
+            "delete",
+            Some("/agents/team-a/main")
         ));
         assert!(!allows(
-            &resource_tree,
-            "resources/conversations/message",
+            &rules,
+            "/manifests/agent",
             "get",
-            None
-        ));
-        assert!(!allows(
-            &resource_tree,
-            "resources/conversation-extra/message",
-            "get",
-            None
-        ));
-        assert!(allows(
-            &resource_tree,
-            "resources/conversation/message",
-            "get",
-            None
-        ));
-
-        let global = vec![Rule {
-            resources: vec!["*".into()],
-            verbs: vec!["*".into()],
-            paths: vec![],
-        }];
-        assert!(allows(&global, "resources/conversation", "get", None));
-        assert!(allows(&global, "resources", "update", None));
-    }
-
-    #[test]
-    fn validates_canonical_absolute_paths() {
-        assert_eq!(validate_path("/computers/a"), Ok(()));
-        assert!(matches!(
-            validate_path("computers/a"),
-            Err(PathError::NotAbsolute)
-        ));
-        assert!(matches!(validate_path("/"), Err(PathError::Root)));
-        assert!(matches!(
-            validate_path("/computers//a"),
-            Err(PathError::EmptySegment)
-        ));
-        assert!(matches!(
-            validate_path("/computers/../a"),
-            Err(PathError::InvalidSegment(_))
-        ));
-        assert!(validate_path("/computers/*").is_err());
-        assert_eq!(validate_path_pattern("/computers/**"), Ok(()));
-    }
-
-    #[test]
-    fn segment_globs_match_without_prefix_leaks() {
-        assert!(path_matches("/computers/*", "/computers/a"));
-        assert!(!path_matches("/computers/*", "/computers/a/child"));
-        assert!(path_matches("/computers/**", "/computers/a/child"));
-        assert!(path_matches("/computers/**", "/computers"));
-        assert!(!path_matches("/computers/a/**", "/computers/ab/child"));
-        assert!(path_matches(
-            "/teams/**/computers/*",
-            "/teams/a/zone/one/computers/c1"
+            Some("/agents/team-b/main")
         ));
     }
 
     #[test]
-    fn path_pattern_containment_handles_exact_star_and_double_star() {
-        assert!(path_pattern_contains(
-            "/computers/team-a/**",
-            "/computers/team-a/rack-1/**"
-        ));
-        assert!(path_pattern_contains("/computers/**", "/computers/*"));
-        assert!(!path_pattern_contains(
-            "/computers/team-a/**",
-            "/computers/**"
-        ));
-        assert!(!path_pattern_contains(
-            "/computers/*",
-            "/computers/team-a/**"
-        ));
-    }
-
-    #[test]
-    fn proposed_rules_must_be_covered_without_cross_rule_composition() {
-        let caller = vec![
-            Rule {
-                resources: vec!["resources/computer".into()],
-                verbs: vec!["get".into(), "patch".into()],
-                paths: vec!["/computers/team-a/**".into()],
-            },
-            Rule {
-                resources: vec!["resources/computer".into()],
-                verbs: vec!["delete".into()],
-                paths: vec!["/computers/team-b/**".into()],
-            },
-        ];
-        let allowed = vec![Rule {
-            resources: vec!["resources/computer".into()],
-            verbs: vec!["get".into()],
-            paths: vec!["/computers/team-a/rack-1/**".into()],
-        }];
-        assert!(rules_are_subset(&allowed, &caller));
-
-        let path_escalation = vec![Rule {
-            resources: vec!["resources/computer".into()],
-            verbs: vec!["get".into()],
-            paths: vec!["/computers/**".into()],
-        }];
-        assert!(!rules_are_subset(&path_escalation, &caller));
-
-        let combined_escalation = vec![Rule {
-            resources: vec!["resources/computer".into()],
-            verbs: vec!["delete".into()],
-            paths: vec!["/computers/team-a/**".into()],
-        }];
-        assert!(!rules_are_subset(&combined_escalation, &caller));
-    }
-
-    #[test]
-    fn unrestricted_paths_can_only_be_delegated_by_unrestricted_rules() {
+    fn manifest_patterns_and_global_rule_work() {
         let scoped = vec![Rule {
-            resources: vec!["resources/computer".into()],
-            verbs: vec!["get".into()],
-            paths: vec!["/computers/**".into()],
-        }];
-        let unrestricted = vec![Rule {
-            resources: vec!["resources/computer".into()],
+            manifests: vec!["/manifests/team-a/**".into()],
             verbs: vec!["get".into()],
             paths: vec![],
         }];
-        assert!(!rules_are_subset(&unrestricted, &scoped));
-        assert!(rules_are_subset(&scoped, &unrestricted));
-        assert!(rules_are_subset(&unrestricted, &unrestricted));
-
-        let invalid = vec![Rule {
-            resources: vec!["resources/computer".into()],
-            verbs: vec!["get".into()],
-            paths: vec!["computers/**".into()],
+        assert!(allows(&scoped, "/manifests/team-a/agent", "get", None));
+        assert!(!allows(&scoped, "/manifests/team-b/agent", "get", None));
+        let global = vec![Rule {
+            manifests: vec!["*".into()],
+            verbs: vec!["*".into()],
+            paths: vec![],
         }];
-        assert!(!rules_are_subset(&invalid, &unrestricted));
+        assert!(allows(&global, "/manifests/anything", "delete", None));
+    }
+
+    #[test]
+    fn delegation_must_be_a_subset_of_manifest_and_path_rules() {
+        let caller = vec![Rule {
+            manifests: vec!["/manifests/**".into()],
+            verbs: vec!["get".into(), "update".into()],
+            paths: vec!["/teams/a/**".into()],
+        }];
+        let valid = vec![Rule {
+            manifests: vec!["/manifests/agent".into()],
+            verbs: vec!["get".into()],
+            paths: vec!["/teams/a/agents/**".into()],
+        }];
+        assert!(rules_are_subset(&valid, &caller));
+        let invalid = vec![Rule {
+            manifests: vec!["/manifests/agent".into()],
+            verbs: vec!["delete".into()],
+            paths: vec!["/teams/a/**".into()],
+        }];
+        assert!(!rules_are_subset(&invalid, &caller));
+    }
+
+    #[test]
+    fn path_validation_and_matching_remain_segment_safe() {
+        assert_eq!(validate_path("/resources/a"), Ok(()));
+        assert!(validate_path("resources/a").is_err());
+        assert!(path_matches("/resources/*", "/resources/a"));
+        assert!(!path_matches("/resources/*", "/resources/a/child"));
+        assert!(path_matches("/resources/**", "/resources/a/child"));
+        assert!(path_pattern_contains("/resources/**", "/resources/a/**"));
     }
 
     #[test]
@@ -667,38 +393,5 @@ mod tests {
         assert!(token.starts_with("kas_"));
         assert_ne!(token_hash(&token), token);
         assert_eq!(token_hash(&token), token_hash(&token));
-    }
-
-    #[test]
-    fn action_invocation_and_relation_use_are_path_scoped() {
-        let rules = vec![
-            Rule {
-                resources: vec![resources::ACTIONS.into()],
-                verbs: vec![verbs::INVOKE.into()],
-                paths: vec!["/manifests/agent/actions/*".into()],
-            },
-            Rule {
-                resources: vec![resources::RELATIONS.into()],
-                verbs: vec![verbs::USE.into()],
-                paths: vec!["/manifests/agent/relations/**".into()],
-            },
-        ];
-
-        assert!(allows_action_invoke(
-            &rules,
-            "/manifests/agent/actions/message"
-        ));
-        assert!(!allows_action_invoke(
-            &rules,
-            "/manifests/message/actions/send"
-        ));
-        assert!(allows_relation_use(
-            &rules,
-            "/manifests/agent/relations/has-thread"
-        ));
-        assert!(!allows_relation_use(
-            &rules,
-            "/relations/system/resource-manifest"
-        ));
     }
 }

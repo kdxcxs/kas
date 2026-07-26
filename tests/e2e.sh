@@ -21,6 +21,7 @@ if (($# > 0)); then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-e2e.XXXXXX")"
 API_PID=""
 API_LOG="$E2E_DIR/kas-api.log"
@@ -38,7 +39,7 @@ failed() {
   echo "E2E failed at line $line" >&2
   if [[ -f "$API_LOG" ]]; then
     echo "kas-api output:" >&2
-    sed -n '1,240p' "$API_LOG" >&2
+    tail -n 240 "$API_LOG" >&2
   fi
 }
 
@@ -155,7 +156,12 @@ curl() {
 }
 
 cd "$ROOT"
-cargo build --workspace
+cargo build -j 1 \
+  -p kas-api \
+  -p kas-builtin-driver \
+  -p kas-migrate \
+  -p kas-admin \
+  -p kas-test-driver
 
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
@@ -164,10 +170,10 @@ export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
 
-target/debug/kas-migrate
-ADMIN_TOKEN="$(target/debug/kas-admin bootstrap e2e-admin)"
+"$TARGET_DIR/debug/kas-migrate"
+ADMIN_TOKEN="$("$TARGET_DIR/debug/kas-admin" bootstrap e2e-admin)"
 
-target/debug/kas-api >"$API_LOG" 2>&1 &
+"$TARGET_DIR/debug/kas-api" >"$API_LOG" 2>&1 &
 API_PID="$!"
 
 for _ in $(seq 1 100); do
@@ -178,116 +184,225 @@ for _ in $(seq 1 100); do
 done
 curl --fail --silent "$API/health" | jq -e '.ok == true' >/dev/null
 
-curl --fail --silent \
+BUILTIN_DRIVER_PATH="/builtin/link/driver"
+BUILTIN_DRIVER=""
+for _ in $(seq 1 200); do
+  BUILTIN_DRIVER="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$BUILTIN_DRIVER_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$BUILTIN_DRIVER" | jq -r '.status.metadata.state')" == "running" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$BUILTIN_DRIVER" | jq -e '
+  .metadata.manifest == "/builtin/driver"
+  and .metadata.state == "running"
+  and .status.metadata.state == "running"
+  and .status.spec == .spec
+  and (.spec.manages | sort) == ["/builtin/link", "/builtin/relation"]
+' >/dev/null
+
+[[ "$(
+  curl --silent --output "$E2E_DIR/removed-relation-driver.json" --write-out "%{http_code}" \
+    --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "path=/builtin/relation/driver" \
+    "$API/resources/by-path"
+)" == "404" ]]
+
+curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$API/manifests" |
+  --data-urlencode "path=/builtin/manifest" \
+  "$API/resources/by-path" |
   jq -e '
-    ([.[].path] | sort) == ([
-      "/manifests/system/auth",
-      "/manifests/system/core"
-    ] | sort)
+    .metadata.path == "/builtin/manifest"
+    and .metadata.manifest == "/builtin/manifest"
+    and .spec.version == 1
+  ' >/dev/null
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/manifest" \
+  "$API/resources" |
+  jq -e '
+    ([.[].metadata.path] | index("/builtin/manifest")) != null
+    and ([.[].metadata.path] | index("/builtin/driver")) != null
+    and ([.[].metadata.path] | index("/builtin/run")) != null
+    and ([.[].metadata.path] | index("/builtin/link")) != null
   ' >/dev/null
 
 PACKAGE_ROOT="$E2E_DIR/package"
 mkdir -p "$PACKAGE_ROOT/driver/bin"
 cp tests/fixtures/echo/manifest.json "$PACKAGE_ROOT/manifest.json"
-cp target/debug/kas-test-driver "$PACKAGE_ROOT/driver/bin/kas-test-driver"
+cp -R tests/fixtures/echo/resources "$PACKAGE_ROOT/resources"
+cp "$TARGET_DIR/debug/kas-test-driver" "$PACKAGE_ROOT/driver/bin/kas-test-driver"
 chmod 755 "$PACKAGE_ROOT/driver/bin/kas-test-driver"
-tar -C "$PACKAGE_ROOT" -cf "$E2E_DIR/echo.kas" manifest.json driver
+COPYFILE_DISABLE=1 tar -C "$PACKAGE_ROOT" -cf "$E2E_DIR/echo.kas" manifest.json resources driver
 
-MANIFEST="$(
+PACKAGE="$(
   curl --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/vnd.kas.manifest+tar" \
     --data-binary "@$E2E_DIR/echo.kas" \
-    "$API/manifests"
+    "$API/packages"
 )"
-echo "$MANIFEST" | jq -e '
-  .path == "/manifests/echo"
-  and .driver.path == "/manifests/echo/driver"
-  and (.package_digest | startswith("sha256:"))
+echo "$PACKAGE" | jq -e '
+  (.metadata.path | startswith("/packages/sha256/"))
+  and .metadata.manifest == "/builtin/package"
+  and (.spec.digest | startswith("sha256:"))
+  and .spec.size_bytes > 0
+  and .spec.media_type == "application/vnd.kas.manifest+tar"
+  and .spec == .status.spec
 ' >/dev/null || {
-  echo "Manifest installation failed: $MANIFEST" >&2
+  echo "Package installation failed: $PACKAGE" >&2
   false
 }
+PACKAGE_PATH="$(echo "$PACKAGE" | jq -r '.metadata.path')"
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=manifest" \
-  --data-urlencode "source_path=/manifests/echo" \
-  "$API/links" |
+  --data-urlencode "path=/manifests/echo" \
+  "$API/resources/by-path" |
   jq -e '
-    length == 5
-    and ([.[].relation_path] | unique) == [
-      "/manifests/system/core/relations/manifest-member"
-    ]
-    and ([.[].target.kind] | sort) == ([
-      "action",
-      "driver",
-      "role",
-      "role_binding",
-      "service_account"
-    ] | sort)
+    .metadata.path == "/manifests/echo"
+    and .metadata.manifest == "/builtin/manifest"
+    and (.spec | has("package_digest") | not)
+  ' >/dev/null
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e '
+    [.[] | select(
+      .spec.source == "/manifests/echo"
+      and (.spec.target | startswith("/manifests/echo/"))
+    )] | length == 6
+  ' >/dev/null
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e --arg package "$PACKAGE_PATH" '
+    [.[] | select(
+      .spec.relation == "/builtin/relations/package-manifest"
+      and .spec.source == $package
+      and .spec.target == "/manifests/echo"
+    )] | length == 1
   ' >/dev/null
 
 DRIVER_PATH="/manifests/echo/driver"
-DRIVER_URL="$API/drivers/by-path?path=$(jq -rn --arg value "$DRIVER_PATH" '$value | @uri')"
-
-curl --fail --silent --get \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=driver" \
-  --data-urlencode "source_path=$DRIVER_PATH" \
-  "$API/links" |
-  jq -e '
-    length == 1
-    and .[0].relation_path == "/manifests/system/core/relations/driver-service-account"
-    and .[0].target.kind == "service_account"
-    and .[0].target.path == "/manifests/echo/service-accounts/driver"
-  ' >/dev/null
-
-curl --fail --silent --get \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=role_binding" \
-  --data-urlencode "source_path=/manifests/echo/role-bindings/driver" \
-  "$API/links" |
-  jq -e '
-    length == 2
-    and ([.[].relation_path] | sort) == ([
-      "/manifests/system/auth/relations/role-binding-role",
-      "/manifests/system/auth/relations/role-binding-subject"
-    ] | sort)
-    and ([.[].target.kind] | sort) == ([
-      "role",
-      "service_account"
-    ] | sort)
-  ' >/dev/null
 
 DRIVER=""
 for _ in $(seq 1 200); do
   DRIVER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/manifests/echo" \
-      "$API/manifests/driver"
+      --data-urlencode "path=$DRIVER_PATH" \
+      "$API/resources/by-path"
   )"
-  if [[ "$(echo "$DRIVER" | jq -r '.state')" == "ready" ]]; then
+  if [[ "$(echo "$DRIVER" | jq -r '.status.metadata.state')" == "running" ]]; then
     break
   fi
   sleep 0.05
 done
 echo "$DRIVER" | jq -e '
-  .path == "/manifests/echo/driver"
-  and .desired_state == "running"
-  and .state == "ready"
-  and .process_id != null
+  .metadata.path == "/manifests/echo/driver"
+  and .metadata.manifest == "/builtin/driver"
+  and .metadata.state == "running"
+  and .status.metadata.state == "running"
+  and .status.spec == .spec
+' >/dev/null
+
+# The single built-in Relationship Driver owns Relation status as well as Link
+# status, even though its Driver Resource belongs to the Link package.
+PEER_RELATION=""
+for _ in $(seq 1 200); do
+  PEER_RELATION="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/manifests/echo/relations/peer" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$PEER_RELATION" | jq -r '.status.metadata.state')" == "available" ]] &&
+     [[ "$(echo "$PEER_RELATION" | jq -r '.status.metadata["[kas]"].observed["/builtin/link/driver"].resource_revision // empty')" == "$(echo "$PEER_RELATION" | jq -r '.metadata["[kas]"].revision')" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$PEER_RELATION" | jq -e '
+  .metadata.manifest == "/builtin/relation"
+  and .status.metadata.state == "available"
+  and .status.spec == .spec
+  and .metadata["[kas]"].observed["/builtin/link/driver"] == .status.metadata["[kas]"].observed["/builtin/link/driver"]
+  and .status.metadata["[kas]"].observed["/builtin/link/driver"].resource_revision == .metadata["[kas]"].revision
+' >/dev/null
+
+# A newly registered Driver must backfill Resources that already match its
+# watches. The admin User existed before the Echo package was installed.
+ADMIN_USER=""
+for _ in $(seq 1 200); do
+  ADMIN_USER="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/users/e2e-admin" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$ADMIN_USER" | jq -r '.status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision // empty')" == "$(echo "$ADMIN_USER" | jq -r '.metadata["[kas]"].revision')" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$ADMIN_USER" | jq -e '
+  .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
+  and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
+  and .status.metadata["[kas]"].observed["/manifests/echo/driver"].driver_revision == 0
+' >/dev/null
+
+# An existing wildcard watch must also include Resources from a Manifest that
+# is registered later in the same package transaction.
+INTEGRATION_ROOT="$E2E_DIR/integration-package"
+mkdir -p "$INTEGRATION_ROOT"
+cp -R tests/fixtures/integration/. "$INTEGRATION_ROOT/"
+COPYFILE_DISABLE=1 tar -C "$INTEGRATION_ROOT" -cf "$E2E_DIR/integration.kas" manifest.json resources
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/vnd.kas.manifest+tar" \
+  --data-binary "@$E2E_DIR/integration.kas" \
+  "$API/packages" >/dev/null
+
+INTEGRATION_RESOURCE=""
+for _ in $(seq 1 200); do
+  INTEGRATION_RESOURCE="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/resources/integrations/demo" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$INTEGRATION_RESOURCE" | jq -r '.status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision // empty')" == "$(echo "$INTEGRATION_RESOURCE" | jq -r '.metadata["[kas]"].revision')" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$INTEGRATION_RESOURCE" | jq -e '
+  .metadata.manifest == "/manifests/integration-demo"
+  and .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
+  and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
 ' >/dev/null
 
 RESOURCE_PATH="/resources/e2e/echo"
 RESOURCE_PAYLOAD="$(
   jq -n --arg resource "$RESOURCE_PATH" '{
-    path: $resource,
-    manifest: "/manifests/echo",
-    name: "echo",
+    metadata: {
+      path: $resource,
+      manifest: "/manifests/echo",
+      name: "echo"
+    },
     spec: {label: "fixture"}
   }'
 )"
@@ -297,9 +412,9 @@ curl --fail --silent \
   -d "$RESOURCE_PAYLOAD" \
   "$API/resources" |
   jq -e '
-    .path == "/resources/e2e/echo"
-    and .spec.state == "available"
-    and .status.state == "pending"
+    .metadata.path == "/resources/e2e/echo"
+    and .metadata.state == "available"
+    and .status.metadata.state == "pending"
   ' >/dev/null
 
 RESOURCE=""
@@ -310,26 +425,110 @@ for _ in $(seq 1 200); do
       --data-urlencode "path=$RESOURCE_PATH" \
       "$API/resources/by-path"
   )"
-  if [[ "$(echo "$RESOURCE" | jq -r '.status.state')" == "available" ]]; then
+  if [[ "$(echo "$RESOURCE" | jq -r '.status.metadata.state')" == "available" ]]; then
     break
   fi
   sleep 0.05
 done
-echo "$RESOURCE" | jq -e '.spec == .status and .status.state == "available"' >/dev/null
+echo "$RESOURCE" | jq -e '
+  .spec == .status.spec
+  and .status.metadata.state == "available"
+  and .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
+  and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
+' >/dev/null
 
-curl --fail --silent --get \
+LINK_PATH="/links/e2e/echo-self"
+curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "path=$RESOURCE_PATH" \
-  --data-urlencode "include=relations" \
-  "$API/resources/by-path" |
-  jq -e '
-    .path == "/resources/e2e/echo"
-    and (.links | length) == 1
-    and .links[0].relation_path == "/manifests/system/core/relations/resource-manifest"
-    and (.related | length) == 1
-    and .related[0].kind == "manifest"
-    and .related[0].value.path == "/manifests/echo"
-  ' >/dev/null
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n --arg path "$LINK_PATH" --arg resource "$RESOURCE_PATH" '{
+      metadata: {
+        path: $path,
+        manifest: "/builtin/link",
+        name: "echo-self"
+      },
+      spec: {
+        relation: "/manifests/echo/relations/peer",
+        source: $resource,
+        target: $resource,
+        metadata: {}
+      }
+    }'
+  )" \
+  "$API/resources" >/dev/null
+LINK=""
+for _ in $(seq 1 200); do
+  LINK="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$LINK_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$LINK" | jq -r '.status.metadata.state')" == "available" ]] &&
+     [[ "$(echo "$LINK" | jq -r '.status.metadata["[kas]"].observed["/builtin/link/driver"].resource_revision // empty')" == "$(echo "$LINK" | jq -r '.metadata["[kas]"].revision')" ]] &&
+     [[ "$(echo "$LINK" | jq -r '.status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision // empty')" == "$(echo "$LINK" | jq -r '.metadata["[kas]"].revision')" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$LINK" | jq -e '
+  .metadata.manifest == "/builtin/link"
+  and .status.metadata.state == "available"
+  and .status.spec == .spec
+  and .metadata["[kas]"].observed["/builtin/link/driver"] == .status.metadata["[kas]"].observed["/builtin/link/driver"]
+  and .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
+  and .status.metadata["[kas]"].observed["/builtin/link/driver"].resource_revision == .metadata["[kas]"].revision
+  and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
+' >/dev/null || {
+  echo "Link reconciliation failed: $LINK" >&2
+  false
+}
+
+INVALID_LINK_PATH="/links/e2e/invalid-target"
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n --arg path "$INVALID_LINK_PATH" --arg resource "$RESOURCE_PATH" '{
+      metadata: {
+        path: $path,
+        manifest: "/builtin/link",
+        name: "invalid-target"
+      },
+      spec: {
+        relation: "/manifests/echo/relations/peer",
+        source: $resource,
+        target: "/users/e2e-admin",
+        metadata: {}
+      }
+    }'
+  )" \
+  "$API/resources" >/dev/null
+INVALID_LINK=""
+for _ in $(seq 1 200); do
+  INVALID_LINK="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$INVALID_LINK_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$INVALID_LINK" | jq -r '.status.metadata.state')" == "invalid" ]] &&
+     [[ "$(echo "$INVALID_LINK" | jq -r '.status.metadata["[kas]"].observed["/builtin/link/driver"].resource_revision // empty')" == "$(echo "$INVALID_LINK" | jq -r '.metadata["[kas]"].revision')" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$INVALID_LINK" | jq -e '
+  .metadata.manifest == "/builtin/link"
+  and .status.metadata.state == "invalid"
+  and .status.spec == .spec
+  and .metadata["[kas]"].observed["/builtin/link/driver"] == .status.metadata["[kas]"].observed["/builtin/link/driver"]
+  and .status.metadata["[kas]"].observed["/builtin/link/driver"].resource_revision == .metadata["[kas]"].revision
+' >/dev/null || {
+  echo "Invalid Link reconciliation failed: $INVALID_LINK" >&2
+  false
+}
 
 REQUEST_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 RUN_PATH="$RESOURCE_PATH/runs/$REQUEST_ID"
@@ -338,20 +537,25 @@ RUN_PAYLOAD="$(
     --arg run "$RUN_PATH" \
     --arg request_id "$REQUEST_ID" \
     --arg resource "$RESOURCE_PATH" '{
-      path: $run,
-      request_id: $request_id,
-      resource: $resource,
-      action: "/manifests/echo/actions/echo",
-      input: {message: "hello from e2e"},
-      links: []
+      metadata: {
+        path: $run,
+        manifest: "/builtin/run",
+        name: $request_id
+      },
+      spec: {
+        request_id: $request_id,
+        resource: $resource,
+        action: "/manifests/echo/actions/echo",
+        input: {message: "hello from e2e"}
+      }
     }'
 )"
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$RUN_PAYLOAD" \
-  "$API/runs" |
-  jq -e '.status == "queued"' >/dev/null
+  "$API/resources" |
+  jq -e '.status.metadata.state == "queued"' >/dev/null
 
 RUN=""
 for _ in $(seq 1 200); do
@@ -359,31 +563,25 @@ for _ in $(seq 1 200); do
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       --data-urlencode "path=$RUN_PATH" \
-      "$API/runs/by-path"
+      "$API/resources/by-path"
   )"
-  if [[ "$(echo "$RUN" | jq -r '.status')" == "succeeded" ]]; then
+  if [[ "$(echo "$RUN" | jq -r '.status.metadata.state')" == "succeeded" ]]; then
     break
   fi
   sleep 0.05
 done
 echo "$RUN" | jq -e '
-  .status == "succeeded"
-  and .output.echo.message == "hello from e2e"
-  and .driver_generation == 1
+  .status.metadata.state == "succeeded"
+  and .spec == .status.spec
+  and .spec.output.echo.message == "hello from e2e"
 ' >/dev/null
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "source_kind=run" \
-  --data-urlencode "source_path=$RUN_PATH" \
-  "$API/links" |
-  jq -e '
-    length == 3
-    and ([.[].relation_path] | sort) == ([
-      "/manifests/system/core/relations/run-action",
-      "/manifests/system/core/relations/run-driver",
-      "/manifests/system/core/relations/run-resource"
-    ] | sort)
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e --arg run "$RUN_PATH" '
+    [.[] | select(.spec.source == $run)] | length == 3
   ' >/dev/null
 
 RESOURCE_REVISION="$(
@@ -391,7 +589,7 @@ RESOURCE_REVISION="$(
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     --data-urlencode "path=$RESOURCE_PATH" \
     "$API/resources/by-path" |
-    jq -r '.revision'
+    jq -r '.metadata["[kas]"].revision'
 )"
 curl --fail --silent --request DELETE \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -399,7 +597,7 @@ curl --fail --silent --request DELETE \
   --data-urlencode "path=$RESOURCE_PATH" \
   --data-urlencode "expected_revision=$RESOURCE_REVISION" \
   "$API/resources/by-path" |
-  jq -e '.spec.state == "deleted"' >/dev/null
+  jq -e '.metadata.state == "deleted"' >/dev/null
 
 for _ in $(seq 1 200); do
   RESOURCE_STATUS="$(
@@ -416,39 +614,98 @@ for _ in $(seq 1 200); do
 done
 [[ "$RESOURCE_STATUS" == "404" ]]
 
+for LINK_TO_DELETE in "$LINK_PATH" "$INVALID_LINK_PATH"; do
+  LINK_STATUS=""
+  for _ in $(seq 1 200); do
+    LINK_STATUS="$(
+      curl --silent --output "$E2E_DIR/deleted-link.json" --write-out "%{http_code}" \
+        --get \
+        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        --data-urlencode "path=$LINK_TO_DELETE" \
+        "$API/resources/by-path"
+    )"
+    if [[ "$LINK_STATUS" == "404" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  [[ "$LINK_STATUS" == "404" ]] || {
+    echo "Link cleanup failed for $LINK_TO_DELETE" >&2
+    cat "$E2E_DIR/deleted-link.json" >&2
+    false
+  }
+done
+
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$RESOURCE_PAYLOAD" \
   "$API/resources" |
   jq -e '
-    .path == "/resources/e2e/echo"
-    and .revision == 0
-    and .status.state == "pending"
+    .metadata.path == "/resources/e2e/echo"
+    and .metadata["[kas]"].revision == 0
+    and .status.metadata.state == "pending"
   ' >/dev/null
 
-curl --fail --silent --request PATCH \
+curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"state":"stopping"}' \
-  "$DRIVER_URL" >/dev/null
+  -d '{"metadata":{"path":"/users/e2e-viewer","manifest":"/builtin/user","name":"e2e-viewer"},"spec":{"disabled":false}}' \
+  "$API/resources" >/dev/null
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"metadata":{"path":"/roles/e2e-viewer","manifest":"/builtin/role","name":"e2e-viewer"},"spec":{"rules":[{"manifests":["/manifests/echo"],"verbs":["get"],"paths":["/resources/e2e/**"]}]}}' \
+  "$API/resources" >/dev/null
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"metadata":{"path":"/role-bindings/e2e-viewer","manifest":"/builtin/role-binding","name":"e2e-viewer"},"spec":{"role":"/roles/e2e-viewer","subjects":["/users/e2e-viewer"]}}' \
+  "$API/resources" >/dev/null
+VIEWER_TOKEN="$(
+  curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"subject":"/users/e2e-viewer"}' \
+    "$API/credentials/issue" |
+    jq -r '.token'
+)"
+curl --fail --silent --get \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  --data-urlencode "path=$RESOURCE_PATH" \
+  "$API/resources/by-path" |
+  jq -e '.metadata.path == "/resources/e2e/echo"' >/dev/null
+RBAC_STATUS="$(
+  curl --silent --output "$E2E_DIR/rbac-denied.json" --write-out "%{http_code}" \
+    --get \
+    -H "Authorization: Bearer $VIEWER_TOKEN" \
+    --data-urlencode "path=$DRIVER_PATH" \
+    "$API/resources/by-path"
+)"
+[[ "$RBAC_STATUS" == "403" ]]
+
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"path\":\"$DRIVER_PATH\",\"state\":\"stopped\"}" \
+  "$API/drivers/control" >/dev/null
 
 for _ in $(seq 1 100); do
   DRIVER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       --data-urlencode "path=$DRIVER_PATH" \
-      "$API/drivers/by-path"
+      "$API/resources/by-path"
   )"
-  if [[ "$(echo "$DRIVER" | jq -r '.state')" == "stopped" ]]; then
+  if [[ "$(echo "$DRIVER" | jq -r '.status.metadata.state')" == "stopped" ]]; then
     break
   fi
   sleep 0.05
 done
 echo "$DRIVER" | jq -e '
-  .desired_state == "stopped"
-  and .state == "stopped"
-  and .process_id == null
+  .metadata.state == "stopped"
+  and .status.metadata.state == "stopped"
+  and .status.spec == .spec
 ' >/dev/null
 
 echo "KAS end-to-end test passed"

@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "path": "./relations/peer",
+    "manifest": "/builtin/relation",
+    "name": "peer"
+  },
+  "spec": {
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object"
+    }
+  }
+}

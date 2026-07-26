@@ -1,0 +1,22 @@
+{
+  "metadata": {
+    "path": "/builtin/roles/admin",
+    "manifest": "/builtin/role",
+    "name": "system:admin"
+  },
+  "spec": {
+    "description": "Full system access",
+    "system_role": "admin",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "*"
+        ],
+        "paths": []
+      }
+    ]
+  }
+}

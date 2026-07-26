@@ -1,0 +1,15 @@
+{
+  "path": "/builtin/service-account",
+  "manifest": "/builtin/manifest",
+  "name": "service-account",
+  "version": 1,
+  "description": "Defines ServiceAccount Resources",
+  "resource_schema": {
+    "type": "object"
+  },
+  "states": [
+    "disabled"
+  ],
+  "default_state": "available",
+  "initial_state": "available"
+}

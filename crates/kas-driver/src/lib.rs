@@ -1,10 +1,8 @@
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use kas_core::{
-    Action, Driver as DriverRecord, DriverExecution, DriverState, Mutation, ReconcileObject,
-    Resource, Run, RunResult,
-};
+use kas_core::{DriverExecution, DriverState, Mutation, Resource, RunResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -24,16 +22,17 @@ pub enum DriverError {
     Execution(String),
 }
 
+#[async_trait]
 pub trait Driver: Send + Sync {
     fn name(&self) -> &str;
 
-    fn reconcile(&self, object: &ReconcileObject) -> Result<Vec<Mutation>, DriverError>;
+    async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError>;
 
-    fn execute(
+    async fn execute(
         &self,
         resource: &Resource,
-        action: &Action,
-        run: &Run,
+        action: &Resource,
+        run: &Resource,
     ) -> Result<DriverExecution, DriverError>;
 }
 
@@ -45,17 +44,17 @@ pub trait Driver: Send + Sync {
 pub enum ServerMessage {
     Hello {
         delivery_id: Uuid,
-        driver: DriverRecord,
+        driver: Resource,
     },
     Reconcile {
         delivery_id: Uuid,
-        object: ReconcileObject,
+        resource: Resource,
     },
     Run {
         delivery_id: Uuid,
-        run: Box<Run>,
+        run: Resource,
         resource: Resource,
-        action: Action,
+        action: Resource,
     },
     Stop {
         delivery_id: Uuid,
@@ -240,12 +239,12 @@ impl<D: Driver> DriverRuntime<D> {
                 delivery_id,
                 driver,
             } => {
-                if driver.generation != self.generation {
-                    return Err(SessionError::Superseded(driver.generation));
-                }
                 self.send(socket, ClientMessage::Ack { delivery_id })
                     .await?;
-                if driver.state == DriverState::Stopping {
+                let state: DriverState =
+                    serde_json::from_value(serde_json::Value::String(driver.status.metadata.state))
+                        .map_err(|error| SessionError::Other(error.into()))?;
+                if state == DriverState::Stopping {
                     self.send(
                         socket,
                         ClientMessage::Stopped {
@@ -258,15 +257,15 @@ impl<D: Driver> DriverRuntime<D> {
             }
             ServerMessage::Reconcile {
                 delivery_id,
-                object,
+                resource,
             } => {
                 self.send(socket, ClientMessage::Ack { delivery_id })
                     .await?;
-                let operations = match self.implementation.reconcile(&object) {
+                let operations = match self.implementation.reconcile(&resource).await {
                     Ok(operations) => operations,
                     Err(error) => {
                         eprintln!("Driver reconciliation failed and will be retried: {error}");
-                        Vec::new()
+                        return Err(SessionError::Other(anyhow::anyhow!(error.to_string())));
                     }
                 };
                 self.send(
@@ -289,7 +288,7 @@ impl<D: Driver> DriverRuntime<D> {
                 self.send(socket, ClientMessage::Ack { delivery_id })
                     .await?;
                 let (result, mut mutations) =
-                    match self.implementation.execute(&resource, &action, &run) {
+                    match self.implementation.execute(&resource, &action, &run).await {
                         Ok(execution) => (
                             RunResult::Succeeded {
                                 output: execution.output,
@@ -304,7 +303,7 @@ impl<D: Driver> DriverRuntime<D> {
                         ),
                     };
                 mutations.push(Mutation::CompleteRun {
-                    run_path: run.path,
+                    run_path: run.path.clone(),
                     result,
                 });
                 self.send(
@@ -405,20 +404,21 @@ mod tests {
 
     struct Noop;
 
+    #[async_trait]
     impl Driver for Noop {
         fn name(&self) -> &str {
             "noop"
         }
 
-        fn reconcile(&self, _: &ReconcileObject) -> Result<Vec<Mutation>, DriverError> {
+        async fn reconcile(&self, _: &Resource) -> Result<Vec<Mutation>, DriverError> {
             Ok(Vec::new())
         }
 
-        fn execute(
+        async fn execute(
             &self,
             _: &Resource,
-            _: &Action,
-            _: &Run,
+            _: &Resource,
+            _: &Resource,
         ) -> Result<DriverExecution, DriverError> {
             Ok(Value::Null.into())
         }

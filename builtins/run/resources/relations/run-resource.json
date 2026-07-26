@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "path": "/builtin/relations/run-resource",
+    "manifest": "/builtin/relation",
+    "name": "run-resource"
+  },
+  "spec": {
+    "role": "run_resource",
+    "sources": [
+      {
+        "manifest": "/builtin/run"
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "*"
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object"
+    }
+  }
+}

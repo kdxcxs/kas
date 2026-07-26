@@ -2,6 +2,7 @@
 members = [
     "apps/kas-admin",
     "apps/kas-api",
+    "apps/kas-builtin-driver",
     "apps/kas-migrate",
     "apps/kas-test-driver",
     "crates/kas-core",
@@ -18,6 +19,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 kas-core = { path = "crates/kas-core" }

@@ -1,0 +1,17 @@
+{
+  "path": "/builtin/action",
+  "manifest": "/builtin/manifest",
+  "name": "action",
+  "version": 1,
+  "description": "Defines executable Action Resources",
+  "resource_schema": {
+    "type": "object",
+    "required": [
+      "input_schema",
+      "output_schema"
+    ]
+  },
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available"
+}

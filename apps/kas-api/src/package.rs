@@ -2,10 +2,10 @@ use std::{
     collections::HashSet,
     fs,
     io::{Cursor, Read},
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
-use kas_core::{CreateManifest, ManifestDefinition};
+use kas_core::{DriverSpec, PackageDefinition, PackageExpansion, ResourceDefinition};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -14,14 +14,14 @@ const MANIFEST_FILE: &str = "manifest.json";
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledPackage {
     pub size_bytes: u64,
-    pub root: PathBuf,
-    pub manifest: CreateManifest,
+    pub expansion: PackageExpansion,
 }
 
-pub(crate) fn inspect(archive: &[u8]) -> anyhow::Result<CreateManifest> {
+pub(crate) fn inspect(archive: &[u8]) -> anyhow::Result<PackageExpansion> {
     let digest = format!("sha256:{}", hex_digest(archive));
     let mut tar = tar::Archive::new(Cursor::new(archive));
     let mut manifest_json = None;
+    let mut resource_definitions = Vec::new();
     let mut files = HashSet::new();
     for entry in tar.entries()? {
         let mut entry = entry?;
@@ -34,27 +34,58 @@ pub(crate) fn inspect(archive: &[u8]) -> anyhow::Result<CreateManifest> {
             );
         }
         if entry.header().entry_type().is_file() {
-            files.insert(path.clone());
+            if !files.insert(path.clone()) {
+                anyhow::bail!("package contains duplicate file: {}", path.display());
+            }
             if path == Path::new(MANIFEST_FILE) {
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
+                if manifest_json.is_some() {
+                    anyhow::bail!("package contains duplicate manifest.json");
+                }
                 manifest_json = Some(bytes);
+            } else if is_resource_definition_path(&path) {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes)?;
+                let resource: ResourceDefinition =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        anyhow::anyhow!("invalid Resource definition {}: {error}", path.display())
+                    })?;
+                resource_definitions.push(resource);
+            } else if !path.starts_with("driver") {
+                anyhow::bail!("unsupported package file: {}", path.display());
             }
         }
     }
-    let definition: ManifestDefinition = serde_json::from_slice(
+    let manifest = serde_json::from_slice(
         manifest_json
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("package must contain manifest.json at its root"))?,
     )?;
-    let manifest = definition.resolve(digest)?;
-    if let Some(driver) = &manifest.driver {
+    let expansion = PackageDefinition {
+        manifest,
+        resources: resource_definitions,
+    }
+    .expand(digest)?;
+    for resource in &expansion.resources {
+        if resource.manifest != "/builtin/driver" {
+            continue;
+        }
+        let driver: DriverSpec = serde_json::from_value(resource.spec.clone())?;
         let relative = normalized_package_relative("driver entrypoint", &driver.entrypoint)?;
         if !files.contains(Path::new(&relative)) {
             anyhow::bail!("driver entrypoint does not exist: {relative}");
         }
     }
-    Ok(manifest)
+    Ok(expansion)
+}
+
+fn is_resource_definition_path(path: &Path) -> bool {
+    path.starts_with("resources")
+        && path != Path::new("resources")
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "json")
 }
 
 pub(crate) fn install(data_dir: &Path, archive: &[u8]) -> anyhow::Result<InstalledPackage> {
@@ -68,7 +99,7 @@ pub(crate) fn install(data_dir: &Path, archive: &[u8]) -> anyhow::Result<Install
     fs::create_dir_all(final_root.parent().expect("package has a parent"))?;
 
     let result = (|| {
-        let manifest = inspect(archive)?;
+        let expansion = inspect(archive)?;
         unpack(archive, &staging_root)?;
 
         if final_root.exists() {
@@ -82,8 +113,7 @@ pub(crate) fn install(data_dir: &Path, archive: &[u8]) -> anyhow::Result<Install
         }
         Ok(InstalledPackage {
             size_bytes: archive.len() as u64,
-            root: final_root,
-            manifest,
+            expansion,
         })
     })();
 
@@ -157,33 +187,46 @@ mod tests {
     fn installs_and_resolves_relative_paths() {
         let manifest = serde_json::json!({
             "path": "/manifests/echo",
+            "manifest": "/builtin/manifest",
             "name": "echo",
             "version": 1,
             "description": "Echo",
             "resource_schema": {"type": "object"},
-            "actions": [{
+            "states": [],
+            "default_state": "available",
+            "initial_state": "available"
+        });
+        let action = serde_json::json!({
+            "metadata": {
                 "path": "./actions/echo",
-                "name": "echo",
+                "manifest": "/builtin/action",
+                "name": "echo"
+            },
+            "spec": {
                 "description": "Echo",
                 "input_schema": {},
                 "output_schema": {}
-            }],
-            "relations": [],
-            "driver": {
+            }
+        });
+        let account = serde_json::json!({
+            "metadata": {
+                "path": "./service-accounts/driver",
+                "manifest": "/builtin/service-account",
+                "name": "driver"
+            }
+        });
+        let driver = serde_json::json!({
+            "metadata": {
                 "path": "./driver",
+                "manifest": "/builtin/driver",
+                "name": "driver"
+            },
+            "spec": {
                 "runtime": "process",
-                "entrypoint": "./bin/driver",
+                "entrypoint": "./driver/bin/driver",
                 "service_account": "./service-accounts/driver",
                 "args": [],
                 "restart": "on_failure"
-            },
-            "rbac": {
-                "service_accounts": [{
-                    "path": "./service-accounts/driver",
-                    "name": "driver"
-                }],
-                "roles": [],
-                "role_bindings": []
             }
         });
         let mut bytes = Vec::new();
@@ -195,34 +238,68 @@ mod tests {
                 manifest.to_string().as_bytes(),
                 0o644,
             );
-            append(&mut builder, "bin/driver", b"driver", 0o755);
+            append(
+                &mut builder,
+                "resources/actions/echo.json",
+                action.to_string().as_bytes(),
+                0o644,
+            );
+            append(
+                &mut builder,
+                "resources/service-accounts/driver.json",
+                account.to_string().as_bytes(),
+                0o644,
+            );
+            append(
+                &mut builder,
+                "resources/driver.json",
+                driver.to_string().as_bytes(),
+                0o644,
+            );
+            append(&mut builder, "driver/bin/driver", b"driver", 0o755);
             builder.finish().unwrap();
         }
         let data = tempfile::tempdir().unwrap();
         let installed = install(data.path(), &bytes).unwrap();
-        assert!(installed.manifest.package_digest.starts_with("sha256:"));
+        assert!(installed.expansion.artifact_digest.starts_with("sha256:"));
         assert_eq!(installed.size_bytes, bytes.len() as u64);
         assert_eq!(
-            installed.manifest.actions[0].path,
+            installed.expansion.resources[1].path,
             "/manifests/echo/actions/echo"
         );
-        let driver = installed.manifest.driver.unwrap();
-        assert_eq!(driver.path, "/manifests/echo/driver");
-        assert_eq!(driver.entrypoint, "./bin/driver");
-        assert!(installed.root.join("bin/driver").is_file());
-        let repeated = install(data.path(), &bytes).unwrap();
-        assert_eq!(repeated.root, installed.root);
+        let driver_resource = installed
+            .expansion
+            .resources
+            .iter()
+            .find(|resource| resource.manifest == "/builtin/driver")
+            .unwrap();
+        let driver: DriverSpec = serde_json::from_value(driver_resource.spec.clone()).unwrap();
+        assert_eq!(driver_resource.path, "/manifests/echo/driver");
+        assert_eq!(driver.entrypoint, "./driver/bin/driver");
         assert_eq!(
-            repeated.manifest.package_digest,
-            installed.manifest.package_digest
+            driver.service_account,
+            "/manifests/echo/service-accounts/driver"
+        );
+        assert_eq!(driver.manages, ["/manifests/echo"]);
+        let package_root = data.path().join("packages/sha256").join(
+            installed
+                .expansion
+                .artifact_digest
+                .trim_start_matches("sha256:"),
+        );
+        assert!(package_root.join("driver/bin/driver").is_file());
+        let repeated = install(data.path(), &bytes).unwrap();
+        assert_eq!(
+            repeated.expansion.artifact_digest,
+            installed.expansion.artifact_digest
         );
     }
 
     #[test]
-    fn rejects_non_normalized_member_paths() {
-        assert!(normalized_package_relative("action", "actions/echo").is_err());
-        assert!(normalized_package_relative("action", "./actions/../echo").is_err());
-        assert!(normalized_package_relative("action", "./actions//echo").is_err());
+    fn rejects_non_normalized_package_paths() {
+        assert!(normalized_package_relative("driver", "driver/bin/echo").is_err());
+        assert!(normalized_package_relative("driver", "./driver/../echo").is_err());
+        assert!(normalized_package_relative("driver", "./driver//echo").is_err());
     }
 
     fn append(builder: &mut tar::Builder<&mut Vec<u8>>, path: &str, bytes: &[u8], mode: u32) {
