@@ -19,6 +19,7 @@ case "$PROFILE" in
     cargo build \
       --manifest-path "$PLATFORM_ROOT/Cargo.toml" \
       -p kas-agent-driver \
+      -p kas-approval-driver \
       -p kas-file-driver \
       -p kas-message-driver \
       -p kas-skill-driver
@@ -27,6 +28,7 @@ case "$PROFILE" in
     cargo build \
       --manifest-path "$PLATFORM_ROOT/Cargo.toml" \
       -p kas-agent-driver \
+      -p kas-approval-driver \
       -p kas-file-driver \
       -p kas-message-driver \
       -p kas-skill-driver \
@@ -41,6 +43,8 @@ esac
 mkdir -p \
   "$OUTPUT_DIR" \
   "$STAGING_ROOT/agent/driver/bin" \
+  "$STAGING_ROOT/approval/driver/bin" \
+  "$STAGING_ROOT/approval-result" \
   "$STAGING_ROOT/file/driver/bin" \
   "$STAGING_ROOT/message/driver/bin" \
   "$STAGING_ROOT/skill/driver/bin" \
@@ -52,6 +56,13 @@ cp \
   "$TARGET_DIR/$PROFILE/kas-agent-driver" \
   "$STAGING_ROOT/agent/driver/bin/kas-agent-driver"
 chmod 755 "$STAGING_ROOT/agent/driver/bin/kas-agent-driver"
+cp "$PLATFORM_ROOT/packages/approval/manifest.json" "$STAGING_ROOT/approval/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/approval/resources" "$STAGING_ROOT/approval/resources"
+cp \
+  "$TARGET_DIR/$PROFILE/kas-approval-driver" \
+  "$STAGING_ROOT/approval/driver/bin/kas-approval-driver"
+chmod 755 "$STAGING_ROOT/approval/driver/bin/kas-approval-driver"
+cp "$PLATFORM_ROOT/packages/approval-result/manifest.json" "$STAGING_ROOT/approval-result/manifest.json"
 cp "$PLATFORM_ROOT/packages/file/manifest.json" "$STAGING_ROOT/file/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/file/resources" "$STAGING_ROOT/file/resources"
 cp \
@@ -76,6 +87,8 @@ cp "$PLATFORM_ROOT/packages/session/manifest.json" "$STAGING_ROOT/session/manife
 cp -R "$PLATFORM_ROOT/packages/session/resources" "$STAGING_ROOT/session/resources"
 
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/agent" -cf "$OUTPUT_DIR/agent.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/approval" -cf "$OUTPUT_DIR/approval.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/approval-result" -cf "$OUTPUT_DIR/approval-result.kas" manifest.json
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/file" -cf "$OUTPUT_DIR/file.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/skill" -cf "$OUTPUT_DIR/skill.kas" manifest.json resources driver
@@ -88,3 +101,5 @@ echo "$OUTPUT_DIR/file.kas"
 echo "$OUTPUT_DIR/skill.kas"
 echo "$OUTPUT_DIR/message.kas"
 echo "$OUTPUT_DIR/agent.kas"
+echo "$OUTPUT_DIR/approval.kas"
+echo "$OUTPUT_DIR/approval-result.kas"

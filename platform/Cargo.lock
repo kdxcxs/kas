@@ -853,6 +853,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kas-approval-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "kas-core",
+ "kas-driver",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "uuid",
+]
+
+[[package]]
 name = "kas-core"
 version = "0.1.0"
 dependencies = [

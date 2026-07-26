@@ -96,6 +96,31 @@
       },
       {
         "manifests": [
+          "/manifests/approval",
+          "/manifests/approval-result"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/approvals/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/approvals/agents/**"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/service-account"
         ],
         "verbs": [

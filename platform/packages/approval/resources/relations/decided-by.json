@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "path": "./relations/decided-by",
+    "manifest": "/builtin/relation",
+    "name": "decided-by"
+  },
+  "spec": {
+    "inverse_name": "decisions",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/builtin/user"
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

@@ -10,6 +10,8 @@ async fn main() -> anyhow::Result<()> {
     let generation = env::var("KAS_DRIVER_GENERATION")?.parse()?;
     let token = env::var("KAS_DRIVER_TOKEN")?;
     let file_api = env::var("KAS_FILE_API").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
+    let approval_api =
+        env::var("KAS_APPROVAL_API").unwrap_or_else(|_| "http://127.0.0.1:3003".into());
     let data_dir = env::var_os("KAS_DATA_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("KAS_DATA_DIR is required"))?;
@@ -18,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("codex"));
     let mut driver = AgentDriver::new(&api, &token, codex)
         .with_file_api(file_api)
+        .with_approval_api(approval_api)
         .with_data_dir(data_dir);
     if let Some(codex_home) = env::var_os("KAS_CODEX_HOME") {
         driver = driver.with_codex_home(PathBuf::from(codex_home));

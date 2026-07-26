@@ -254,6 +254,37 @@ export class SkillApi {
   }
 }
 
+export class ApprovalApi {
+  constructor(
+    readonly baseUrl: string,
+    readonly token: string
+  ) {}
+
+  async decide(
+    path: string,
+    expectedRevision: number,
+    decision: 'approve' | 'reject'
+  ): Promise<Resource> {
+    const query = new URLSearchParams({
+      path,
+      expected_revision: String(expectedRevision)
+    });
+    const response = await fetch(
+      `${this.baseUrl.replace(/\/$/, '')}/approvals/decide?${query}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ decision })
+      }
+    );
+    await requireResponse(response);
+    return resourceFromDocument((await response.json()) as ResourceDocument);
+  }
+}
+
 async function requireResponse(response: Response): Promise<void> {
   if (response.ok) return;
   let message = `${response.status} ${response.statusText}`;

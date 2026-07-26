@@ -8,6 +8,8 @@ Each directory under `packages/` is an independent Manifest package root:
 
 ```text
 packages/
+├── approval-result/
+│   └── manifest.json
 ├── skill/
 │   ├── manifest.json
 │   ├── assets/kas/
@@ -43,6 +45,10 @@ packages/
 │   └── driver/
 │       ├── Cargo.toml
 │       └── src/
+├── approval/
+│   ├── manifest.json
+│   ├── resources/
+│   └── driver/
 └── agent/
     ├── manifest.json
     ├── resources/
@@ -74,6 +80,18 @@ Link. The built-in KAS operating context is itself the `/skills/kas` Skill and
 is assigned to every Agent. The fixed Agent prompt contains only enough
 bootstrap context to identify KAS, the Agent's ServiceAccount, and its API
 environment variables; the complete operating instructions live in `$kas`.
+`approval` lets an Agent request one exact operation that its normal
+ServiceAccount cannot perform. A User may approve or reject the request. On
+approval, the Driver verifies that the deciding User may perform the exact
+operation and executes it with that request's User credential. Request,
+Decision, and Result are independent Resources whose paths belong to their
+principal namespaces: `/approvals{requester}/requests/{uuid}`,
+`/approvals{approver}/decisions/{uuid}`, and
+`/approvals{requester}/results/{uuid}`. Named Links record `requested-by`,
+`decides`, `decided-by`, `result-of`, and `produced-by`; no shared request ID
+or per-request Role and RoleBinding is required. A successful operation creates
+an immutable `/manifests/approval-result` Resource containing the sanitized API
+response. Plaintext credentials are never stored in KAS Resources.
 
 Threads are independent Resources under `/threads/{id}`. Their `participants`
 Links may reference multiple Agents, but only Agents referenced by a Message
@@ -95,9 +113,11 @@ platform/scripts/build-packages.sh
 
 This writes `platform/dist/thread.kas`, `platform/dist/session.kas`,
 `platform/dist/file.kas`, `platform/dist/skill.kas`,
-`platform/dist/message.kas`, and `platform/dist/agent.kas`. Install Thread,
-Session, File, and Skill before Agent because the Agent Driver manages Session
-Resources and reads Skill and File descriptors.
+`platform/dist/message.kas`, `platform/dist/approval-result.kas`,
+`platform/dist/approval.kas`, and `platform/dist/agent.kas`. Install Approval
+Result before Approval. Install Thread, Session, File, and Skill before Agent
+because the Agent Driver manages Session Resources and reads Skill and File
+descriptors.
 The Message package contains the singleton fanout Driver. The Agent package
 contains a singleton Driver that invokes the `codex` executable available in
 its environment. Set `KAS_CODEX_BIN` to override its path and
@@ -122,6 +142,17 @@ again before materializing it for an Agent. Bundles require a root
 and other non-file entries are rejected. Expanded size and entry counts are
 also bounded.
 
+The Approval Driver binds `KAS_APPROVAL_ADDRESS` (default
+`127.0.0.1:3003`). Agents submit requests to `POST /approvals`; authenticated
+Users decide them with `POST /approvals/decide`. Approval never expands an
+Agent's standing permissions. The Driver checks the current User credential
+against the exact create, update, delete, get, or bounded list operation before
+executing it. An unauthorized Decision is retained as `invalid` and leaves the
+Request pending; a later authorized Decision may still claim it. Concurrent or
+late valid Decisions become `superseded`. Successful responses are stored as
+Result Resources after removing platform-only `[kas]` bookkeeping fields and
+are discovered through `result-of` and `produced-by` Links.
+
 Run the complete platform flow with the real Codex CLI:
 
 ```bash
@@ -131,7 +162,7 @@ platform/tests/e2e.sh -v
 
 The E2E test requires an authenticated `codex` executable on `PATH`. Set
 `KAS_CODEX_BIN` to select another real Codex executable. It starts KAS with a
-temporary database, installs all six packages, uploads binary content,
+temporary database, installs all eight packages, uploads binary content,
 verifies full and ranged downloads, creates a multi-Agent Thread with an
 attached File, and verifies that only the mentioned Agent receives a Run. The
 real Codex Agent loads an assigned Skill, downloads the attachment with its
@@ -141,7 +172,11 @@ restarts the Agent Driver, and verifies that the resumed Session uses the new
 bundle. It also rejects a ZIP containing a symbolic link. Agent
 ServiceAccounts may upload new Files and download existing Files, but uploads
 are create-only and cannot overwrite an existing File path. The test also
-covers File and Skill RBAC and deletion.
+covers File and Skill RBAC and deletion. It also proves that an Agent cannot
+perform a privileged write directly, can submit it for User approval, and that
+the operation executes only when the deciding User has the requested
+permission. It covers invalid, rejected, successful, and duplicate Decisions,
+Link-based discovery, and requester namespace isolation.
 
 ## Frontend
 
@@ -159,11 +194,12 @@ KAS_API_URL=http://127.0.0.1:3000 npm run dev
 The development server proxies `/api` to `KAS_API_URL`, so KAS does not need
 cross-origin configuration. It also proxies `/files-api` to
 `KAS_FILE_API_URL` (default `http://127.0.0.1:3001`) and `/skills-api` to
-`KAS_SKILL_API_URL` (default `http://127.0.0.1:3002`). A production deployment
-should route the three paths to KAS, the File Driver, and the Skill Driver.
-`VITE_KAS_API_URL`, `VITE_KAS_FILE_API_URL`, and `VITE_KAS_SKILL_API_URL` can
-select direct API bases at build time when those endpoints permit browser
-cross-origin access.
+`KAS_SKILL_API_URL` (default `http://127.0.0.1:3002`), and `/approvals-api` to
+`KAS_APPROVAL_API_URL` (default `http://127.0.0.1:3003`). A production
+deployment should route all four paths to their corresponding services.
+`VITE_KAS_API_URL`, `VITE_KAS_FILE_API_URL`, `VITE_KAS_SKILL_API_URL`, and
+`VITE_KAS_APPROVAL_API_URL` can select direct API bases at build time when
+those endpoints permit browser cross-origin access.
 
 The UI stores its KAS Bearer token and User path in browser-local settings. It
 can create Agents and independent Threads, add multiple Agent participants,
@@ -173,4 +209,6 @@ Thread participant, reset a Session when a fresh Codex context is needed, and
 attach arbitrary files to Messages. Image, video, and audio previews are
 loaded on demand with authenticated requests; all other content is available
 through authenticated download. The Skill page imports or replaces Skill ZIP
-bundles and manages Agent assignments.
+bundles and manages Agent assignments. The Approval page presents the exact
+requested operation and its reason, lets a User approve or reject it, and
+shows the resulting decision audit record.

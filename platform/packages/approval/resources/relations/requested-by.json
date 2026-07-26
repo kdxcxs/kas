@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "path": "./relations/requested-by",
+    "manifest": "/builtin/relation",
+    "name": "requested-by"
+  },
+  "spec": {
+    "inverse_name": "approval-requests",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/builtin/user",
+          "/manifests/agent"
+        ]
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

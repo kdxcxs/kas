@@ -1,0 +1,83 @@
+{
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "approval-driver"
+  },
+  "spec": {
+    "description": "Maintain immutable Approval requests, decisions, and audit Links.",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "get"
+        ],
+        "paths": [
+          "/**"
+        ]
+      },
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/approvals/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/approval-result"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/approvals/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/approvals/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/user",
+          "/builtin/service-account",
+          "/manifests/agent"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/users/**",
+          "/agents/**"
+        ]
+      }
+    ]
+  }
+}

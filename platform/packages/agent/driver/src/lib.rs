@@ -23,6 +23,8 @@ const AGENT_MANIFEST: &str = "/manifests/agent";
 const MESSAGE_MANIFEST: &str = "/manifests/message";
 const FILE_MANIFEST: &str = "/manifests/file";
 const SESSION_MANIFEST: &str = "/manifests/session";
+const APPROVAL_MANIFEST: &str = "/manifests/approval";
+const APPROVAL_RESULT_MANIFEST: &str = "/manifests/approval-result";
 const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const LINK_MANIFEST: &str = "/builtin/link";
 const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
@@ -44,6 +46,7 @@ pub struct AgentDriver {
     codex: PathBuf,
     codex_home: Option<PathBuf>,
     file_api: String,
+    approval_api: String,
     data_dir: Option<PathBuf>,
 }
 
@@ -89,6 +92,7 @@ impl AgentDriver {
             codex: codex.into(),
             codex_home: None,
             file_api: "http://127.0.0.1:3001".into(),
+            approval_api: "http://127.0.0.1:3003".into(),
             data_dir: None,
         }
     }
@@ -100,6 +104,11 @@ impl AgentDriver {
 
     pub fn with_file_api(mut self, api: impl Into<String>) -> Self {
         self.file_api = api.into().trim_end_matches('/').to_owned();
+        self
+    }
+
+    pub fn with_approval_api(mut self, api: impl Into<String>) -> Self {
+        self.approval_api = api.into().trim_end_matches('/').to_owned();
         self
     }
 
@@ -488,6 +497,7 @@ impl AgentDriver {
             .env_remove("KAS_DATA_DIR")
             .env("KAS_API", &self.api)
             .env("KAS_FILE_API", &self.file_api)
+            .env("KAS_APPROVAL_API", &self.approval_api)
             .env("KAS_TOKEN", credential_token)
             .env("KAS_AGENT_PATH", agent_path)
             .env("KAS_SERVICE_ACCOUNT_PATH", service_account_path)
@@ -650,6 +660,19 @@ impl AgentDriver {
                                     format!("{}/links/skills/**", resource.path),
                                     format!("{}/skills/**", resource.path),
                                 ],
+                            },
+                            RbacRuleSpec {
+                                manifests: vec![
+                                    APPROVAL_MANIFEST.into(),
+                                    APPROVAL_RESULT_MANIFEST.into(),
+                                ],
+                                verbs: vec!["get".into(), "list".into()],
+                                paths: vec![format!("/approvals{}/**", resource.path)],
+                            },
+                            RbacRuleSpec {
+                                manifests: vec![LINK_MANIFEST.into()],
+                                verbs: vec!["get".into(), "list".into()],
+                                paths: vec![format!("/approvals{}/**", resource.path)],
                             },
                         ],
                         system_role: None,
@@ -1012,8 +1035,9 @@ fn kas_bootstrap_context(
         "You are running as KAS Agent {agent_path}. KAS is a resource-oriented collaboration \
 platform; platform objects and their relationships are represented by Resources and Links. \
 Your KAS identity is ServiceAccount {service_account_path}. The current KAS Thread is \
-{thread_path}. KAS_API, KAS_FILE_API, KAS_TOKEN, KAS_AGENT_PATH, KAS_SERVICE_ACCOUNT_PATH, and \
-KAS_THREAD_PATH are available in the environment. KAS_TOKEN is your scoped credential and must \
+{thread_path}. KAS_API, KAS_FILE_API, KAS_APPROVAL_API, KAS_TOKEN, KAS_AGENT_PATH, \
+KAS_SERVICE_ACCOUNT_PATH, and KAS_THREAD_PATH are available in the environment. KAS_TOKEN is \
+your scoped credential and must \
 not be disclosed. Required Skills for this run: \
 {required_skills}. Read and follow each required Skill before acting; use $kas for the full KAS \
 protocol and operating instructions."
@@ -1074,7 +1098,7 @@ mod tests {
         assert!(context.contains("running as KAS Agent /agents/reviewer"));
         assert!(context.contains("ServiceAccount /agents/reviewer/service-account"));
         assert!(context.contains("current KAS Thread is /threads/review"));
-        assert!(context.contains("KAS_THREAD_PATH"));
+        assert!(context.contains("KAS_APPROVAL_API"));
         assert!(context.contains("use $kas for the full KAS protocol"));
     }
 }

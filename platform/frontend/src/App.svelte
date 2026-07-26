@@ -1,8 +1,15 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { FileApi, KasApi, KasApiError, SkillApi } from './lib/api';
+  import { ApprovalApi, FileApi, KasApi, KasApiError, SkillApi } from './lib/api';
   import {
     AGENT_MANIFEST,
+    APPROVAL_DECIDED_BY,
+    APPROVAL_DECIDES,
+    APPROVAL_MANIFEST,
+    APPROVAL_PRODUCED_BY,
+    APPROVAL_REQUESTED_BY,
+    APPROVAL_RESULT_MANIFEST,
+    APPROVAL_RESULT_OF,
     ATTACHED_TO,
     AUTHORED_BY,
     FILE_MANIFEST,
@@ -40,6 +47,8 @@
   const DEFAULT_API_BASE = import.meta.env.VITE_KAS_API_URL || '/api';
   const DEFAULT_FILE_API_BASE = import.meta.env.VITE_KAS_FILE_API_URL || '/files-api';
   const DEFAULT_SKILL_API_BASE = import.meta.env.VITE_KAS_SKILL_API_URL || '/skills-api';
+  const DEFAULT_APPROVAL_API_BASE =
+    import.meta.env.VITE_KAS_APPROVAL_API_URL || '/approvals-api';
 
   interface Settings {
     apiBase: string;
@@ -47,7 +56,7 @@
     userPath: string;
   }
 
-  type View = 'chat' | 'agents' | 'skills' | 'threads' | 'objects';
+  type View = 'chat' | 'agents' | 'skills' | 'approvals' | 'threads' | 'objects';
 
   const OBJECT_KINDS: ObjectKind[] = [
     'resource',
@@ -77,6 +86,10 @@
   let files: Resource[] = [];
   let sessions: Resource[] = [];
   let skills: Resource[] = [];
+  let approvals: Resource[] = [];
+  let approvalResults: Resource[] = [];
+  let selectedApprovalPath = '';
+  let savingApproval = false;
   let selectedAgentPath = '';
   let activeThreadPath: string | null = null;
   let driver: Driver | null = null;
@@ -136,6 +149,28 @@
   $: managedThread =
     threads.find((thread) => thread.path === selectedManagedThreadPath) ?? null;
   $: selectedSkill = skills.find((skill) => skill.path === selectedSkillPath) ?? null;
+  $: approvalRequests = approvals.filter((approval) => approval.spec.kind === 'request');
+  $: selectedApproval =
+    approvalRequests.find((approval) => approval.path === selectedApprovalPath) ?? null;
+  $: selectedApprovalDecisions = selectedApproval
+    ? approvals
+        .filter(
+          (approval) =>
+            approval.spec.kind === 'decision' &&
+            relationTarget(approval, APPROVAL_DECIDES) === selectedApproval.path
+        )
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    : [];
+  $: selectedApprovalResults = selectedApproval
+    ? approvalResults
+        .filter(
+          (result) => relationTarget(result, APPROVAL_RESULT_OF) === selectedApproval.path
+        )
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    : [];
+  $: pendingApprovalCount = approvalRequests.filter(
+    (approval) => approval.state === 'pending'
+  ).length;
   $: filteredObjects = objects.filter(
     (object) =>
       object.kind === objectKind &&
@@ -152,13 +187,15 @@
       ? 'Agent management'
       : view === 'skills'
         ? 'Skill management'
-      : view === 'threads'
-        ? 'Thread management'
-        : view === 'objects'
-          ? 'Resource management'
-          : activeThread
-            ? titleOf(activeThread)
-            : 'Choose a Thread';
+        : view === 'approvals'
+          ? 'Approval management'
+          : view === 'threads'
+            ? 'Thread management'
+            : view === 'objects'
+              ? 'Resource management'
+              : activeThread
+                ? titleOf(activeThread)
+                : 'Choose a Thread';
 
   onMount(() => {
     const saved = localStorage.getItem(SETTINGS_KEY);
@@ -190,6 +227,10 @@
     return new SkillApi(DEFAULT_SKILL_API_BASE, settings.token);
   }
 
+  function approvalClient(): ApprovalApi {
+    return new ApprovalApi(DEFAULT_APPROVAL_API_BASE, settings.token);
+  }
+
   async function connect(): Promise<void> {
     connecting = true;
     error = '';
@@ -216,7 +257,9 @@
         messageResources,
         sessionResources,
         fileResources,
-        skillResources
+        skillResources,
+        approvalResources,
+        approvalResultResources
       ] =
         await Promise.all([
           api.listResources(AGENT_MANIFEST),
@@ -224,7 +267,9 @@
           api.listResources(MESSAGE_MANIFEST),
           api.listResources(SESSION_MANIFEST),
           api.listResources(FILE_MANIFEST),
-          api.listResources(SKILL_MANIFEST)
+          api.listResources(SKILL_MANIFEST),
+          api.listResources(APPROVAL_MANIFEST),
+          api.listResources(APPROVAL_RESULT_MANIFEST)
         ]);
       agents = agentResources
         .filter((resource) => resource.manifest === AGENT_MANIFEST)
@@ -258,8 +303,30 @@
             .map((resource) => api.getResource(resource.path, true))
         )
       ).sort((left, right) => left.name.localeCompare(right.name));
+      approvals = (
+        await Promise.all(
+          approvalResources
+            .filter((resource) => resource.manifest === APPROVAL_MANIFEST)
+            .map((resource) => api.getResource(resource.path, true))
+        )
+      ).sort((left, right) => right.created_at.localeCompare(left.created_at));
+      approvalResults = (
+        await Promise.all(
+          approvalResultResources
+            .filter((resource) => resource.manifest === APPROVAL_RESULT_MANIFEST)
+            .map((resource) => api.getResource(resource.path, true))
+        )
+      ).sort((left, right) => right.created_at.localeCompare(left.created_at));
       if (!skills.some((skill) => skill.path === selectedSkillPath)) {
         selectedSkillPath = skills[0]?.path ?? '';
+      }
+      const currentApprovalRequests = approvals.filter(
+        (approval) => approval.spec.kind === 'request'
+      );
+      if (
+        !currentApprovalRequests.some((approval) => approval.path === selectedApprovalPath)
+      ) {
+        selectedApprovalPath = currentApprovalRequests[0]?.path ?? '';
       }
       driver = await api.getAgentDriver();
       if (!agents.some((agent) => agent.path === selectedAgentPath)) {
@@ -302,6 +369,44 @@
       (path && skills.some((skill) => skill.path === path) ? path : skills[0]?.path) ?? '';
     error = '';
     notice = '';
+  }
+
+  function openApprovalManagement(path = selectedApprovalPath): void {
+    view = 'approvals';
+    selectedApprovalPath =
+      (path && approvalRequests.some((approval) => approval.path === path)
+        ? path
+        : approvalRequests[0]?.path) ?? '';
+    error = '';
+    notice = '';
+  }
+
+  function selectApproval(path: string): void {
+    selectedApprovalPath = path;
+    error = '';
+    notice = '';
+  }
+
+  async function decideApproval(
+    approval: Resource,
+    decision: 'approve' | 'reject'
+  ): Promise<void> {
+    if (savingApproval || approval.state !== 'pending') return;
+    savingApproval = true;
+    error = '';
+    try {
+      await approvalClient().decide(approval.path, approval.revision, decision);
+      await loadData();
+      selectedApprovalPath = approval.path;
+      notice =
+        decision === 'approve'
+          ? 'Your decision was recorded. The Driver verified your permission before execution.'
+          : 'The Approval request was rejected.';
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingApproval = false;
+    }
   }
 
   function selectSkill(path: string): void {
@@ -960,6 +1065,114 @@
     return JSON.stringify(resource.spec) === JSON.stringify(resource.status);
   }
 
+  function approvalOperation(approval: Resource | null): Record<string, unknown> {
+    return approval ? record(approval.spec.operation) : {};
+  }
+
+  function approvalRequester(approval: Resource | null): string {
+    return approval ? relationTarget(approval, APPROVAL_REQUESTED_BY) ?? 'Unknown requester' : '';
+  }
+
+  function decisionApprover(decision: Resource): string {
+    return relationTarget(decision, APPROVAL_DECIDED_BY) ?? 'Unknown approver';
+  }
+
+  function resultDecision(result: Resource): string {
+    return relationTarget(result, APPROVAL_PRODUCED_BY) ?? 'Unknown decision';
+  }
+
+  function resultRequest(result: Resource): string {
+    return relationTarget(result, APPROVAL_RESULT_OF) ?? 'Unknown request';
+  }
+
+  function operationVerb(approval: Resource | null): string {
+    return String(approvalOperation(approval).verb ?? 'unknown');
+  }
+
+  function operationPath(approval: Resource | null): string {
+    const operation = approvalOperation(approval);
+    if (typeof operation.path === 'string') return operation.path;
+    if (typeof operation.path_prefix === 'string') return operation.path_prefix;
+    if (operation.verb === 'list' && typeof operation.manifest === 'string') {
+      return operation.manifest;
+    }
+    return String(record(operation.resource).metadata
+      ? record(record(operation.resource).metadata).path ?? 'Unknown target'
+      : 'Unknown target');
+  }
+
+  function operationManifest(approval: Resource | null): string {
+    const operation = approvalOperation(approval);
+    if (typeof operation.manifest === 'string') return operation.manifest;
+    const resource = record(operation.resource);
+    return String(record(resource.metadata).manifest ?? 'Existing Resource');
+  }
+
+  function operationFields(approval: Resource | null): [string, string][] {
+    const operation = approvalOperation(approval);
+    const verb = operationVerb(approval);
+    const payload =
+      verb === 'create'
+        ? record(record(operation.resource).spec)
+        : verb === 'update'
+          ? record(record(operation.update).spec)
+          : {};
+    const fields = Object.entries(payload).map(
+      ([key, value]) => [fieldLabel(key), displayValue(value)] as [string, string]
+    );
+    if (verb === 'list') {
+      if (typeof operation.path_prefix === 'string') {
+        fields.push(['Path prefix', operation.path_prefix]);
+      }
+      if (typeof operation.limit === 'number') {
+        fields.push(['Result limit', String(operation.limit)]);
+      }
+    }
+    return fields;
+  }
+
+  function resultResponse(result: Resource | null): Record<string, unknown> {
+    return result ? record(result.spec.response) : {};
+  }
+
+  function resultBodyRows(result: Resource | null): [string, string][] {
+    const body = resultResponse(result).body;
+    if (Array.isArray(body)) {
+      if (body.length === 0) return [['Items', 'No results']];
+      return body.slice(0, 12).map((value, index) => [
+        `Item ${index + 1}`,
+        resultValueSummary(value)
+      ]);
+    }
+    if (isRecord(body)) {
+      const entries = Object.entries(body);
+      if (entries.length === 0) return [['Body', 'Empty object']];
+      return entries.slice(0, 24).map(([key, value]) => [
+        fieldLabel(key),
+        resultValueSummary(value)
+      ]);
+    }
+    return [['Body', displayValue(body)]];
+  }
+
+  function resultBodyOverflow(result: Resource | null): number {
+    const body = resultResponse(result).body;
+    if (Array.isArray(body)) return Math.max(0, body.length - 12);
+    if (isRecord(body)) return Math.max(0, Object.keys(body).length - 24);
+    return 0;
+  }
+
+  function resultValueSummary(value: unknown): string {
+    if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? '' : 's'}`;
+    if (isRecord(value)) {
+      const identity = value.path ?? record(value.metadata).path ?? value.name;
+      if (typeof identity === 'string') return identity;
+      const count = Object.keys(value).length;
+      return `${count} field${count === 1 ? '' : 's'}`;
+    }
+    return displayValue(value);
+  }
+
   function kindLabel(kind: ObjectKind): string {
     return kind
       .split('_')
@@ -1082,6 +1295,13 @@
           <span class="nav-icon">⌁</span>
           <span><strong>Skills</strong><small>{skills.length} capabilities</small></span>
         </button>
+        <button class:active={view === 'approvals'} onclick={() => openApprovalManagement()}>
+          <span class="nav-icon">✓</span>
+          <span>
+            <strong>Approvals</strong>
+            <small>{pendingApprovalCount} pending · {approvalRequests.length} total</small>
+          </span>
+        </button>
         <button class:active={view === 'objects'} onclick={() => void openObjectExplorer()}>
           <span class="nav-icon">◇</span>
           <span><strong>Objects</strong><small>Complete registry</small></span>
@@ -1152,11 +1372,13 @@
             ? 'Workspace'
             : view === 'skills'
               ? 'Capabilities'
-            : view === 'threads'
-              ? 'Conversations'
-              : view === 'objects'
-                ? 'KAS Registry'
-                : 'Current Thread'}
+              : view === 'approvals'
+                ? 'Delegated authority'
+                : view === 'threads'
+                  ? 'Conversations'
+                  : view === 'objects'
+                    ? 'KAS Registry'
+                    : 'Current Thread'}
         </p>
         <h1>{pageTitle}</h1>
       </div>
@@ -1445,6 +1667,249 @@
             </div>
           {/if}
         </div>
+      </section>
+    {:else if view === 'approvals'}
+      <section class="approval-management" aria-label="Approval management">
+        <div class="management-summary">
+          <div>
+            <strong>{pendingApprovalCount}</strong>
+            <span>Pending</span>
+          </div>
+          <div>
+            <strong>{approvalRequests.length}</strong>
+            <span>Total requests</span>
+          </div>
+          <div>
+            <strong>{approvalRequests.filter((approval) => approval.state === 'succeeded').length}</strong>
+            <span>Executed</span>
+          </div>
+        </div>
+
+        {#if approvalRequests.length === 0}
+          <div class="management-empty">
+            <p class="eyebrow">No Approval requests</p>
+            <h2>Agent escalation requests will appear here.</h2>
+            <p>Agents remain constrained by RBAC until a User approves one exact operation.</p>
+          </div>
+        {:else}
+          <div class="approval-layout">
+            <aside class="approval-index">
+              <nav aria-label="Approval requests">
+                {#each approvalRequests as approval}
+                  <button
+                    class:active={approval.path === selectedApprovalPath}
+                    onclick={() => selectApproval(approval.path)}
+                  >
+                    <span>
+                      <strong>{operationVerb(approval).toUpperCase()} {operationPath(approval)}</strong>
+                      <small>{approvalRequester(approval)}</small>
+                    </span>
+                    <span class:pending={approval.state === 'pending'} class="state-pill">
+                      {approval.state}
+                    </span>
+                  </button>
+                {/each}
+              </nav>
+            </aside>
+
+            {#if selectedApproval}
+              <article class="approval-detail">
+                <header>
+                  <div>
+                    <p class="eyebrow">Exact delegated operation</p>
+                    <h2>{operationVerb(selectedApproval).toUpperCase()}</h2>
+                    <code>{operationPath(selectedApproval)}</code>
+                  </div>
+                  <span class:pending={selectedApproval.state === 'pending'} class="state-pill">
+                    {selectedApproval.state}
+                  </span>
+                </header>
+
+                <section class="approval-reason">
+                  <span>Reason supplied by Agent</span>
+                  <p>{String(selectedApproval.spec.reason ?? 'No reason supplied')}</p>
+                </section>
+
+                <dl class="approval-facts">
+                  <div>
+                    <dt>Requested by</dt>
+                    <dd>{approvalRequester(selectedApproval)}</dd>
+                  </div>
+                  <div>
+                    <dt>Target Manifest</dt>
+                    <dd>{operationManifest(selectedApproval)}</dd>
+                  </div>
+                  <div>
+                    <dt>Expires</dt>
+                    <dd>{formatTimestamp(String(selectedApproval.spec.expires_at))}</dd>
+                  </div>
+                  <div>
+                    <dt>Request revision</dt>
+                    <dd>{selectedApproval.revision}</dd>
+                  </div>
+                </dl>
+
+                {#if operationFields(selectedApproval).length > 0}
+                  <section class="approval-payload">
+                    <h3>Requested fields</h3>
+                    <dl>
+                      {#each operationFields(selectedApproval) as [label, value]}
+                        <div><dt>{label}</dt><dd>{value}</dd></div>
+                      {/each}
+                    </dl>
+                  </section>
+                {/if}
+
+                {#if selectedApproval.state === 'pending'}
+                  <div class="approval-actions">
+                    <p>
+                      Your decision is recorded under your own Approval path. The Driver verifies
+                      your permission for this exact operation before it executes anything.
+                    </p>
+                    <div>
+                      <button
+                        class="danger-button"
+                        disabled={savingApproval}
+                        onclick={() => void decideApproval(selectedApproval!, 'reject')}
+                      >
+                        Reject
+                      </button>
+                      <button
+                        class="primary-button"
+                        disabled={savingApproval}
+                        onclick={() => void decideApproval(selectedApproval!, 'approve')}
+                      >
+                        {savingApproval ? 'Executing…' : 'Approve & Execute'}
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+
+                {#if selectedApprovalDecisions.length > 0}
+                  <section class="approval-records">
+                    <div class="approval-section-heading">
+                      <p class="eyebrow">Decision history</p>
+                      <span>{selectedApprovalDecisions.length}</span>
+                    </div>
+                    {#each selectedApprovalDecisions as decision}
+                      <article class:invalid={decision.spec.outcome === 'invalid'} class="decision-card">
+                        <header>
+                          <div>
+                            <p class="eyebrow">Immutable decision record</p>
+                            <h3>{String(decision.spec.outcome ?? decision.state)}</h3>
+                          </div>
+                          <span
+                            class:invalid={decision.spec.outcome === 'invalid'}
+                            class:superseded={decision.spec.outcome === 'superseded'}
+                            class="state-pill"
+                          >
+                            {decision.state}
+                          </span>
+                        </header>
+                        <dl class="approval-facts">
+                          <div>
+                            <dt>Decided by</dt>
+                            <dd>{decisionApprover(decision)}</dd>
+                          </div>
+                          <div>
+                            <dt>Decision path</dt>
+                            <dd>{decision.path}</dd>
+                          </div>
+                          <div>
+                            <dt>Decided at</dt>
+                            <dd>{formatTimestamp(String(decision.spec.decided_at))}</dd>
+                          </div>
+                          <div>
+                            <dt>Completed at</dt>
+                            <dd>
+                              {decision.spec.completed_at
+                                ? formatTimestamp(String(decision.spec.completed_at))
+                                : 'In progress'}
+                            </dd>
+                          </div>
+                        </dl>
+                        {#if decision.spec.error}
+                          <p class="decision-error">{String(decision.spec.error)}</p>
+                        {:else if decision.spec.outcome === 'invalid'}
+                          <p class="decision-error">
+                            This approver did not have permission to perform the requested
+                            operation. The request remains available to another approver.
+                          </p>
+                        {:else if decision.spec.outcome === 'superseded'}
+                          <p class="decision-result">
+                            Another valid decision claimed this request first, so this decision did
+                            not execute the operation.
+                          </p>
+                        {/if}
+                      </article>
+                    {/each}
+                  </section>
+                {/if}
+
+                {#if selectedApprovalResults.length > 0}
+                  <section class="approval-records">
+                    <div class="approval-section-heading">
+                      <p class="eyebrow">Protected results</p>
+                      <span>{selectedApprovalResults.length}</span>
+                    </div>
+                    {#each selectedApprovalResults as result}
+                      {@const response = resultResponse(result)}
+                      <article class="approval-result-card">
+                        <header>
+                          <div>
+                            <p class="eyebrow">Protected approval result</p>
+                            <h3>API response</h3>
+                          </div>
+                          <span class="state-pill">{result.state}</span>
+                        </header>
+                        <dl class="approval-facts">
+                          <div>
+                            <dt>HTTP status</dt>
+                            <dd>{String(response.status ?? 'Unknown')}</dd>
+                          </div>
+                          <div>
+                            <dt>Content type</dt>
+                            <dd>{String(response.content_type ?? 'Not supplied')}</dd>
+                          </div>
+                          <div>
+                            <dt>Result path</dt>
+                            <dd>{result.path}</dd>
+                          </div>
+                          <div>
+                            <dt>Produced by</dt>
+                            <dd>{resultDecision(result)}</dd>
+                          </div>
+                          <div>
+                            <dt>Request</dt>
+                            <dd>{resultRequest(result)}</dd>
+                          </div>
+                        </dl>
+                        <div class="approval-result-body">
+                          <h4>Response body</h4>
+                          <dl>
+                            {#each resultBodyRows(result) as [label, value]}
+                              <div>
+                                <dt>{label}</dt>
+                                <dd>{value}</dd>
+                              </div>
+                            {/each}
+                          </dl>
+                          {#if resultBodyOverflow(result) > 0}
+                            <p>
+                              {resultBodyOverflow(result)} additional
+                              {resultBodyOverflow(result) === 1 ? ' entry' : ' entries'}
+                              omitted from this summary.
+                            </p>
+                          {/if}
+                        </div>
+                      </article>
+                    {/each}
+                  </section>
+                {/if}
+              </article>
+            {/if}
+          </div>
+        {/if}
       </section>
     {:else if view === 'threads'}
       <section class="thread-management" aria-label="Thread management">

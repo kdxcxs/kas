@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   const kasTarget = env.KAS_API_URL || 'http://127.0.0.1:3000';
   const fileTarget = env.KAS_FILE_API_URL || 'http://127.0.0.1:3001';
   const skillTarget = env.KAS_SKILL_API_URL || 'http://127.0.0.1:3002';
+  const approvalTarget = env.KAS_APPROVAL_API_URL || 'http://127.0.0.1:3003';
 
   return {
     plugins: [svelte()],
@@ -29,6 +30,11 @@ export default defineConfig(({ mode }) => {
           target: skillTarget,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/skills-api/, '')
+        },
+        '/approvals-api': {
+          target: approvalTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/approvals-api/, '')
         }
       }
     },

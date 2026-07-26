@@ -1,0 +1,92 @@
+{
+  "path": "/manifests/approval",
+  "manifest": "/builtin/manifest",
+  "name": "approval",
+  "version": 1,
+  "description": "An immutable elevation request or its auditable user decision.",
+  "states": [
+    "executing",
+    "succeeded",
+    "rejected",
+    "failed",
+    "invalid",
+    "superseded",
+    "expired"
+  ],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "type": "object",
+        "required": [
+          "kind",
+          "reason",
+          "operation",
+          "expires_at"
+        ],
+        "properties": {
+          "kind": {
+            "const": "request"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "operation": {
+            "type": "object"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": [
+          "kind",
+          "outcome",
+          "decided_at"
+        ],
+        "properties": {
+          "kind": {
+            "const": "decision"
+          },
+          "outcome": {
+            "enum": [
+              "pending",
+              "executing",
+              "succeeded",
+              "rejected",
+              "failed",
+              "invalid",
+              "superseded"
+            ]
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    ]
+  }
+}

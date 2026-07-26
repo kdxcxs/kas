@@ -160,9 +160,11 @@ CARGO_TARGET_DIR="$PLATFORM_TARGET" "$PLATFORM_ROOT/scripts/build-packages.sh" "
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 FILE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 SKILL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+APPROVAL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
 FILE_API="http://127.0.0.1:$FILE_PORT"
 SKILL_API="http://127.0.0.1:$SKILL_PORT"
+APPROVAL_API="http://127.0.0.1:$APPROVAL_PORT"
 export KAS_DATA_DIR="$E2E_DIR/data"
 export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
@@ -171,6 +173,9 @@ export KAS_FILE_ADDRESS="127.0.0.1:$FILE_PORT"
 export KAS_FILE_API="$FILE_API"
 export KAS_SKILL_ADDRESS="127.0.0.1:$SKILL_PORT"
 export KAS_SKILL_API="$SKILL_API"
+export KAS_APPROVAL_ADDRESS="127.0.0.1:$APPROVAL_PORT"
+export KAS_APPROVAL_API="$APPROVAL_API"
+export KAS_APPROVAL_API_URL="$APPROVAL_API"
 export KAS_CODEX_BIN="$CODEX_BIN"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 export KAS_CODEX_HOME="$E2E_DIR/codex-home"
@@ -210,7 +215,9 @@ FILE_PACKAGE="$(install_package "$E2E_DIR/packages/file.kas")"
 SKILL_PACKAGE="$(install_package "$E2E_DIR/packages/skill.kas")"
 AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
-for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE"; do
+APPROVAL_RESULT_PACKAGE="$(install_package "$E2E_DIR/packages/approval-result.kas")"
+APPROVAL_PACKAGE="$(install_package "$E2E_DIR/packages/approval.kas")"
+for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE" "$APPROVAL_RESULT_PACKAGE" "$APPROVAL_PACKAGE"; do
   jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
 
@@ -234,7 +241,14 @@ for path in \
   /manifests/message/relations/authored-by \
   /manifests/message/relations/message-thread \
   /manifests/message/relations/mentioned \
-  /manifests/message/relations/replies-to; do
+  /manifests/message/relations/replies-to \
+  /manifests/approval \
+  /manifests/approval-result \
+  /manifests/approval/relations/requested-by \
+  /manifests/approval/relations/decides \
+  /manifests/approval/relations/decided-by \
+  /manifests/approval/relations/result-of \
+  /manifests/approval/relations/produced-by; do
   get_resource "$path" >/dev/null
 done
 if get_resource "/manifests/message/relations/thread-root" >/dev/null 2>&1; then
@@ -246,10 +260,12 @@ AGENT_DRIVER="$(wait_for_state "/manifests/agent/driver" running)"
 FILE_DRIVER="$(wait_for_state "/manifests/file/driver" running)"
 SKILL_DRIVER="$(wait_for_state "/manifests/skill/driver" running)"
 MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
+APPROVAL_DRIVER="$(wait_for_state "/manifests/approval/driver" running)"
 jq -e '.spec == .status.spec' <<<"$AGENT_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FILE_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$SKILL_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$MESSAGE_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$APPROVAL_DRIVER" >/dev/null
 for _ in $(seq 1 200); do
   if command curl --fail --silent "$FILE_API/health" >/dev/null 2>&1; then
     break
@@ -264,6 +280,13 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 command curl --fail --silent "$SKILL_API/health" | jq -e '.ok == true' >/dev/null
+for _ in $(seq 1 200); do
+  if command curl --fail --silent "$APPROVAL_API/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+command curl --fail --silent "$APPROVAL_API/health" | jq -e '.ok == true' >/dev/null
 wait_for_state "/skills/kas" available >/dev/null
 
 mkdir -p "$E2E_DIR/workspace"
@@ -425,6 +448,502 @@ OBSERVER_TOKEN="$(
     "$API/credentials/issue" |
     jq -r '.token'
 )"
+AGENT_TOKEN="$(
+  request --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"subject\":\"$AGENT_PATH/service-account\"}" \
+    "$API/credentials/issue" |
+    jq -r '.token'
+)"
+
+# Approval objects use their owning principal's path as their authorization
+# boundary. Their business relationships are represented only by Links.
+approval_links() {
+  request --fail-with-body --silent --show-error --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "manifest=/builtin/link" \
+    "$API/resources"
+}
+
+approval_link_source() {
+  local relation="$1" target="$2"
+  approval_links | jq -er \
+    --arg relation "$relation" \
+    --arg target "$target" '
+      first(
+        .[]
+        | select(
+            .spec.relation == $relation
+            and .spec.target == $target
+          )
+        | .spec.source
+      )
+    '
+}
+
+assert_approval_link() {
+  local relation="$1" source="$2" target="$3"
+  approval_links | jq -e \
+    --arg relation "$relation" \
+    --arg source "$source" \
+    --arg target "$target" '
+      any(.[];
+        .spec.relation == $relation
+        and .spec.source == $source
+        and .spec.target == $target
+      )
+    ' >/dev/null
+}
+
+assert_no_per_approval_rbac() {
+  local request_path="$1"
+  for manifest in /builtin/role /builtin/role-binding; do
+    request --fail-with-body --silent --show-error --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "manifest=$manifest" \
+      "$API/resources" |
+      jq -e --arg request "$request_path" '
+        all(.[];
+          (.metadata.path | startswith($request + "/") | not)
+          and ((.spec | tostring | contains($request)) | not)
+        )
+      ' >/dev/null
+  done
+}
+
+# An Agent cannot perform this privileged write directly, but may request that
+# an approving User execute the exact operation.
+APPROVAL_TARGET="/approval-proofs/e2e-role"
+APPROVAL_RESOURCE="$(
+  jq -n --arg path "$APPROVAL_TARGET" '{
+    metadata: {
+      path: $path,
+      manifest: "/builtin/role",
+      name: "e2e-approved-role"
+    },
+    spec: {
+      description: "Created only through an approved elevation",
+      rules: []
+    }
+  }'
+)"
+DIRECT_APPROVAL_WRITE_STATUS="$(
+  command curl --silent \
+    --output "$E2E_DIR/direct-approval-write.json" \
+    --write-out "%{http_code}" \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$APPROVAL_RESOURCE" \
+    "$API/resources"
+)"
+[[ "$DIRECT_APPROVAL_WRITE_STATUS" == "403" ]]
+if get_resource "$APPROVAL_TARGET" >/dev/null 2>&1; then
+  echo "Agent direct privileged write unexpectedly created the target Role" >&2
+  false
+fi
+
+APPROVAL_REQUEST="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(
+      jq -n --argjson resource "$APPROVAL_RESOURCE" '{
+        reason: "E2E approval elevation proof",
+        operation: {
+          verb: "create",
+          resource: $resource
+        },
+        expires_in_seconds: 300
+      }'
+    )" \
+    "$APPROVAL_API/approvals"
+)"
+APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$APPROVAL_REQUEST")"
+APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$APPROVAL_REQUEST")"
+jq -e \
+  --arg target "$APPROVAL_TARGET" '
+    .metadata.manifest == "/manifests/approval"
+    and .metadata.state == "pending"
+    and .spec.kind == "request"
+    and (.spec | has("requested_by") | not)
+    and (.spec | has("requester_subject") | not)
+    and .spec.operation.verb == "create"
+    and .spec.operation.resource.metadata.path == $target
+  ' <<<"$APPROVAL_REQUEST" >/dev/null
+[[ "$APPROVAL_PATH" == "/approvals$OBSERVER_PATH/requests/"* ]]
+assert_approval_link \
+  "/manifests/approval/relations/requested-by" \
+  "$APPROVAL_PATH" \
+  "$OBSERVER_PATH"
+assert_no_per_approval_rbac "$APPROVAL_PATH"
+
+APPROVAL_DECISION="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"approve"}' \
+    "$APPROVAL_API/approvals/decide?path=$APPROVAL_PATH&expected_revision=$APPROVAL_REVISION"
+)"
+APPROVAL_DECISION_PATH="$(jq -r '.metadata.path' <<<"$APPROVAL_DECISION")"
+jq -e \
+  --arg decision_prefix "/approvals/users/platform-admin/decisions/" '
+    (.metadata.path | startswith($decision_prefix))
+    and .metadata.manifest == "/manifests/approval"
+    and .spec.kind == "decision"
+    and (.spec | has("approval") | not)
+    and .spec.outcome == "succeeded"
+    and (.spec | has("decided_by") | not)
+    and (.spec | has("result_path") | not)
+    and .spec.error == null
+  ' <<<"$APPROVAL_DECISION" >/dev/null
+assert_approval_link \
+  "/manifests/approval/relations/decides" \
+  "$APPROVAL_DECISION_PATH" \
+  "$APPROVAL_PATH"
+assert_approval_link \
+  "/manifests/approval/relations/decided-by" \
+  "$APPROVAL_DECISION_PATH" \
+  "/users/platform-admin"
+
+APPROVAL_RESULT_PATH="$(
+  approval_link_source \
+    "/manifests/approval/relations/result-of" \
+    "$APPROVAL_PATH"
+)"
+[[ "$APPROVAL_RESULT_PATH" == "/approvals$OBSERVER_PATH/results/"* ]]
+APPROVAL_RESULT="$(get_resource "$APPROVAL_RESULT_PATH")"
+jq -e \
+  --arg result "$APPROVAL_RESULT_PATH" \
+  --arg target "$APPROVAL_TARGET" '
+    .metadata.path == $result
+    and .metadata.manifest == "/manifests/approval-result"
+    and (.spec | has("approval") | not)
+    and .spec.response.status == 201
+    and (.spec.response.content_type | startswith("application/json"))
+    and .spec.response.body.metadata.path == $target
+    and .spec.response.body.metadata.manifest == "/builtin/role"
+    and .spec.response.body.metadata["[kas]"] == null
+    and .spec.response.body.status.metadata["[kas]"] == null
+  ' <<<"$APPROVAL_RESULT" >/dev/null
+assert_approval_link \
+  "/manifests/approval/relations/result-of" \
+  "$APPROVAL_RESULT_PATH" \
+  "$APPROVAL_PATH"
+assert_approval_link \
+  "/manifests/approval/relations/produced-by" \
+  "$APPROVAL_RESULT_PATH" \
+  "$APPROVAL_DECISION_PATH"
+assert_no_per_approval_rbac "$APPROVAL_PATH"
+
+APPROVED_TARGET="$(get_resource "$APPROVAL_TARGET")"
+jq -e '
+  .metadata.manifest == "/builtin/role"
+  and .spec.description == "Created only through an approved elevation"
+  and .spec.rules == []
+' <<<"$APPROVED_TARGET" >/dev/null
+wait_for_state "$APPROVAL_PATH" succeeded >/dev/null
+
+DUPLICATE_APPROVAL_STATUS="$(
+  command curl --silent \
+    --output "$E2E_DIR/duplicate-approval.json" \
+    --write-out "%{http_code}" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"approve"}' \
+    "$APPROVAL_API/approvals/decide?path=$APPROVAL_PATH&expected_revision=$APPROVAL_REVISION"
+)"
+[[ "$DUPLICATE_APPROVAL_STATUS" == "409" ]]
+
+# Rejection is terminal and creates no target object or Result.
+REJECTED_TARGET="/approval-proofs/rejected-role"
+REJECTED_REQUEST="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(
+      jq -n --arg path "$REJECTED_TARGET" '{
+        reason: "E2E rejection proof",
+        operation: {
+          verb: "create",
+          resource: {
+            metadata: {
+              path: $path,
+              manifest: "/builtin/role",
+              name: "e2e-rejected-role"
+            },
+            spec: {
+              description: "This Role must not be created",
+              rules: []
+            }
+          }
+        },
+        expires_in_seconds: 300
+      }'
+    )" \
+    "$APPROVAL_API/approvals"
+)"
+REJECTED_APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$REJECTED_REQUEST")"
+REJECTED_APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$REJECTED_REQUEST")"
+REJECTED_DECISION="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"reject"}' \
+    "$APPROVAL_API/approvals/decide?path=$REJECTED_APPROVAL_PATH&expected_revision=$REJECTED_APPROVAL_REVISION"
+)"
+jq -e \
+  --arg decision_prefix "/approvals/users/platform-admin/decisions/" '
+    (.metadata.path | startswith($decision_prefix))
+    and .spec.kind == "decision"
+    and .spec.outcome == "rejected"
+    and (.spec | has("approval") | not)
+    and (.spec | has("decided_by") | not)
+    and (.spec | has("credential_path") | not)
+    and (.spec | has("result_path") | not)
+    and .spec.error == null
+  ' <<<"$REJECTED_DECISION" >/dev/null
+REJECTED_DECISION_PATH="$(jq -r '.metadata.path' <<<"$REJECTED_DECISION")"
+assert_approval_link \
+  "/manifests/approval/relations/decides" \
+  "$REJECTED_DECISION_PATH" \
+  "$REJECTED_APPROVAL_PATH"
+assert_approval_link \
+  "/manifests/approval/relations/decided-by" \
+  "$REJECTED_DECISION_PATH" \
+  "/users/platform-admin"
+wait_for_state "$REJECTED_APPROVAL_PATH" rejected >/dev/null
+if get_resource "$REJECTED_TARGET" >/dev/null 2>&1; then
+  echo "rejected Approval unexpectedly created its target Role" >&2
+  false
+fi
+if approval_links | jq -e \
+  --arg relation "/manifests/approval/relations/result-of" \
+  --arg request "$REJECTED_APPROVAL_PATH" '
+    any(.[];
+      .spec.relation == $relation
+      and .spec.target == $request
+    )
+  ' >/dev/null; then
+  echo "rejected Approval unexpectedly created a Result Link" >&2
+  false
+fi
+assert_no_per_approval_rbac "$REJECTED_APPROVAL_PATH"
+
+# Read approvals store the sanitized API response in a separately protected
+# Approval Result. The requesting Agent may read it, while an unrelated Agent
+# cannot read the request or result. The Decision belongs to the approving User.
+LIMITED_APPROVER_PATH="/users/e2e-limited-approver"
+post_resource "$(
+  jq -n --arg path "$LIMITED_APPROVER_PATH" '{
+    metadata: {
+      path: $path,
+      manifest: "/builtin/user",
+      name: "e2e-limited-approver"
+    },
+    spec: {
+      disabled: false
+    }
+  }'
+)" >/dev/null
+LIMITED_APPROVER_TOKEN="$(
+  request --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"subject\":\"$LIMITED_APPROVER_PATH\"}" \
+    "$API/credentials/issue" |
+    jq -r '.token'
+)"
+GET_APPROVAL_REQUEST="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(
+      jq -n --arg path "$APPROVAL_TARGET" '{
+        reason: "E2E privileged read proof",
+        operation: {
+          verb: "get",
+          path: $path
+        },
+        expires_in_seconds: 300
+      }'
+    )" \
+    "$APPROVAL_API/approvals"
+)"
+GET_APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$GET_APPROVAL_REQUEST")"
+GET_APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$GET_APPROVAL_REQUEST")"
+INVALID_GET_DECISION="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $LIMITED_APPROVER_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"approve"}' \
+    "$APPROVAL_API/approvals/decide?path=$GET_APPROVAL_PATH&expected_revision=$GET_APPROVAL_REVISION"
+)"
+INVALID_GET_DECISION_PATH="$(jq -r '.metadata.path' <<<"$INVALID_GET_DECISION")"
+jq -e \
+  --arg prefix "/approvals/users/e2e-limited-approver/decisions/" '
+    (.metadata.path | startswith($prefix))
+    and .spec.kind == "decision"
+    and .spec.outcome == "invalid"
+    and (.spec.error | length) > 0
+  ' <<<"$INVALID_GET_DECISION" >/dev/null
+assert_approval_link \
+  "/manifests/approval/relations/decides" \
+  "$INVALID_GET_DECISION_PATH" \
+  "$GET_APPROVAL_PATH"
+assert_approval_link \
+  "/manifests/approval/relations/decided-by" \
+  "$INVALID_GET_DECISION_PATH" \
+  "$LIMITED_APPROVER_PATH"
+jq -e '
+  .metadata.state == "pending"
+  and .status.metadata.state == "pending"
+' <<<"$(get_resource "$GET_APPROVAL_PATH")" >/dev/null
+if approval_links | jq -e \
+  --arg relation "/manifests/approval/relations/result-of" \
+  --arg request "$GET_APPROVAL_PATH" '
+    any(.[];
+      .spec.relation == $relation
+      and .spec.target == $request
+    )
+  ' >/dev/null; then
+  echo "invalid Approval Decision unexpectedly created a Result Link" >&2
+  false
+fi
+
+GET_APPROVAL_DECISION="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"approve"}' \
+    "$APPROVAL_API/approvals/decide?path=$GET_APPROVAL_PATH&expected_revision=$GET_APPROVAL_REVISION"
+)"
+GET_APPROVAL_DECISION_PATH="$(jq -r '.metadata.path' <<<"$GET_APPROVAL_DECISION")"
+[[ "$GET_APPROVAL_DECISION_PATH" == "/approvals/users/platform-admin/decisions/"* ]]
+assert_approval_link \
+  "/manifests/approval/relations/decides" \
+  "$GET_APPROVAL_DECISION_PATH" \
+  "$GET_APPROVAL_PATH"
+GET_APPROVAL_RESULT_PATH="$(
+  approval_link_source \
+    "/manifests/approval/relations/result-of" \
+    "$GET_APPROVAL_PATH"
+)"
+[[ "$GET_APPROVAL_RESULT_PATH" == "/approvals$OBSERVER_PATH/results/"* ]]
+GET_APPROVAL_RESULT="$(
+  request --fail-with-body --silent --show-error --get \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    --data-urlencode "path=$GET_APPROVAL_RESULT_PATH" \
+    "$API/resources/by-path"
+)"
+jq -e \
+  --arg target "$APPROVAL_TARGET" '
+    .metadata.manifest == "/manifests/approval-result"
+    and .spec.response.status == 200
+    and (.spec.response.content_type | startswith("application/json"))
+    and .spec.response.body.metadata.path == $target
+    and .spec.response.body.metadata.manifest == "/builtin/role"
+    and .spec.response.body.metadata["[kas]"] == null
+    and .spec.response.body.status.metadata["[kas]"] == null
+  ' <<<"$GET_APPROVAL_RESULT" >/dev/null
+assert_approval_link \
+  "/manifests/approval/relations/produced-by" \
+  "$GET_APPROVAL_RESULT_PATH" \
+  "$GET_APPROVAL_DECISION_PATH"
+
+for visible_path in \
+  "$GET_APPROVAL_PATH" \
+  "$GET_APPROVAL_RESULT_PATH"; do
+  request --fail-with-body --silent --show-error --get \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    --data-urlencode "path=$visible_path" \
+    "$API/resources/by-path" >/dev/null
+done
+
+for private_path in \
+  "$GET_APPROVAL_PATH" \
+  "$GET_APPROVAL_RESULT_PATH"; do
+  PRIVATE_STATUS="$(
+    command curl --silent \
+      --output "$E2E_DIR/private-approval.json" \
+      --write-out "%{http_code}" \
+      --get \
+      -H "Authorization: Bearer $AGENT_TOKEN" \
+      --data-urlencode "path=$private_path" \
+      "$API/resources/by-path"
+  )"
+  [[ "$PRIVATE_STATUS" == "403" ]]
+done
+
+DECISION_REQUESTER_STATUS="$(
+  command curl --silent \
+    --output "$E2E_DIR/private-approval-decision.json" \
+    --write-out "%{http_code}" \
+    --get \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    --data-urlencode "path=$GET_APPROVAL_DECISION_PATH" \
+    "$API/resources/by-path"
+)"
+[[ "$DECISION_REQUESTER_STATUS" == "403" ]]
+assert_no_per_approval_rbac "$GET_APPROVAL_PATH"
+
+# LIST freezes its manifest, path prefix, and limit in the approved operation.
+LIST_APPROVAL_REQUEST="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(
+      jq -n '{
+        reason: "E2E privileged list proof",
+        operation: {
+          verb: "list",
+          manifest: "/builtin/role",
+          path_prefix: "/approval-proofs/",
+          limit: 1
+        },
+        expires_in_seconds: 300
+      }'
+    )" \
+    "$APPROVAL_API/approvals"
+)"
+LIST_APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$LIST_APPROVAL_REQUEST")"
+LIST_APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$LIST_APPROVAL_REQUEST")"
+LIST_APPROVAL_DECISION="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"decision":"approve"}' \
+    "$APPROVAL_API/approvals/decide?path=$LIST_APPROVAL_PATH&expected_revision=$LIST_APPROVAL_REVISION"
+)"
+LIST_APPROVAL_DECISION_PATH="$(jq -r '.metadata.path' <<<"$LIST_APPROVAL_DECISION")"
+LIST_APPROVAL_RESULT_PATH="$(
+  approval_link_source \
+    "/manifests/approval/relations/result-of" \
+    "$LIST_APPROVAL_PATH"
+)"
+assert_approval_link \
+  "/manifests/approval/relations/produced-by" \
+  "$LIST_APPROVAL_RESULT_PATH" \
+  "$LIST_APPROVAL_DECISION_PATH"
+LIST_APPROVAL_RESULT="$(
+  request --fail-with-body --silent --show-error --get \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    --data-urlencode "path=$LIST_APPROVAL_RESULT_PATH" \
+    "$API/resources/by-path"
+)"
+jq -e '
+  .metadata.manifest == "/manifests/approval-result"
+  and .spec.response.status == 200
+  and (.spec.response.content_type | startswith("application/json"))
+  and (.spec.response.body | length) == 1
+  and all(.spec.response.body[];
+    (.metadata.path | startswith("/approval-proofs/"))
+    and .metadata.manifest == "/builtin/role"
+    and .metadata["[kas]"] == null
+    and .status.metadata["[kas]"] == null)
+' <<<"$LIST_APPROVAL_RESULT" >/dev/null
+assert_no_per_approval_rbac "$LIST_APPROVAL_PATH"
+
 OBSERVER_SKILL_PATH="$OBSERVER_PATH/skills/self-created"
 OBSERVER_SKILL="$(
   request --fail-with-body --silent --show-error \
@@ -702,5 +1221,6 @@ control_driver "/manifests/message/driver" stopped
 control_driver "/manifests/agent/driver" stopped
 control_driver "/manifests/skill/driver" stopped
 control_driver "/manifests/file/driver" stopped
+control_driver "/manifests/approval/driver" stopped
 
-echo "KAS platform Skill, File, and persistent Session end-to-end test passed"
+echo "KAS platform Approval, Skill, File, and persistent Session end-to-end test passed"

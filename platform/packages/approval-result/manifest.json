@@ -1,0 +1,40 @@
+{
+  "path": "/manifests/approval-result",
+  "manifest": "/builtin/manifest",
+  "name": "approval-result",
+  "version": 1,
+  "description": "The immutable response produced by one successfully approved API operation.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "response"
+    ],
+    "properties": {
+      "response": {
+        "type": "object",
+        "required": [
+          "status",
+          "content_type",
+          "body"
+        ],
+        "properties": {
+          "status": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 299
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "body": {}
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}

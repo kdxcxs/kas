@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "path": "./relations/result-of",
+    "manifest": "/builtin/relation",
+    "name": "result-of"
+  },
+  "spec": {
+    "inverse_name": "results",
+    "sources": [
+      {
+        "manifest": "/manifests/approval-result"
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

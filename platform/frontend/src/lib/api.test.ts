@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FileApi, KasApi, KasApiError, SkillApi } from './api';
+import { ApprovalApi, FileApi, KasApi, KasApiError, SkillApi } from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -75,6 +75,42 @@ describe('SkillApi', () => {
       2,
       '/skills-api/skills?path=%2Fskills%2Fdemo&expected_revision=7',
       expect.objectContaining({ method: 'PATCH' })
+    );
+  });
+});
+
+describe('ApprovalApi', () => {
+  it('submits an optimistic User decision with Bearer authentication', async () => {
+    const request = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify(
+          resourceDocument(
+            '/approvals/users/demo/decisions/decision-id',
+            '/manifests/approval',
+            'approval-decision'
+          )
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', request);
+
+    await new ApprovalApi('/approvals-api/', 'secret').decide(
+      '/approvals/agents/demo/requests/request-id',
+      4,
+      'approve'
+    );
+
+    expect(request).toHaveBeenCalledWith(
+      '/approvals-api/approvals/decide?path=%2Fapprovals%2Fagents%2Fdemo%2Frequests%2Frequest-id&expected_revision=4',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/json'
+        },
+        body: '{"decision":"approve"}'
+      }
     );
   });
 });

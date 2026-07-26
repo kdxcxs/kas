@@ -7,6 +7,7 @@ FRONTEND_ROOT="$PLATFORM_ROOT/frontend"
 API_PORT="${KAS_PREVIEW_API_PORT:-3000}"
 FILE_PORT="${KAS_PREVIEW_FILE_PORT:-3001}"
 SKILL_PORT="${KAS_PREVIEW_SKILL_PORT:-3002}"
+APPROVAL_PORT="${KAS_PREVIEW_APPROVAL_PORT:-3003}"
 FRONTEND_PORT="${KAS_PREVIEW_FRONTEND_PORT:-5173}"
 PREVIEW_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-platform-preview.XXXXXX")"
 PACKAGES_DIR="$PREVIEW_DIR/packages"
@@ -65,7 +66,7 @@ if [[ -z "$CODEX_BIN" || ! -x "$CODEX_BIN" ]]; then
   exit 1
 fi
 
-python3 - "$API_PORT" "$FILE_PORT" "$SKILL_PORT" "$FRONTEND_PORT" <<'PY'
+python3 - "$API_PORT" "$FILE_PORT" "$SKILL_PORT" "$APPROVAL_PORT" "$FRONTEND_PORT" <<'PY'
 import socket
 import sys
 
@@ -94,6 +95,7 @@ fi
 API="http://127.0.0.1:$API_PORT"
 FILE_API="http://127.0.0.1:$FILE_PORT"
 SKILL_API="http://127.0.0.1:$SKILL_PORT"
+APPROVAL_API="http://127.0.0.1:$APPROVAL_PORT"
 FRONTEND="http://127.0.0.1:$FRONTEND_PORT"
 export KAS_DATA_DIR="$PREVIEW_DIR/data"
 export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
@@ -105,6 +107,9 @@ export KAS_FILE_API_URL="$FILE_API"
 export KAS_SKILL_ADDRESS="127.0.0.1:$SKILL_PORT"
 export KAS_SKILL_API="$SKILL_API"
 export KAS_SKILL_API_URL="$SKILL_API"
+export KAS_APPROVAL_ADDRESS="127.0.0.1:$APPROVAL_PORT"
+export KAS_APPROVAL_API="$APPROVAL_API"
+export KAS_APPROVAL_API_URL="$APPROVAL_API"
 export KAS_CODEX_BIN="$CODEX_BIN"
 
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
@@ -149,11 +154,13 @@ install_package() {
     "$API/packages"
 }
 
-echo "Installing Thread, Session, File, Skill, Agent, and Message packages..."
+echo "Installing Thread, Session, File, Skill, Approval Result, Approval, Agent, and Message packages..."
 install_package "$PACKAGES_DIR/thread.kas" >/dev/null
 install_package "$PACKAGES_DIR/session.kas" >/dev/null
 install_package "$PACKAGES_DIR/file.kas" >/dev/null
 install_package "$PACKAGES_DIR/skill.kas" >/dev/null
+install_package "$PACKAGES_DIR/approval-result.kas" >/dev/null
+install_package "$PACKAGES_DIR/approval.kas" >/dev/null
 install_package "$PACKAGES_DIR/agent.kas" >/dev/null
 install_package "$PACKAGES_DIR/message.kas" >/dev/null
 
@@ -178,6 +185,7 @@ wait_for_driver() {
 wait_for_driver "/manifests/agent/driver"
 wait_for_driver "/manifests/file/driver"
 wait_for_driver "/manifests/skill/driver"
+wait_for_driver "/manifests/approval/driver"
 wait_for_driver "/manifests/message/driver"
 
 file_ready=false
@@ -203,6 +211,19 @@ for _ in $(seq 1 100); do
 done
 if [[ "$skill_ready" != true ]]; then
   echo "Skill Driver API did not become ready" >&2
+  exit 1
+fi
+
+approval_ready=false
+for _ in $(seq 1 100); do
+  if curl --fail --silent "$APPROVAL_API/health" >/dev/null; then
+    approval_ready=true
+    break
+  fi
+  sleep 0.05
+done
+if [[ "$approval_ready" != true ]]; then
+  echo "Approval Driver API did not become ready" >&2
   exit 1
 fi
 
@@ -346,6 +367,7 @@ echo "Frontend:  $FRONTEND/"
 echo "API:       $API/"
 echo "File API:  $FILE_API/"
 echo "Skill API: $SKILL_API/"
+echo "Approval:  $APPROVAL_API/"
 echo "API base:  /api"
 echo "User path: /users/preview-admin"
 echo "Token:     $ADMIN_TOKEN"

@@ -569,11 +569,302 @@ button:disabled {
 
 .agent-management,
 .skill-management,
+.approval-management,
 .thread-management {
   grid-row: 4;
   min-height: 0;
   padding: 8px 34px 36px;
   overflow-y: auto;
+}
+
+.approval-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.8fr) minmax(440px, 1.2fr);
+  gap: 16px;
+  min-height: 520px;
+}
+
+.approval-index,
+.approval-detail {
+  min-width: 0;
+  background: #151912;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+}
+
+.approval-index {
+  padding: 8px;
+}
+
+.approval-index nav {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.approval-index button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  padding: 13px;
+  color: var(--muted);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.approval-index button:hover,
+.approval-index button.active {
+  color: var(--warm);
+  background: #20251c;
+  border-color: #30372a;
+}
+
+.approval-index button > span:first-child {
+  min-width: 0;
+}
+
+.approval-index strong,
+.approval-index small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.approval-index strong {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.approval-index small {
+  margin-top: 5px;
+  color: var(--quiet);
+  font-size: 9px;
+}
+
+.approval-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px;
+}
+
+.approval-detail > header,
+.decision-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.approval-detail h2,
+.decision-card h3 {
+  margin: 4px 0;
+  color: var(--warm);
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
+}
+
+.approval-detail code {
+  color: var(--quiet);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.approval-reason,
+.approval-payload,
+.decision-card,
+.approval-result-card,
+.approval-actions {
+  padding: 15px;
+  background: #11140f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.approval-reason span,
+.approval-payload h3 {
+  color: var(--quiet);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.approval-reason p,
+.approval-actions p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.approval-facts,
+.approval-payload dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.approval-facts div,
+.approval-payload dl div {
+  min-width: 0;
+  padding: 11px;
+  background: #191d16;
+  border-radius: 9px;
+}
+
+.approval-facts dt,
+.approval-payload dt {
+  color: var(--quiet);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.approval-facts dd,
+.approval-payload dd {
+  margin: 5px 0 0;
+  color: var(--warm);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.approval-payload h3 {
+  margin: 0 0 12px;
+}
+
+.approval-actions {
+  border-color: rgba(241, 217, 154, 0.2);
+}
+
+.approval-actions > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.decision-card {
+  display: grid;
+  gap: 14px;
+}
+
+.approval-records {
+  display: grid;
+  gap: 12px;
+}
+
+.approval-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.approval-section-heading p {
+  margin: 0;
+}
+
+.approval-section-heading span {
+  min-width: 24px;
+  padding: 4px 7px;
+  color: var(--quiet);
+  background: #191d16;
+  border-radius: 999px;
+  font-size: 9px;
+  text-align: center;
+}
+
+.decision-card.invalid {
+  border-color: rgba(211, 102, 82, 0.28);
+}
+
+.approval-result-card {
+  display: grid;
+  gap: 14px;
+}
+
+.approval-result-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.approval-result-card h3 {
+  margin: 4px 0 0;
+  color: var(--warm);
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
+}
+
+.approval-result-body {
+  padding: 13px;
+  background: #191d16;
+  border-radius: 9px;
+}
+
+.approval-result-body h4 {
+  margin: 0 0 10px;
+  color: var(--quiet);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.approval-result-body dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.approval-result-body dl div {
+  min-width: 0;
+  padding: 10px;
+  background: #11140f;
+  border-radius: 8px;
+}
+
+.approval-result-body dt {
+  color: var(--quiet);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.approval-result-body dd {
+  margin: 5px 0 0;
+  color: var(--warm);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.approval-result-body p {
+  margin: 10px 0 0;
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.decision-result,
+.decision-error {
+  margin: 0;
+  padding: 11px;
+  border-radius: 9px;
+  font-size: 11px;
+}
+
+.decision-result {
+  color: #dff6b5;
+  background: rgba(97, 133, 41, 0.13);
+}
+
+.decision-error {
+  color: #ffd3ca;
+  background: rgba(143, 50, 34, 0.2);
 }
 
 .skill-manager-layout {
@@ -1694,6 +1985,18 @@ button:disabled {
   border-color: rgba(241, 217, 154, 0.2);
 }
 
+.state-pill.invalid {
+  color: #ffd3ca;
+  background: rgba(143, 50, 34, 0.2);
+  border-color: rgba(211, 102, 82, 0.26);
+}
+
+.state-pill.superseded {
+  color: #c8cabb;
+  background: rgba(132, 136, 118, 0.14);
+  border-color: rgba(176, 181, 159, 0.18);
+}
+
 .agent-details {
   display: grid;
   gap: 12px;
@@ -2366,6 +2669,7 @@ button:disabled {
 
   .agent-management,
   .skill-management,
+  .approval-management,
   .thread-management {
     padding: 4px 18px 24px;
     overflow-y: visible;
@@ -2376,6 +2680,12 @@ button:disabled {
   }
 
   .skill-manager-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-layout,
+  .approval-facts,
+  .approval-payload dl {
     grid-template-columns: 1fr;
   }
 
