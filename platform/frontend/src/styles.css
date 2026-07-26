@@ -561,7 +561,9 @@ button:disabled {
 
 .conversation {
   grid-row: 4;
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -2053,12 +2055,16 @@ button:disabled {
 
 .message-list {
   width: min(760px, calc(100% - 56px));
+  max-width: 100%;
+  min-width: 0;
   margin: 0 auto;
   padding: 34px 0 28px;
 }
 
 .message {
   width: min(82%, 620px);
+  max-width: 100%;
+  min-width: 0;
   margin: 0 0 26px auto;
   padding: 15px 18px;
   color: #e4e6dd;
@@ -2095,7 +2101,9 @@ button:disabled {
 .message p {
   margin: 0;
   line-height: 1.62;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .message-attachments {
@@ -2243,6 +2251,8 @@ button:disabled {
   grid-row: 5;
   position: relative;
   width: min(760px, calc(100% - 56px));
+  max-width: 100%;
+  min-width: 0;
   margin: 0 auto;
   padding: 0 0 28px;
 }
