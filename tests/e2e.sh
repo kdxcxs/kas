@@ -655,21 +655,69 @@ curl --fail --silent \
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"metadata":{"path":"/roles/e2e-viewer","manifest":"/builtin/role","name":"e2e-viewer"},"spec":{"rules":[{"manifests":["/manifests/echo"],"verbs":["get"],"paths":["/resources/e2e/**"]}]}}' \
+  -d '{"metadata":{"path":"/roles/e2e-viewer","manifest":"/builtin/role","name":"e2e-viewer"},"spec":{"rules":[{"manifests":["/manifests/echo"],"verbs":["get","download"],"paths":["/resources/e2e/**"]}]}}' \
   "$API/resources" >/dev/null
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"metadata":{"path":"/role-bindings/e2e-viewer","manifest":"/builtin/role-binding","name":"e2e-viewer"},"spec":{"role":"/roles/e2e-viewer","subjects":["/users/e2e-viewer"]}}' \
   "$API/resources" >/dev/null
-VIEWER_TOKEN="$(
+VIEWER_CREDENTIAL="$(
   curl --fail --silent \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"subject":"/users/e2e-viewer"}' \
-    "$API/credentials/issue" |
-    jq -r '.token'
+    "$API/credentials/issue"
 )"
+VIEWER_TOKEN="$(jq -r '.token' <<<"$VIEWER_CREDENTIAL")"
+VIEWER_CREDENTIAL_PATH="$(jq -r '.resource_path' <<<"$VIEWER_CREDENTIAL")"
+
+curl --fail --silent \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  "$API/auth" |
+  jq -e --arg credential "$VIEWER_CREDENTIAL_PATH" '
+    .credential_path == $credential
+    and .subject == {
+      path: "/users/e2e-viewer",
+      manifest: "/builtin/user"
+    }
+    and .rules == [{
+      manifests: ["/manifests/echo"],
+      verbs: ["get", "download"],
+      paths: ["/resources/e2e/**"]
+    }]
+    and .driver_path == null
+    and .driver_generation == null
+  ' >/dev/null
+
+curl --fail --silent \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"manifest":"/manifests/echo","verb":"get","path":"/resources/e2e/echo"}' \
+  "$API/auth/check" |
+  jq -e --arg credential "$VIEWER_CREDENTIAL_PATH" '
+    .allowed == true
+    and .credential_path == $credential
+    and .subject.path == "/users/e2e-viewer"
+  ' >/dev/null
+
+curl --fail --silent \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"manifest":"/manifests/echo","verb":"download","path":"/resources/e2e/echo"}' \
+  "$API/auth/check" |
+  jq -e '.allowed == true' >/dev/null
+
+curl --fail --silent \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"manifest":"/manifests/echo","verb":"update","path":"/resources/e2e/echo"}' \
+  "$API/auth/check" |
+  jq -e '
+    .allowed == false
+    and .subject.path == "/users/e2e-viewer"
+  ' >/dev/null
+
 curl --fail --silent --get \
   -H "Authorization: Bearer $VIEWER_TOKEN" \
   --data-urlencode "path=$RESOURCE_PATH" \

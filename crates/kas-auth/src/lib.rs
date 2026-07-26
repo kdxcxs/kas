@@ -19,12 +19,27 @@ pub struct Rule {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthContext {
+    pub credential_path: String,
     pub subject: Subject,
     pub rules: Vec<Rule>,
     pub driver_path: Option<String>,
     pub driver_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizationCheck {
+    pub manifest: String,
+    pub verb: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizationDecision {
+    pub allowed: bool,
+    pub credential_path: String,
+    pub subject: Subject,
 }
 
 /// Credential material returned once by an issuance operation. Credentials

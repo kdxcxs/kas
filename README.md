@@ -364,6 +364,28 @@ Manifest 包通过 `resources/` 声明自己的 ServiceAccount、Role 和 RoleBi
 包中的 Resource。系统身份不依赖固定 Role path：bootstrap 按 Role spec 的
 `system_role` 语义查找 admin。
 
+调用者可以通过 `GET /auth` 查看当前 Bearer Credential 的完整授权上下文，
+包括 Credential path、Subject、所有当前有效 Rule，以及 Driver Credential
+的 Driver path 和 generation。该结果反映每次请求时数据库中的 Role 和
+RoleBinding，不是签发 Credential 时固化的权限快照。
+
+外部 Driver 或服务可以通过 `POST /auth/check` 判断当前 Bearer Credential
+是否允许对一个确定对象执行指定 verb：
+
+```json
+{
+  "manifest": "/manifests/file",
+  "verb": "download",
+  "path": "/files/report"
+}
+```
+
+接口始终以 `200 OK` 返回授权判断；权限不足表示为 `"allowed": false`，而不是
+请求失败。响应同时包含 Credential path 和 Subject，调用方不需要再请求一次
+`GET /auth` 才能识别操作者。无效或失效的 Credential 仍返回 `401`，格式错误的
+Manifest、path 或 verb 返回 `400`。这两个接口只检查请求自身携带的 Credential，
+不能查询其他 Credential 的权限。
+
 ## 更新、关系与事件
 
 根级 `metadata` 和 `spec` 是期望文档，`status.metadata` 和 `status.spec`
