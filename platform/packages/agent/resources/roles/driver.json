@@ -51,6 +51,18 @@
       },
       {
         "manifests": [
+          "/manifests/file"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/files/**"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/link"
         ],
         "verbs": [

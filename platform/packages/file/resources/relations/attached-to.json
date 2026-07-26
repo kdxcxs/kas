@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "path": "./relations/attached-to",
+    "manifest": "/builtin/relation",
+    "name": "attached-to"
+  },
+  "spec": {
+    "inverse_name": "attachments",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/files/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "*"
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

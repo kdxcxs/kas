@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ATTACHED_TO,
   AUTHORED_BY,
   MESSAGE_THREAD,
   MENTIONED,
@@ -13,6 +14,7 @@ import {
   participantAgentPaths,
   sessionForThreadAgent,
   sessionPath,
+  shouldSubmitComposer,
   slugify,
   threadParticipantLink,
   threadsForAgent
@@ -22,6 +24,29 @@ import type { Link, Resource } from './types';
 describe('slugify', () => {
   it('creates a path-safe Agent segment', () => {
     expect(slugify(' Release Planner / EU ')).toBe('release-planner-eu');
+  });
+});
+
+describe('composer keyboard handling', () => {
+  const enter = {
+    key: 'Enter',
+    shiftKey: false,
+    isComposing: false,
+    keyCode: 13
+  };
+
+  it('submits a normal Enter key', () => {
+    expect(shouldSubmitComposer(enter)).toBe(true);
+  });
+
+  it('does not submit while an input method is composing', () => {
+    expect(shouldSubmitComposer({ ...enter, isComposing: true })).toBe(false);
+    expect(shouldSubmitComposer(enter, true)).toBe(false);
+    expect(shouldSubmitComposer({ ...enter, keyCode: 229 })).toBe(false);
+  });
+
+  it('keeps Shift+Enter as a newline', () => {
+    expect(shouldSubmitComposer({ ...enter, shiftKey: true })).toBe(false);
   });
 });
 
@@ -120,15 +145,21 @@ describe('Message resources', () => {
       '/users/admin',
       '/threads/planning',
       ['/agents/planner'],
-      '/messages/previous'
+      '/messages/previous',
+      ['/files/one']
     );
 
     expect(message.links?.map((entry) => entry.relation_path)).toEqual([
       AUTHORED_BY,
       MESSAGE_THREAD,
       REPLIES_TO,
+      ATTACHED_TO,
       MENTIONED
     ]);
+    expect(message.links?.find((entry) => entry.relation_path === ATTACHED_TO)).toMatchObject({
+      source: { path: '/files/one' },
+      target: { path: '/messages/message-1' }
+    });
     expect(message.links?.find((entry) => entry.relation_path === MESSAGE_THREAD)?.target.path).toBe(
       '/threads/planning'
     );

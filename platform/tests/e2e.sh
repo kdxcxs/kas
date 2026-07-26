@@ -158,11 +158,15 @@ CARGO_TARGET_DIR="$CORE_TARGET" cargo build --workspace
 CARGO_TARGET_DIR="$PLATFORM_TARGET" "$PLATFORM_ROOT/scripts/build-packages.sh" "$E2E_DIR/packages"
 
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+FILE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
+FILE_API="http://127.0.0.1:$FILE_PORT"
 export KAS_DATA_DIR="$E2E_DIR/data"
 export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
+export KAS_FILE_ADDRESS="127.0.0.1:$FILE_PORT"
+export KAS_FILE_API="$FILE_API"
 export KAS_CODEX_BIN="$CODEX_BIN"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 export KAS_CODEX_HOME="$E2E_DIR/codex-home"
@@ -198,9 +202,10 @@ install_package() {
 
 THREAD_PACKAGE="$(install_package "$E2E_DIR/packages/thread.kas")"
 SESSION_PACKAGE="$(install_package "$E2E_DIR/packages/session.kas")"
+FILE_PACKAGE="$(install_package "$E2E_DIR/packages/file.kas")"
 AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
-for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE"; do
+for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE"; do
   jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
 
@@ -212,6 +217,9 @@ for path in \
   /manifests/session \
   /manifests/session/relations/thread-session \
   /manifests/session/relations/agent-session \
+  /manifests/file \
+  /manifests/file/relations/attached-to \
+  /manifests/file/relations/uploaded-by \
   /manifests/message \
   /manifests/message/relations/authored-by \
   /manifests/message/relations/message-thread \
@@ -225,16 +233,71 @@ if get_resource "/manifests/message/relations/thread-root" >/dev/null 2>&1; then
 fi
 
 AGENT_DRIVER="$(wait_for_state "/manifests/agent/driver" running)"
+FILE_DRIVER="$(wait_for_state "/manifests/file/driver" running)"
 MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
 jq -e '.spec == .status.spec' <<<"$AGENT_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$FILE_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$MESSAGE_DRIVER" >/dev/null
+for _ in $(seq 1 200); do
+  if command curl --fail --silent "$FILE_API/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+command curl --fail --silent "$FILE_API/health" | jq -e '.ok == true' >/dev/null
 
 mkdir -p "$E2E_DIR/workspace"
 AGENT_PATH="/agents/e2e"
 OBSERVER_PATH="/agents/observer"
 PROOF_PATH="/messages/e2e-agent-network-proof"
-KAS_PROOF="KAS_NETWORK_$(uuidgen | tr '[:lower:]' '[:upper:]')"
-SESSION_SECRET="$KAS_PROOF"
+FILE_PROOF="KAS_FILE_$(uuidgen | tr '[:lower:]' '[:upper:]')"
+SESSION_SECRET="KAS_SESSION_$(uuidgen | tr '[:lower:]' '[:upper:]')"
+printf '%s' "$FILE_PROOF" >"$E2E_DIR/attachment.bin"
+FILE="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -F "content=@$E2E_DIR/attachment.bin;type=application/octet-stream" \
+    "$FILE_API/files?path=/files/e2e-input"
+)"
+FILE_PATH="$(jq -r '.metadata.path' <<<"$FILE")"
+jq -e --arg path "$FILE_PATH" '
+  .metadata.manifest == "/manifests/file"
+  and .metadata.path == $path
+  and .spec.filename == "attachment.bin"
+  and .spec.media_type == "application/octet-stream"
+  and .spec.size > 0
+  and (.spec.digest | test("^sha256:[0-9a-f]{64}$"))
+  and (.spec.handle | length) > 0
+' <<<"$FILE" >/dev/null
+wait_for_state "$FILE_PATH" available >/dev/null
+command curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "path=$FILE_PATH" \
+  "$FILE_API/files/content" >"$E2E_DIR/downloaded.bin"
+cmp "$E2E_DIR/attachment.bin" "$E2E_DIR/downloaded.bin"
+command curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Range: bytes=4-7" \
+  --data-urlencode "path=$FILE_PATH" \
+  "$FILE_API/files/content" >"$E2E_DIR/range.bin"
+cmp <(printf '%s' "${FILE_PROOF:4:4}") "$E2E_DIR/range.bin"
+FILE_ONLY_MESSAGE="/messages/e2e-file-only"
+post_resource "$(
+  jq -n --arg path "$FILE_ONLY_MESSAGE" '{
+    metadata: {
+      path: $path,
+      manifest: "/manifests/message",
+      name: "e2e-file-only"
+    },
+    spec: {
+      role: "user",
+      body: ""
+    }
+  }'
+)" >/dev/null
+create_link "$FILE_ONLY_MESSAGE/links/attachments/e2e-input" \
+  "/manifests/file/relations/attached-to" "$FILE_PATH" "$FILE_ONLY_MESSAGE"
+wait_for_state "$FILE_ONLY_MESSAGE" available >/dev/null
 
 create_agent() {
   local path="$1" name="$2" instructions="$3"
@@ -272,6 +335,41 @@ for path in \
   "$OBSERVER_PATH/links/service-account"; do
   get_resource "$path" >/dev/null
 done
+OBSERVER_TOKEN="$(
+  request --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"subject\":\"$OBSERVER_PATH/service-account\"}" \
+    "$API/credentials/issue" |
+    jq -r '.token'
+)"
+command curl --fail --silent --get \
+  -H "Authorization: Bearer $OBSERVER_TOKEN" \
+  --data-urlencode "path=$FILE_PATH" \
+  "$FILE_API/files/content" >"$E2E_DIR/observer-download.bin"
+cmp "$E2E_DIR/attachment.bin" "$E2E_DIR/observer-download.bin"
+AGENT_UPLOAD_PATH="/files/agent-upload"
+AGENT_UPLOAD="$(
+  command curl --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -F "content=@$E2E_DIR/attachment.bin;type=application/octet-stream" \
+    "$FILE_API/files?path=$AGENT_UPLOAD_PATH"
+)"
+jq -e --arg path "$AGENT_UPLOAD_PATH" '
+  .metadata.path == $path and .metadata.manifest == "/manifests/file"
+' <<<"$AGENT_UPLOAD" >/dev/null
+OVERWRITE_STATUS="$(
+  command curl --silent --output "$E2E_DIR/upload-conflict.json" --write-out "%{http_code}" \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -F "content=@$E2E_DIR/range.bin;type=application/octet-stream" \
+    "$FILE_API/files?path=$AGENT_UPLOAD_PATH"
+)"
+[[ "$OVERWRITE_STATUS" == "409" ]]
+command curl --fail --silent --get \
+  -H "Authorization: Bearer $OBSERVER_TOKEN" \
+  --data-urlencode "path=$AGENT_UPLOAD_PATH" \
+  "$FILE_API/files/content" >"$E2E_DIR/agent-upload-download.bin"
+cmp "$E2E_DIR/attachment.bin" "$E2E_DIR/agent-upload-download.bin"
 
 THREAD_PATH="/threads/e2e"
 post_resource "$(
@@ -293,7 +391,7 @@ MESSAGE_PATH="/messages/e2e-user"
 post_resource "$(
   jq -n \
     --arg path "$MESSAGE_PATH" \
-    --arg body "@e2e Remember $SESSION_SECRET. Use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec {\"role\":\"system\",\"body\":\"$KAS_PROOF\"}. After the POST succeeds, reply with exactly CREATED and no other text." '{
+    --arg body "@e2e Remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file; do not use a placeholder or angle brackets. After the POST succeeds, read the created Resource back and verify spec.body still equals the downloaded text, then reply with exactly CREATED and no other text." '{
     metadata: {
       path: $path,
       manifest: "/manifests/message",
@@ -307,6 +405,8 @@ post_resource "$(
 )" >/dev/null
 create_link "$MESSAGE_PATH/links/authored-by" \
   "/manifests/message/relations/authored-by" "$MESSAGE_PATH" "/users/platform-admin"
+create_link "$MESSAGE_PATH/links/attachments/e2e-input" \
+  "/manifests/file/relations/attached-to" "$FILE_PATH" "$MESSAGE_PATH"
 MENTION_LINK="$MESSAGE_PATH/links/mentioned/agents-e2e"
 create_link "$MENTION_LINK" \
   "/manifests/message/relations/mentioned" "$MESSAGE_PATH" "$AGENT_PATH"
@@ -338,7 +438,7 @@ if get_resource "$OBSERVER_RUN" >/dev/null 2>&1; then
 fi
 
 PROOF="$(get_resource "$PROOF_PATH")"
-jq -e --arg proof "$KAS_PROOF" '
+jq -e --arg proof "$FILE_PROOF" '
   .metadata.manifest == "/manifests/message"
   and .spec == {role: "system", body: $proof}
 ' <<<"$PROOF" >/dev/null
@@ -440,7 +540,34 @@ jq -e --arg id "$SESSION_ID" --arg cursor "$SECOND_REPLY_PATH" '
   and .spec == .status.spec
 ' <<<"$SESSION" >/dev/null
 
+FILE_RESOURCE="$(get_resource "$FILE_PATH")"
+request --fail --silent --request DELETE --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "path=$FILE_PATH" \
+  --data-urlencode "expected_revision=$(jq -r '.metadata["[kas]"].revision' <<<"$FILE_RESOURCE")" \
+  "$API/resources/by-path" \
+  >/dev/null
+for _ in $(seq 1 400); do
+  if ! get_resource "$FILE_PATH" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+if get_resource "$FILE_PATH" >/dev/null 2>&1; then
+  echo "File Resource was not deleted after content reconciliation" >&2
+  false
+fi
+DELETED_DOWNLOAD_STATUS="$(
+  command curl --silent --output "$E2E_DIR/deleted-download.json" --write-out "%{http_code}" \
+    --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "path=$FILE_PATH" \
+    "$FILE_API/files/content"
+)"
+[[ "$DELETED_DOWNLOAD_STATUS" == "404" ]]
+
 control_driver "/manifests/message/driver" stopped
 control_driver "/manifests/agent/driver" stopped
+control_driver "/manifests/file/driver" stopped
 
-echo "KAS platform persistent Session end-to-end test passed"
+echo "KAS platform File and persistent Session end-to-end test passed"

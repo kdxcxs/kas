@@ -1,8 +1,48 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { KasApi, KasApiError } from './api';
+import { FileApi, KasApi, KasApiError } from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('FileApi', () => {
+  it('uploads multipart content without overriding its boundary', async () => {
+    const request = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify(resourceDocument('/files/one', '/manifests/file', 'one.txt')),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', request);
+    const file = new File(['hello'], 'one.txt', { type: 'text/plain' });
+
+    const uploaded = await new FileApi('/files-api/', 'secret').upload(file);
+
+    expect(uploaded.path).toBe('/files/one');
+    expect(request).toHaveBeenCalledWith('/files-api/files', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret' },
+      body: expect.any(FormData)
+    });
+    const body = request.mock.calls[0][1].body as FormData;
+    expect(body.get('content')).toMatchObject({
+      name: 'one.txt',
+      size: 5,
+      type: 'text/plain'
+    });
+  });
+
+  it('downloads content using the same Bearer token', async () => {
+    const request = vi.fn().mockResolvedValue(new Response('hello', { status: 200 }));
+    vi.stubGlobal('fetch', request);
+
+    const blob = await new FileApi('/files-api', 'secret').download('/files/one');
+
+    expect(await blob.text()).toBe('hello');
+    expect(request).toHaveBeenCalledWith('/files-api/files/content?path=%2Ffiles%2Fone', {
+      headers: { Authorization: 'Bearer secret' }
+    });
+  });
 });
 
 describe('KasApi', () => {

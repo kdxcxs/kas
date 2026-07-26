@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "file-driver"
+  },
+  "spec": {
+    "description": "Store File descriptors, ownership Links, and reconcile content lifecycle.",
+    "rules": [
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/files/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/files/**"
+        ]
+      }
+    ]
+  }
+}

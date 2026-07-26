@@ -15,6 +15,7 @@ const RUN_MANIFEST: &str = "/builtin/run";
 const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
 const MENTIONED: &str = "/manifests/message/relations/mentioned";
+const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
 const PARTICIPANTS: &str = "/manifests/thread/relations/participants";
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,27 @@ impl Driver for MessageDriver {
 
     async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
         if resource.manifest == MESSAGE_MANIFEST {
+            let body = resource
+                .spec
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if body.trim().is_empty()
+                && !self.list_links()?.iter().any(|link_resource| {
+                    serde_json::from_value::<LinkSpec>(link_resource.spec.clone()).is_ok_and(
+                        |link| {
+                            link.relation == ATTACHED_TO
+                                && link.target == resource.path
+                                && link_resource.metadata.state != kas_core::STATE_DELETED
+                        },
+                    )
+                })
+            {
+                return Err(execution_error(format!(
+                    "Message {} requires text or an attached File",
+                    resource.path
+                )));
+            }
             return Ok(vec![Mutation::UpdateResourceStatus {
                 resource_path: resource.path.clone(),
                 expected_revision: resource.revision,

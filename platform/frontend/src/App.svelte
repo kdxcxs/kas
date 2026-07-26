@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { KasApi, KasApiError } from './lib/api';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { FileApi, KasApi, KasApiError } from './lib/api';
   import {
     AGENT_MANIFEST,
+    ATTACHED_TO,
     AUTHORED_BY,
+    FILE_MANIFEST,
     MESSAGE_MANIFEST,
     PARTICIPANTS,
     SESSION_MANIFEST,
@@ -18,6 +20,7 @@
     participantsForThread,
     relationTarget,
     sessionForThreadAgent,
+    shouldSubmitComposer,
     slugify,
     threadParticipantLink,
     threadsForAgent
@@ -33,6 +36,7 @@
 
   const SETTINGS_KEY = 'kas-platform-settings';
   const DEFAULT_API_BASE = import.meta.env.VITE_KAS_API_URL || '/api';
+  const DEFAULT_FILE_API_BASE = import.meta.env.VITE_KAS_FILE_API_URL || '/files-api';
 
   interface Settings {
     apiBase: string;
@@ -67,6 +71,7 @@
   let agents: Resource[] = [];
   let threads: Resource[] = [];
   let messages: Resource[] = [];
+  let files: Resource[] = [];
   let sessions: Resource[] = [];
   let selectedAgentPath = '';
   let activeThreadPath: string | null = null;
@@ -77,6 +82,12 @@
   let error = '';
   let notice = '';
   let composer = '';
+  let composerCompositionActive = false;
+  let pendingFiles: File[] = [];
+  let fileInput: HTMLInputElement;
+  let previewUrls: Record<string, string> = {};
+  let previewingFilePath = '';
+  let downloadingFilePath = '';
   let showSettings = false;
   let showCreateAgent = false;
   let showCreateThread = false;
@@ -151,8 +162,16 @@
     if (settings.token) void connect();
   });
 
+  onDestroy(() => {
+    Object.values(previewUrls).forEach((url) => URL.revokeObjectURL(url));
+  });
+
   function client(): KasApi {
     return new KasApi(settings.apiBase, settings.token);
+  }
+
+  function fileClient(): FileApi {
+    return new FileApi(DEFAULT_FILE_API_BASE, settings.token);
   }
 
   async function connect(): Promise<void> {
@@ -175,12 +194,14 @@
   async function loadData(api = client()): Promise<void> {
     loading = true;
     try {
-      const [agentResources, threadResources, messageResources, sessionResources] = await Promise.all([
-        api.listResources(AGENT_MANIFEST),
-        api.listResources(THREAD_MANIFEST),
-        api.listResources(MESSAGE_MANIFEST),
-        api.listResources(SESSION_MANIFEST)
-      ]);
+      const [agentResources, threadResources, messageResources, sessionResources, fileResources] =
+        await Promise.all([
+          api.listResources(AGENT_MANIFEST),
+          api.listResources(THREAD_MANIFEST),
+          api.listResources(MESSAGE_MANIFEST),
+          api.listResources(SESSION_MANIFEST),
+          api.listResources(FILE_MANIFEST)
+        ]);
       agents = agentResources
         .filter((resource) => resource.manifest === AGENT_MANIFEST)
         .sort((left, right) => left.name.localeCompare(right.name));
@@ -199,6 +220,11 @@
       sessions = await Promise.all(
         sessionResources
           .filter((resource) => resource.manifest === SESSION_MANIFEST)
+          .map((resource) => api.getResource(resource.path, true))
+      );
+      files = await Promise.all(
+        fileResources
+          .filter((resource) => resource.manifest === FILE_MANIFEST)
           .map((resource) => api.getResource(resource.path, true))
       );
       driver = await api.getAgentDriver();
@@ -594,25 +620,34 @@
 
   async function sendMessage(): Promise<void> {
     const body = composer.trim();
-    if (!body || !activeThread || sending) return;
+    if ((!body && pendingFiles.length === 0) || !activeThread || sending) return;
     sending = true;
     error = '';
     const mentioned = mentionedAgentPaths(body, activeParticipants);
     notice = mentioned.length > 0 ? 'Mentioned Agents are working…' : 'Sending Message…';
     const parent = activeMessages.at(-1)?.path ?? null;
     const messageId = crypto.randomUUID();
-    const userMessage = buildUserMessage(
-      messageId,
-      body,
-      settings.userPath,
-      activeThread.path,
-      mentioned,
-      parent
-    );
+    const uploaded: Resource[] = [];
+    let messageCreated = false;
     try {
       const api = client();
+      for (const file of pendingFiles) {
+        uploaded.push(await fileClient().upload(file));
+      }
+      const userMessage = buildUserMessage(
+        messageId,
+        body,
+        settings.userPath,
+        activeThread.path,
+        mentioned,
+        parent,
+        uploaded.map((file) => file.path)
+      );
       await api.createResource(userMessage);
+      messageCreated = true;
       composer = '';
+      pendingFiles = [];
+      if (fileInput) fileInput.value = '';
       await loadData(api);
       activeThreadPath = activeThread.path;
       if (mentioned.length === 0) {
@@ -631,6 +666,12 @@
       notice = runs.length === 1 ? 'Reply received' : `${runs.length} replies received`;
     } catch (cause) {
       error = messageOf(cause);
+      if (!messageCreated && uploaded.length > 0) {
+        const api = client();
+        await Promise.allSettled(
+          uploaded.map((file) => api.deleteResource(file.path, file.revision))
+        );
+      }
       await loadData().catch(() => undefined);
     } finally {
       sending = false;
@@ -661,6 +702,80 @@
 
   function bodyOf(message: Resource): string {
     return typeof message.spec.body === 'string' ? message.spec.body : '';
+  }
+
+  function attachmentsFor(message: Resource): Resource[] {
+    return files.filter((file) =>
+      file.links?.some(
+        (link) =>
+          link.relation_path === ATTACHED_TO &&
+          link.source.path === file.path &&
+          link.target.path === message.path
+      )
+    );
+  }
+
+  function fileName(file: Resource): string {
+    return typeof file.spec.filename === 'string' ? file.spec.filename : file.name;
+  }
+
+  function fileMediaType(file: Resource): string {
+    return typeof file.spec.media_type === 'string'
+      ? file.spec.media_type
+      : 'application/octet-stream';
+  }
+
+  function fileSize(file: Resource): string {
+    const size = typeof file.spec.size === 'number' ? file.spec.size : 0;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function isPreviewable(file: Resource): boolean {
+    return /^(image|video|audio)\//.test(fileMediaType(file));
+  }
+
+  async function previewFile(file: Resource): Promise<void> {
+    if (previewUrls[file.path]) return;
+    previewingFilePath = file.path;
+    error = '';
+    try {
+      const blob = await fileClient().download(file.path);
+      previewUrls = { ...previewUrls, [file.path]: URL.createObjectURL(blob) };
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      previewingFilePath = '';
+    }
+  }
+
+  async function downloadFile(file: Resource): Promise<void> {
+    downloadingFilePath = file.path;
+    error = '';
+    try {
+      const blob = await fileClient().download(file.path);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName(file);
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      downloadingFilePath = '';
+    }
+  }
+
+  function selectFiles(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    pendingFiles = [...pendingFiles, ...Array.from(input.files ?? [])];
+    input.value = '';
+  }
+
+  function removePendingFile(index: number): void {
+    pendingFiles = pendingFiles.filter((_, candidate) => candidate !== index);
   }
 
   function titleOf(thread: Resource): string {
@@ -1211,7 +1326,52 @@
                   <span>{authorOf(message)}</span>
                   <time datetime={message.created_at}>{timeOf(message.created_at)}</time>
                 </div>
-                <p>{bodyOf(message)}</p>
+                {#if bodyOf(message)}
+                  <p>{bodyOf(message)}</p>
+                {/if}
+                {#if attachmentsFor(message).length > 0}
+                  <div class="message-attachments">
+                    {#each attachmentsFor(message) as file}
+                      <article class="attachment-card">
+                        <div class="attachment-summary">
+                          <div class="attachment-icon">{fileMediaType(file).split('/')[0]}</div>
+                          <div>
+                            <strong>{fileName(file)}</strong>
+                            <span>{fileMediaType(file)} · {fileSize(file)}</span>
+                          </div>
+                        </div>
+                        {#if previewUrls[file.path]}
+                          {#if fileMediaType(file).startsWith('image/')}
+                            <img src={previewUrls[file.path]} alt={fileName(file)} />
+                          {:else if fileMediaType(file).startsWith('video/')}
+                            <!-- svelte-ignore a11y_media_has_caption -->
+                            <video src={previewUrls[file.path]} controls></video>
+                          {:else if fileMediaType(file).startsWith('audio/')}
+                            <audio src={previewUrls[file.path]} controls></audio>
+                          {/if}
+                        {/if}
+                        <div class="attachment-actions">
+                          {#if isPreviewable(file) && !previewUrls[file.path]}
+                            <button
+                              type="button"
+                              disabled={previewingFilePath === file.path}
+                              onclick={() => void previewFile(file)}
+                            >
+                              {previewingFilePath === file.path ? 'Loading…' : 'Preview'}
+                            </button>
+                          {/if}
+                          <button
+                            type="button"
+                            disabled={downloadingFilePath === file.path}
+                            onclick={() => void downloadFile(file)}
+                          >
+                            {downloadingFilePath === file.path ? 'Downloading…' : 'Download'}
+                          </button>
+                        </div>
+                      </article>
+                    {/each}
+                  </div>
+                {/if}
               </article>
             {/each}
             {#if sending}
@@ -1234,21 +1394,53 @@
               @{mentionHandle(agent)}
             </button>
           {/each}
+          <button type="button" class="attach-button" onclick={() => fileInput?.click()}>
+            + File
+          </button>
         </div>
+        <input
+          class="file-input"
+          bind:this={fileInput}
+          type="file"
+          multiple
+          disabled={sending}
+          onchange={selectFiles}
+        />
+        {#if pendingFiles.length > 0}
+          <div class="pending-attachments" aria-label="Pending attachments">
+            {#each pendingFiles as file, index}
+              <span>
+                <strong>{file.name}</strong>
+                <small>{file.size} B</small>
+                <button
+                  type="button"
+                  aria-label={`Remove ${file.name}`}
+                  onclick={() => removePendingFile(index)}
+                >×</button>
+              </span>
+            {/each}
+          </div>
+        {/if}
         <textarea
           bind:value={composer}
           aria-label="Message"
           placeholder="Message this Thread… use @handle to trigger an Agent"
           rows="1"
           disabled={sending}
+          oncompositionstart={() => (composerCompositionActive = true)}
+          oncompositionend={() => (composerCompositionActive = false)}
           onkeydown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
+            if (shouldSubmitComposer(event, composerCompositionActive)) {
               event.preventDefault();
               void sendMessage();
             }
           }}
         ></textarea>
-        <button class="send-button" type="submit" disabled={sending || !composer.trim()}>
+        <button
+          class="send-button"
+          type="submit"
+          disabled={sending || (!composer.trim() && pendingFiles.length === 0)}
+        >
           {sending ? '···' : '↑'}
         </button>
         <div class="composer-note">Only mentioned Agents run · Enter to send</div>

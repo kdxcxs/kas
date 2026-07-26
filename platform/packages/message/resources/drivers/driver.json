@@ -19,6 +19,7 @@
         "paths": [
           "/messages/*/links/message-thread",
           "/messages/*/links/mentioned/*",
+          "/messages/*/links/attachments/*",
           "/threads/*/links/participants/*"
         ]
       }

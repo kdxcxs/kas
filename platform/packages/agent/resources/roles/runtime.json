@@ -47,6 +47,20 @@
       },
       {
         "manifests": [
+          "/manifests/file"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "download",
+          "upload"
+        ],
+        "paths": [
+          "/files/**"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/link"
         ],
         "verbs": [

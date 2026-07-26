@@ -183,6 +183,47 @@ export class KasApi {
   }
 }
 
+export class FileApi {
+  constructor(
+    readonly baseUrl: string,
+    readonly token: string
+  ) {}
+
+  async upload(file: File, path?: string): Promise<Resource> {
+    const form = new FormData();
+    form.append('content', file, file.name);
+    const query = path ? `?${new URLSearchParams({ path })}` : '';
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/files${query}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.token}` },
+      body: form
+    });
+    await requireResponse(response);
+    return resourceFromDocument((await response.json()) as ResourceDocument);
+  }
+
+  async download(path: string): Promise<Blob> {
+    const response = await fetch(
+      `${this.baseUrl.replace(/\/$/, '')}/files/content?${new URLSearchParams({ path })}`,
+      { headers: { Authorization: `Bearer ${this.token}` } }
+    );
+    await requireResponse(response);
+    return response.blob();
+  }
+}
+
+async function requireResponse(response: Response): Promise<void> {
+  if (response.ok) return;
+  let message = `${response.status} ${response.statusText}`;
+  try {
+    const body = (await response.json()) as { error?: string };
+    if (body.error) message = body.error;
+  } catch {
+    // Keep the HTTP status when the response is not JSON.
+  }
+  throw new KasApiError(message, response.status);
+}
+
 function resourcePayload(resource: CreateResource): unknown {
   return {
     metadata: {
@@ -194,7 +235,7 @@ function resourcePayload(resource: CreateResource): unknown {
   };
 }
 
-function resourceFromDocument(document: ResourceDocument): Resource {
+export function resourceFromDocument(document: ResourceDocument): Resource {
   return {
     path: document.metadata.path,
     manifest: document.metadata.manifest,

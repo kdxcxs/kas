@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 const AGENT_MANIFEST: &str = "/manifests/agent";
 const MESSAGE_MANIFEST: &str = "/manifests/message";
+const FILE_MANIFEST: &str = "/manifests/file";
 const SESSION_MANIFEST: &str = "/manifests/session";
 const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const LINK_MANIFEST: &str = "/builtin/link";
@@ -28,6 +29,7 @@ const THREAD_SESSION: &str = "/manifests/session/relations/thread-session";
 const AGENT_SESSION: &str = "/manifests/session/relations/agent-session";
 const SERVICE_ACCOUNT_RELATION: &str = "/manifests/agent/relations/service-account";
 const AGENT_RUNTIME_ROLE: &str = "/manifests/agent/roles/runtime";
+const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
 
 #[derive(Debug, Clone)]
 pub struct AgentDriver {
@@ -54,6 +56,13 @@ struct SessionSpec {
     provider: String,
     session_id: String,
     cursor: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileSpec {
+    filename: String,
+    media_type: String,
+    size: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -187,6 +196,7 @@ impl AgentDriver {
         cursor: Option<&str>,
     ) -> Result<String, DriverError> {
         let links = self.list_resources(LINK_MANIFEST)?;
+        let files = self.list_resources(FILE_MANIFEST)?;
         let mut messages = self
             .list_resources(MESSAGE_MANIFEST)?
             .into_iter()
@@ -248,6 +258,29 @@ impl AgentDriver {
                 "[{role} by {author} at {}]\n{body}\n\n",
                 message.path
             ));
+            let attachments = links
+                .iter()
+                .filter_map(|resource| {
+                    let link = serde_json::from_value::<LinkSpec>(resource.spec.clone()).ok()?;
+                    (link.relation == ATTACHED_TO && link.target == message.path)
+                        .then_some(link.source)
+                })
+                .filter_map(|file_path| {
+                    let file = files.iter().find(|file| file.path == file_path)?;
+                    let spec = serde_json::from_value::<FileSpec>(file.spec.clone()).ok()?;
+                    Some((file.path.as_str(), spec))
+                })
+                .collect::<Vec<_>>();
+            if !attachments.is_empty() {
+                transcript.push_str("Attachments:\n");
+                for (path, spec) in attachments {
+                    transcript.push_str(&format!(
+                        "- resource: {path}\n  filename: {}\n  media_type: {}\n  size: {} bytes\n  download: curl -sS -G -H \"Authorization: Bearer $KAS_TOKEN\" --data-urlencode \"path={path}\" \"$KAS_FILE_API/files/content\" -o <output-path>\n",
+                        spec.filename, spec.media_type, spec.size
+                    ));
+                }
+                transcript.push('\n');
+            }
         }
         Ok(transcript.trim_end().to_owned())
     }
@@ -277,6 +310,12 @@ impl AgentDriver {
 - Your Agent Resource path is {agent_path}.
 - Your ServiceAccount path is {service_account_path}.
 - Use the KAS REST API at $KAS_API with `Authorization: Bearer $KAS_TOKEN`.
+- File content is served separately at $KAS_FILE_API and uses the same Bearer token.
+- Upload a new File with:
+  curl -sS -H "Authorization: Bearer $KAS_TOKEN" \
+    -F "content=@<local-path>" \
+    "$KAS_FILE_API/files?path=/files/<new-unique-name>"
+- File upload is create-only. Always choose a new path; an existing File path cannot be overwritten.
 - Read your own Resource with:
   curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "path=$KAS_AGENT_PATH" "$KAS_API/resources/by-path"
 - List Message Resources with:

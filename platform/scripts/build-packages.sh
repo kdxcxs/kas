@@ -19,12 +19,14 @@ case "$PROFILE" in
     cargo build \
       --manifest-path "$PLATFORM_ROOT/Cargo.toml" \
       -p kas-agent-driver \
+      -p kas-file-driver \
       -p kas-message-driver
     ;;
   release)
     cargo build \
       --manifest-path "$PLATFORM_ROOT/Cargo.toml" \
       -p kas-agent-driver \
+      -p kas-file-driver \
       -p kas-message-driver \
       --release
     ;;
@@ -37,6 +39,7 @@ esac
 mkdir -p \
   "$OUTPUT_DIR" \
   "$STAGING_ROOT/agent/driver/bin" \
+  "$STAGING_ROOT/file/driver/bin" \
   "$STAGING_ROOT/message/driver/bin" \
   "$STAGING_ROOT/thread" \
   "$STAGING_ROOT/session"
@@ -46,6 +49,12 @@ cp \
   "$TARGET_DIR/$PROFILE/kas-agent-driver" \
   "$STAGING_ROOT/agent/driver/bin/kas-agent-driver"
 chmod 755 "$STAGING_ROOT/agent/driver/bin/kas-agent-driver"
+cp "$PLATFORM_ROOT/packages/file/manifest.json" "$STAGING_ROOT/file/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/file/resources" "$STAGING_ROOT/file/resources"
+cp \
+  "$TARGET_DIR/$PROFILE/kas-file-driver" \
+  "$STAGING_ROOT/file/driver/bin/kas-file-driver"
+chmod 755 "$STAGING_ROOT/file/driver/bin/kas-file-driver"
 cp "$PLATFORM_ROOT/packages/message/manifest.json" "$STAGING_ROOT/message/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/message/resources" "$STAGING_ROOT/message/resources"
 cp \
@@ -58,11 +67,13 @@ cp "$PLATFORM_ROOT/packages/session/manifest.json" "$STAGING_ROOT/session/manife
 cp -R "$PLATFORM_ROOT/packages/session/resources" "$STAGING_ROOT/session/resources"
 
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/agent" -cf "$OUTPUT_DIR/agent.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/file" -cf "$OUTPUT_DIR/file.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/thread" -cf "$OUTPUT_DIR/thread.kas" manifest.json resources
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/session" -cf "$OUTPUT_DIR/session.kas" manifest.json resources
 
 echo "$OUTPUT_DIR/thread.kas"
 echo "$OUTPUT_DIR/session.kas"
+echo "$OUTPUT_DIR/file.kas"
 echo "$OUTPUT_DIR/message.kas"
 echo "$OUTPUT_DIR/agent.kas"

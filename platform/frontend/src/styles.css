@@ -1202,6 +1202,92 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.message-attachments {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.attachment-card {
+  overflow: hidden;
+  padding: 11px;
+  background: rgba(11, 14, 9, 0.42);
+  border: 1px solid #363d31;
+  border-radius: 11px;
+}
+
+.attachment-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.attachment-summary > div:last-child {
+  min-width: 0;
+}
+
+.attachment-summary strong,
+.attachment-summary span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-summary strong {
+  color: var(--warm);
+  font-size: 12px;
+}
+
+.attachment-summary span {
+  margin-top: 2px;
+  color: var(--quiet);
+  font-size: 9px;
+}
+
+.attachment-icon {
+  flex: 0 0 auto;
+  padding: 6px 7px;
+  color: var(--lime);
+  background: rgba(197, 246, 107, 0.08);
+  border-radius: 7px;
+  font-size: 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.attachment-card img,
+.attachment-card video {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  margin-top: 10px;
+  object-fit: contain;
+  background: #10130e;
+  border-radius: 8px;
+}
+
+.attachment-card audio {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.attachment-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.attachment-actions button {
+  padding: 5px 9px;
+  color: #cbd1c3;
+  background: #20251d;
+  border: 1px solid #3a4234;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 9px;
+}
+
 .empty-state {
   display: flex;
   align-items: center;
@@ -1287,6 +1373,57 @@ button:disabled {
   font-size: 10px;
 }
 
+.mention-picker .attach-button {
+  margin-left: auto;
+  color: #cbd1c3;
+  background: #252a21;
+  border-color: #3b4236;
+}
+
+.file-input {
+  display: none;
+}
+
+.pending-attachments {
+  display: flex;
+  gap: 7px;
+  padding: 0 4px 8px;
+  overflow-x: auto;
+}
+
+.pending-attachments > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 6px 8px;
+  color: #cbd1c3;
+  background: #22271f;
+  border: 1px solid #353d30;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.pending-attachments strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.pending-attachments small {
+  color: var(--quiet);
+  font-size: 8px;
+}
+
+.pending-attachments button {
+  padding: 0;
+  color: #858d7d;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 15px;
+}
+
 .composer textarea {
   display: block;
   width: 100%;
@@ -1308,8 +1445,8 @@ button:disabled {
 
 .send-button {
   position: absolute;
-  top: 46px;
   right: 12px;
+  bottom: 43px;
   display: grid;
   place-items: center;
   width: 40px;

@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "path": "./relations/uploaded-by",
+    "manifest": "/builtin/relation",
+    "name": "uploaded-by"
+  },
+  "spec": {
+    "inverse_name": "uploads",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/files/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/builtin/user",
+          "/builtin/service-account",
+          "/manifests/agent"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

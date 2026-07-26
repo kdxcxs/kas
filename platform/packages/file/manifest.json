@@ -1,0 +1,44 @@
+{
+  "path": "/manifests/file",
+  "manifest": "/builtin/manifest",
+  "name": "file",
+  "version": 1,
+  "description": "An immutable descriptor for content stored and served by the File Driver.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "filename",
+      "media_type",
+      "size",
+      "digest",
+      "handle"
+    ],
+    "properties": {
+      "filename": {
+        "type": "string",
+        "minLength": 1
+      },
+      "media_type": {
+        "type": "string",
+        "minLength": 1
+      },
+      "size": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "handle": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "additionalProperties": false
+  }
+}

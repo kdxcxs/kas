@@ -3,12 +3,34 @@ import type { CreateResource, ObjectKind, PlannedLink, Resource } from './types'
 export const AGENT_MANIFEST = '/manifests/agent';
 export const THREAD_MANIFEST = '/manifests/thread';
 export const MESSAGE_MANIFEST = '/manifests/message';
+export const FILE_MANIFEST = '/manifests/file';
 export const SESSION_MANIFEST = '/manifests/session';
 export const PARTICIPANTS = '/manifests/thread/relations/participants';
 export const AUTHORED_BY = '/manifests/message/relations/authored-by';
 export const MESSAGE_THREAD = '/manifests/message/relations/message-thread';
 export const MENTIONED = '/manifests/message/relations/mentioned';
 export const REPLIES_TO = '/manifests/message/relations/replies-to';
+export const ATTACHED_TO = '/manifests/file/relations/attached-to';
+
+export interface ComposerKeyEvent {
+  key: string;
+  shiftKey: boolean;
+  isComposing: boolean;
+  keyCode: number;
+}
+
+export function shouldSubmitComposer(
+  event: ComposerKeyEvent,
+  compositionActive = false
+): boolean {
+  return (
+    event.key === 'Enter' &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    !compositionActive &&
+    event.keyCode !== 229
+  );
+}
 
 export function slugify(value: string): string {
   return value
@@ -114,7 +136,8 @@ export function buildUserMessage(
   userPath: string,
   threadPath: string,
   mentionedAgents: string[],
-  parentPath: string | null
+  parentPath: string | null,
+  attachmentPaths: string[] = []
 ): CreateResource {
   const path = `/messages/${id}`;
   const links: PlannedLink[] = [
@@ -123,6 +146,17 @@ export function buildUserMessage(
   ];
   if (parentPath) {
     links.push(link(`${path}/links/replies-to`, path, REPLIES_TO, 'resource', parentPath));
+  }
+  for (const filePath of attachmentPaths) {
+    links.push(
+      link(
+        `${path}/links/attachments/${slugify(filePath)}`,
+        filePath,
+        ATTACHED_TO,
+        'resource',
+        path
+      )
+    );
   }
   for (const agentPath of mentionedAgents) {
     links.push(
