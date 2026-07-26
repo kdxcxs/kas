@@ -47,6 +47,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "async-trait"
+version = "0.1.91"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -859,7 +870,6 @@ dependencies = [
  "kas-driver",
  "kas-store",
  "kas-test-driver",
- "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -882,6 +892,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kas-builtin-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "jsonschema",
+ "kas-core",
+ "kas-driver",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kas-core"
 version = "0.1.0"
 dependencies = [
@@ -896,6 +920,7 @@ name = "kas-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures-util",
  "kas-core",
  "serde",
@@ -936,6 +961,7 @@ name = "kas-test-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "kas-core",
  "kas-driver",
  "serde_json",

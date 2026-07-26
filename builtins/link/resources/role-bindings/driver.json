@@ -2,7 +2,7 @@
   "metadata": {
     "path": "./role-bindings/driver",
     "manifest": "/builtin/role-binding",
-    "name": "echo-driver"
+    "name": "relationship-driver"
   },
   "spec": {
     "role": "./roles/driver",

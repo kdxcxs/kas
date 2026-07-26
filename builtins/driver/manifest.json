@@ -9,13 +9,54 @@
     "required": [
       "runtime",
       "entrypoint",
-      "service_account"
-    ]
+      "service_account",
+      "manages"
+    ],
+    "properties": {
+      "manages": {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": true,
+        "items": {
+          "type": "string"
+        }
+      },
+      "watches": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "manifest"
+          ],
+          "properties": {
+            "manifest": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
   },
   "states": [
     "stopped",
     "starting",
-    "ready",
+    "running",
     "stopping",
     "failed"
   ],

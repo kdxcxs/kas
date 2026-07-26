@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "path": "/resources/integrations/demo",
+    "manifest": ".",
+    "name": "integration-demo"
+  },
+  "spec": {
+    "value": "registered"
+  }
+}

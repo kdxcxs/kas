@@ -5,19 +5,35 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 
 ```json
 {
-  "path": "/agents/planner",
-  "manifest": "/manifests/agent",
-  "name": "Planner",
+  "metadata": {
+    "path": "/agents/planner",
+    "manifest": "/manifests/agent",
+    "name": "Planner",
+    "revision": 1,
+    "state": "available",
+    "observed": {
+      "/manifests/agent/driver": {
+        "driver_revision": 2,
+        "resource_revision": 1
+      }
+    },
+    "created_at": "...",
+    "updated_at": "..."
+  },
   "spec": {},
-  "status": {},
-  "revision": 1,
-  "created_at": "...",
-  "updated_at": "..."
+  "status": {
+    "metadata": {
+      "state": "available"
+    },
+    "spec": {}
+  }
 }
 ```
 
-`path` 是 Resource 的全局稳定身份；`manifest` 指向定义该 Resource 的另一个
-Resource。所有引用只保存 path，不再携带 `kind`。
+`metadata.path` 是 Resource 的全局稳定身份；`metadata.manifest` 指向定义
+该 Resource 的另一个 Resource。所有引用只保存 path，不再携带 `kind`。
+`spec` 只保存业务期望；生命周期状态、revision 和 Driver 消费进度都是
+平台 metadata。
 
 ## Manifest 是定义 Resource 的 Resource
 
@@ -82,16 +98,16 @@ Action、Relation、Link、Driver、Run、User、ServiceAccount、Role、RoleBin
 ```
 
 具体 Relation、Link、Role 或 Run 并不是 built-in；built-in 的是定义它们结构
-和平台语义的 Manifest。KAS 可以为查询和运行维护 Link、Run、Driver、RBAC
-和 Credential material 的内部投影，但这些投影不是公开数据原语，事实来源
-始终是 Resource。
+和平台语义的 Manifest。Relation 和 Link 都按普通 Resource 持久化，不在
+Store 中维护专用关系投影；Driver、Run、RBAC、Package ownership 和
+Credential material 可以拥有不对外暴露的运行投影，事实来源始终是 Resource。
 
 ## 平台语义
 
 - **Action Resource** 描述可以对某类 Resource 发起的操作。
 - **Relation Resource** 使用两端允许的 Manifest path 描述 Resource 关系。
 - **Link Resource** 保存 relation、source path 和 target path。
-- **Driver Resource** 描述某个 Manifest 的 singleton Driver 及其 executable。
+- **Driver Resource** 描述一个 singleton Driver、executable 及其管理的 Manifest。
 - **Run Resource** 是一次 Action 的执行记录。
 - **Package Resource** 描述已安装 artifact 的 digest、大小和媒体类型。
 - **RBAC Resource** 使用 built-in Manifest 表达身份、Role 和 Binding。
@@ -101,8 +117,7 @@ Relation selector 直接按 Manifest path 工作，不再按对象 kind 工作�
 ```json
 {
   "sources": [{"manifest": "/manifests/message"}],
-  "targets": [{"manifest": ["/manifests/user", "/manifests/agent"]}],
-  "type": "one_to_many"
+  "targets": [{"manifest": ["/manifests/user", "/manifests/agent"]}]
 }
 ```
 
@@ -122,7 +137,9 @@ Agent 是 target，`mentioned` Relation 负责约束两端的 Manifest。
 两个 Resource 之间的有方向关系。任何 Resource 都可以作为 source 或
 target，因此 Manifest、Action、Driver、User、Role 等不需要专门的 Link
 端点类型。Link 自己也是 Resource，其 `manifest` 固定指向
-`/builtin/link`。
+`/builtin/link`。API 只按 Manifest schema 接受 Link；内置 Relationship Driver
+异步读取 Relation、source 和 target，校验端点 selector 与 metadata，并把
+结果写入 Link status。无效 Link 会进入 `invalid` 状态。
 
 例如：
 
@@ -137,7 +154,7 @@ target，因此 Manifest、Action、Driver、User、Role 等不需要专门的 L
 Manifest Resource
   ├─ 定义普通 Resource 的 schema 与状态
   ├─ Package 的 resources/ 保存初始化 Action / Relation / Driver / RBAC
-  └─ Driver reconcile 普通 Resource 和该 Manifest 声明的 Relation Link
+  └─ Driver 默认 reconcile 本 Manifest Resource，并通过 watches 关注额外 Resource
 
 普通 Resource ──Action──> Run Resource
        │                      │
@@ -263,7 +280,7 @@ agent.kas
 `manifest.json` 只定义 Manifest 自身，不包含 `members` 或 `resources`
 字段。`resources/` 可选；KAS 递归读取其中所有 `.json`，每个文件定义一个
 初始化 Resource。文件目录只用于组织，Resource 身份始终来自 JSON 内的
-`path`。
+`metadata.path`；文件同样使用通用的 `metadata/spec/status` envelope。
 
 初始化 Resource 使用相对于 Manifest path 的 `./` 路径：
 
@@ -293,16 +310,18 @@ ${KAS_DATA_DIR}/packages/sha256/<digest>/
   manifest → /builtin/package
 ```
 
-其 spec/status 保存 `digest`、`size_bytes`、`media_type` 和 `state`，不保存
-数据目录的绝对路径。KAS 同时创建
+其 `spec` 和 `status.spec` 保存 `digest`、`size_bytes`、`media_type`，
+生命周期 state 位于各自 metadata；Resource 不保存数据目录的绝对路径。
+KAS 同时创建
 `/builtin/relations/package-manifest` Link：
 
 ```text
 Package Resource ──package-manifest──> Manifest Resource
 ```
 
-Manifest spec 因此不再重复保存 `package_digest`。Driver 启动时通过这条 Link
-找到 Package Resource，再按 digest 定位 artifact。Package Resource 只能由
+Manifest spec 因此不再重复保存 `package_digest`。运行时使用 Package 安装
+事务建立的内部 ownership 投影找到 artifact；上述 Link 仍作为普通 Resource
+表达同一事实，不参与控制面 bootstrap。Package Resource 只能由
 `POST /packages` 创建并受保护，不能通过普通 Resource CRUD 伪造。
 
 同一 Manifest path 和 Package 的重复安装是幂等操作；同一路径安装不同内容会
@@ -310,8 +329,8 @@ Manifest spec 因此不再重复保存 `package_digest`。Driver 启动时通过
 Resource 通过 `GET /resources` 或 `GET /resources/by-path?path=...` 查询，
 没有第二套 Manifest CRUD。
 
-带 Driver 的 Manifest 安装完成后，由 API 进程内的 Supervisor 自动启动
-entrypoint。Supervisor 管理 singleton、generation、临时 Credential、ready
+带 Driver 的包安装完成后，由 API 进程内的 Supervisor 自动启动
+entrypoint。Supervisor 管理 singleton、generation、临时 Credential、hello
 超时、停止、崩溃重启和退避，并向进程传递 `KAS_API`、
 `KAS_DRIVER_PATH`、`KAS_DRIVER_GENERATION`、`KAS_DRIVER_TOKEN`、
 `KAS_MANIFEST_PATH` 和 `KAS_PACKAGE_ROOT`。
@@ -347,29 +366,129 @@ Manifest 包通过 `resources/` 声明自己的 ServiceAccount、Role 和 RoleBi
 
 ## 更新、关系与事件
 
-`spec` 是期望文档，`status` 是当前已实现文档。Manifest 的
-`resource_schema` 校验 spec；status 允许从不完整的初始状态逐步收敛。
+根级 `metadata` 和 `spec` 是期望文档，`status.metadata` 和 `status.spec`
+是当前已实现文档。两侧使用完全相同的结构，Manifest 的 `resource_schema`
+同时校验 `spec` 和 `status.spec`；创建时未显式提供 `status.spec`，KAS 会
+用根级 `spec` 初始化它。
 Manifest 可以声明扩展状态，并通过 `default_state` 和 `initial_state` 分别
 指定新建 Resource 的期望状态和初始状态；KAS 固定提供 `pending`、
 `available`、`deleted`，不得在 `states` 中重复声明。`resource_schema` 只描述
-业务 spec 字段，`state` 由 KAS 单独校验。只要 Driver 管理的 Resource 满足
-`spec != status`，
-KAS 就会持续投递 reconcile。`revision` 只在 spec 更新时递增，用于乐观并发，
-不再兼任当前状态或重试标记。
+业务 spec 字段，`state` 由 KAS 单独校验并位于 metadata。根级
+`metadata.state` 或 `spec` 改变时 `metadata["[kas]"].revision` 递增；
+status 和消费进度更新不会推进 revision。
+
+所有平台维护的 metadata 都放在保留字段 `"[kas]"` 中；Manifest 和 Resource
+业务字段的名称不得包含 `[` 或 `]`。例如，一个同时被两个 Driver 关注的
+Resource 会呈现为：
+
+```json
+{
+  "metadata": {
+    "path": "/agents/reviewer",
+    "manifest": "/manifests/agent",
+    "name": "reviewer",
+    "state": "available",
+    "[kas]": {
+      "revision": 4,
+      "observed": {
+        "/manifests/agent/driver": {
+          "driver_revision": 2,
+          "resource_revision": 4
+        },
+        "/manifests/audit/driver": {
+          "driver_revision": 1,
+          "resource_revision": 4
+        }
+      },
+      "created_at": "2026-07-26T00:00:00Z",
+      "updated_at": "2026-07-26T00:05:00Z"
+    }
+  },
+  "spec": {"model": "gpt-5"},
+  "status": {
+    "metadata": {
+      "path": "/agents/reviewer",
+      "manifest": "/manifests/agent",
+      "name": "reviewer",
+      "state": "available",
+      "[kas]": {
+        "revision": 4,
+        "observed": {
+          "/manifests/agent/driver": {
+            "driver_revision": 2,
+            "resource_revision": 4
+          },
+          "/manifests/audit/driver": {
+            "driver_revision": 1,
+            "resource_revision": 3
+          }
+        },
+        "created_at": "2026-07-26T00:00:00Z",
+        "updated_at": "2026-07-26T00:05:00Z"
+      }
+    },
+    "spec": {"model": "gpt-5"}
+  }
+}
+```
+
+根级 `metadata["[kas]"].observed` 是每个匹配 Driver 应消费到的目标版本；
+`status.metadata["[kas]"].observed` 是已实际完成的版本。上例中 Agent Driver
+已经完成，Audit Driver 仍落后一个 Resource revision。负责该 Manifest 的
+owner Driver 在自己的消费版本落后，或根级 metadata/spec 与 status
+metadata/spec 任一字段不同时收到 reconcile；只 watch 的 Driver 仅比较自己
+的 observed 条目。
+
+Driver spec 使用 `manages` 声明由该 singleton 负责推进 status 的 Manifest。
+每个 Manifest 最多只能映射到一个 Driver，但一个 Driver 可以管理多个
+Manifest；未显式声明时，Package 展开器会填入该 Driver 所属的 Manifest。
+`watches` 用于声明只需额外观测的 Resource：
+
+```json
+{
+  "manages": [
+    "/builtin/relation",
+    "/builtin/link"
+  ],
+  "watches": [
+    {
+      "manifest": "/builtin/link",
+      "paths": ["/manifests/message/relations/recipient/links/**"]
+    },
+    {
+      "manifest": "/manifests/integration-*",
+      "paths": ["/resources/integrations/**"]
+    }
+  ]
+}
+```
+
+Manifest 和 path pattern 支持精确匹配、段内 `*`、单段 `*` 和递归 `**`。
+watch 不理解 Relation；需要只消费某类 Link 时，应使用普通 path 分区，或者
+由 Driver 读取 `spec.relation` 后自行过滤。KAS 为每个匹配的
+Driver/Resource 组合独立投递；完成后把消费版本写入
+`status.metadata["[kas]"].observed[driver_path]`。Driver 定义 revision 或
+Resource revision 任一变化都会重新投递。新 Driver 会回扫已有 Resource；
+新 Manifest 注册后，已有通配符 watch 会立即覆盖包内初始化 Resource。
+消费进度是事实来源，内部 reconcile queue 只是可重建的调度投影。
 
 Driver 和 Run 也是 Resource，但它们由 KAS 的 built-in Manifest 赋予控制面
-状态机：Driver status 记录进程生命周期，Run status 记录执行结果。它们不会
-错误地交给“Driver Manifest 的 Driver”做自我协调。
+状态机。Driver 的根级 `metadata.state` 表示期望启动或停止，
+`status.metadata.state` 表示当前进程状态；PID、generation 和错误只保存在
+内部运行投影，不污染公共 Resource。Run 的执行结果写回根级 spec，并同步到
+status.spec。它们不会错误地交给“Driver Manifest 的 Driver”做自我协调。
 
 Resource spec 可以通过 `PATCH /resources/by-path?path=...` 更新，请求必须携带
-`expected_revision`。更新成功后 revision 递增；旧 revision 会收到冲突响应。
+`expected_revision`，并可同时提交新的 `metadata.state`。更新成功后
+`metadata["[kas]"].revision` 递增；旧 revision 会收到冲突响应。
 archive、restore 等仍是 Manifest 自己定义的业务状态。
 
 `DELETE /resources/by-path?path=...&expected_revision=N` 不会绕过 Driver：
-KAS 先把 `spec.state` 改为 `deleted`，Driver reconcile 后把
-`status.state` 改为 `deleted`。两者都到达 `deleted` 后，KAS 删除 Resource、
-其 Link 和相关运行数据，不保留 tombstone，也暂不提供 force delete；原 path
-随后可以重新使用。
+KAS 先把 `metadata.state` 改为 `deleted`，所属 Driver reconcile 后把
+`status.metadata.state` 改为 `deleted`。内置 Relationship Driver 会先按 Relation
+删除策略清理 Link 或请求级联删除；所有匹配 Driver 都消费当前 revision 后，
+KAS 删除 Resource 和相关运行数据，不保留 tombstone，也暂不提供 force
+delete；原 path 随后可以重新使用。
 
 Action、Relation、Driver、ServiceAccount、Role 和 RoleBinding 都拥有
 Manifest 下的独立 Path。Manifest 安装时，KAS 根据 built-in Relation 的
@@ -378,26 +497,23 @@ Manifest 下的独立 Path。Manifest 安装时，KAS 根据 built-in Relation �
 Resource、Action 和 Driver 的受保护 Link。Resource 的类型身份直接由
 envelope 中不可变的 `manifest` path 表达，不再重复创建类型 Link。
 
-实现按 Relation 的语义 role 查找关系，不把 built-in Relation 的具体 path
-写死在业务逻辑中。数据库可以维护由 Link 自动生成的内部投影索引，但这些
-索引不属于公开 API。
+系统初始化逻辑按 Relation 的语义 role 创建普通 Link Resource，不把具体
+Relation path 写死在业务逻辑中。Driver 凭据、RBAC、Run 和 Package 启动所需
+的内部运行映射直接从各自 Resource spec 或 Package 安装事务建立，不依赖
+Relationship Driver 启动完成，从而避免 bootstrap 循环。
 
-Relation 使用明确的 `one_to_one`、`one_to_many`、`many_to_one` 或
-`many_to_many` 类型。首版 `ensure` 只支持 `one_to_one`：当 KAS 发现符合
-selector 的对象缺少关系时，会创建一个待处理 Link，其 source 或 target
-可以暂时为空（但不能同时为空），`spec.state=available`、
-`status.state=pending`。这个 Link 由“声明该 Relation 的 Manifest”的 Driver
-reconcile，而不是由任一端点对象的 Driver 猜测所有权。Driver 可以在同一次
-mutation 中创建缺失对象、补齐端点并推进 Link status。
-
-Link 自身同样具有 `spec`、`status` 和 `revision`，也进入持久化 reconcile
-队列。普通 Link 通常以 `available` 创建；部分端点 Link 只允许由上述 ensured
-one-to-one Relation 使用。`on_source_delete` 可以选择 `unlink` 或 `cascade`。
+Relation 只声明允许的端点、metadata schema 和删除策略，不声明数量约束，
+也不承担 Driver 触发语义。`/builtin/link` 包提供一个 singleton
+Relationship Driver，同时管理 Relation 和 Link 两个 Manifest，并 watch
+所有 Resource；它负责 Relation status、端点校验、`unlink`/`cascade` 和
+Link status。业务上的数量与关系平衡仍由相应业务 Driver 使用普通 mutation
+维护。
 
 Link 不再拥有单独的 CRUD。客户端使用通用 `/resources` 创建、读取、更新和
 删除 Link Resource，并使用
-`GET /resources?manifest=/builtin/link` 列出 Link；Relation selector
-和 cardinality 由 Store 在同一事务中校验。
+`GET /resources?manifest=/builtin/link` 列出 Link。API 创建成功只表示
+Resource 已持久化；调用方应以 `status.metadata.state == "available"` 判断
+Link 已通过内置 Driver 校验。
 
 Event 是平台维护的内部持久化审计日志，只能随业务对象事务自动产生，
 不提供业务创建接口，也不参与 Driver 工作投递。
@@ -412,19 +528,21 @@ Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一
 重新排队。
 
 `hello.driver`、`reconcile.resource` 以及 Run 投递中的 `run`、`resource`、
-`action` 都使用同一个 Resource envelope。Driver 的
+`action` 都使用同一个 Resource envelope。Driver 的异步
 `reconcile(&Resource)` 直接返回 mutation；它不需要判断另一套 ObjectKind，
 Link 也只是 manifest 为 `/builtin/link` 的 Resource。
 
 Mutation 只保留 `create_resource`、`update_resource`、`delete_resource`、
 `update_resource_status` 和 `complete_run`。Driver 因而可以在同一事务中创建
 任意获授权的 Resource，包括 ServiceAccount、Role、RoleBinding 或 Link。
-空 mutation 会让 KAS 重新比较 spec/status，并在仍不一致时再次排队；一次
-临时失败不会把 Resource 永久标记为失败。Run mutation 必须以该 Run 的
-`complete_run` 结束。KAS 返回 `mutation_result`，只有 `committed` 才表示
-整组写入成功。
+空 mutation 表示当前 Driver 已经消费该 Resource revision；KAS 原子完成
+delivery，并写入该 Driver 自己的
+`status.metadata["[kas]"].observed` 条目。如果处理期间 Resource 或 Driver
+revision 已推进，新版本仍会继续排队。Run mutation 必须
+以该 Run 的 `complete_run` 结束。KAS 返回 `mutation_result`，只有
+`committed` 才表示整组写入和消费确认成功。
 
-Driver 的 `ready`、ack、reconcile 状态回写和 Run 完成属于控制协议，由绑定
+Driver 的 `hello`、ack、reconcile 状态回写和 Run 完成属于控制协议，由绑定
 generation 的 Credential、Driver 身份、in-flight delivery 和目标对象共同
 授权，不要求 Manifest 猜测这些基础协议权限。mutation 中额外的业务写操作
 仍按 Driver ServiceAccount 的精细 RBAC 验证，并和 delivery 完成在一个
@@ -434,10 +552,10 @@ Driver ServiceAccount 绑定目标 Manifest、verb 和 path 对应的 Role。
 现有 REST 写接口继续保留；统一的 `mutation` 入口只存在于 Driver
 WebSocket 协议中，不提供对应的 HTTP endpoint。
 
-Driver 不订阅 Event。需要 Driver 处理的业务变化必须显式表示为
-`Resource.spec/status` 或 `Link.spec/status` 的差异；缺失关系由 Relation
-的 `ensure` 创建待处理 Link。这样工作项由持久化 reconcile queue 投递，
-不会依赖临时订阅、连接状态或 Event sequence。
+Driver 不订阅 Event。需要 Driver 处理的业务变化必须显式表示为 Resource
+revision，并由所属 Manifest 或 Driver `watches` 选中。这样工作项由持久化
+reconcile queue 投递，消费进度由 Resource metadata 保存，不依赖临时订阅、
+连接状态或 Event sequence。
 
 ## 测试
 
@@ -458,13 +576,16 @@ tests/e2e.sh
 ```text
 启动 migration、admin 和真实 kas-api
   → 验证自描述根 Manifest 和系统 Manifest Resource 已存在
+  → 验证内置 Relationship Driver 的单一真实进程 running
   → 把编译后的 kas-test-driver 打进 .kas tar
   → POST /packages 安装 Manifest 包
   → 验证 Package Resource 及 Package → Manifest Link
   → 验证 Manifest 初始化 Resource 和 RBAC/Driver 关系的受保护 Link
   → Supervisor 启动真实 binary
-  → Driver 通过 WebSocket ready
-  → 使用通用 API 创建并 reconcile 业务 Resource 和 Link Resource
+  → Driver 通过 WebSocket hello
+  → 验证新 Driver 回扫并消费注册前已有的 User Resource
+  → 注册新 Manifest，验证已有通配符 watch 消费其初始化 Resource
+  → 使用通用 API 创建 Link，并由内置 Relationship Driver 校验为 available
   → 使用通用 API 创建 Run Resource
   → 验证 Run 到 Resource/Action/Driver 的系统 Link
   → Driver 执行 echo 并完成 Run

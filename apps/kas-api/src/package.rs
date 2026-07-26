@@ -197,9 +197,11 @@ mod tests {
             "initial_state": "available"
         });
         let action = serde_json::json!({
-            "path": "./actions/echo",
-            "manifest": "/builtin/action",
-            "name": "echo",
+            "metadata": {
+                "path": "./actions/echo",
+                "manifest": "/builtin/action",
+                "name": "echo"
+            },
             "spec": {
                 "description": "Echo",
                 "input_schema": {},
@@ -207,14 +209,18 @@ mod tests {
             }
         });
         let account = serde_json::json!({
-            "path": "./service-accounts/driver",
-            "manifest": "/builtin/service-account",
-            "name": "driver"
+            "metadata": {
+                "path": "./service-accounts/driver",
+                "manifest": "/builtin/service-account",
+                "name": "driver"
+            }
         });
         let driver = serde_json::json!({
-            "path": "./driver",
-            "manifest": "/builtin/driver",
-            "name": "driver",
+            "metadata": {
+                "path": "./driver",
+                "manifest": "/builtin/driver",
+                "name": "driver"
+            },
             "spec": {
                 "runtime": "process",
                 "entrypoint": "./driver/bin/driver",
@@ -274,6 +280,7 @@ mod tests {
             driver.service_account,
             "/manifests/echo/service-accounts/driver"
         );
+        assert_eq!(driver.manages, ["/manifests/echo"]);
         let package_root = data.path().join("packages/sha256").join(
             installed
                 .expansion

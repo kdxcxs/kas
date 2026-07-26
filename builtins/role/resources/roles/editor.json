@@ -1,7 +1,9 @@
 {
-  "path": "/builtin/roles/editor",
-  "manifest": "/builtin/role",
-  "name": "system:editor",
+  "metadata": {
+    "path": "/builtin/roles/editor",
+    "manifest": "/builtin/role",
+    "name": "system:editor"
+  },
   "spec": {
     "description": "Manage Resources",
     "system_role": "editor",
@@ -22,8 +24,5 @@
         "paths": []
       }
     ]
-  },
-  "status": {
-    "state": "available"
   }
 }

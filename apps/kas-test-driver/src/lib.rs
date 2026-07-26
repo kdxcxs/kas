@@ -1,23 +1,31 @@
-use kas_core::{ActionSpec, DriverExecution, Mutation, Resource, RunSpec};
+use async_trait::async_trait;
+use kas_core::{ActionSpec, DriverExecution, Mutation, Resource, ResourceStatus, RunSpec};
 use kas_driver::{Driver, DriverError};
 use serde_json::json;
 
 pub struct TestDriver;
 
+#[async_trait]
 impl Driver for TestDriver {
     fn name(&self) -> &str {
         "test-driver"
     }
 
-    fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+    async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+        if resource.manifest != "/manifests/echo" {
+            return Ok(Vec::new());
+        }
         Ok(vec![Mutation::UpdateResourceStatus {
             resource_path: resource.path.clone(),
             expected_revision: resource.revision,
-            status: resource.spec.clone(),
+            status: ResourceStatus {
+                metadata: resource.status_metadata(resource.metadata.state.clone()),
+                spec: resource.spec.clone(),
+            },
         }])
     }
 
-    fn execute(
+    async fn execute(
         &self,
         _resource: &Resource,
         action: &Resource,
@@ -38,23 +46,38 @@ impl Driver for TestDriver {
 mod tests {
     use super::*;
 
-    #[test]
-    fn echo_uses_hydrated_action() {
+    #[tokio::test]
+    async fn echo_uses_hydrated_action() {
         let resource: Resource = serde_json::from_value(json!({
-            "path": "/resources/source",
-            "manifest": "/manifests/echo",
-            "name": "source",
+            "metadata": {
+                "path": "/resources/source",
+                "manifest": "/manifests/echo",
+                "name": "source",
+                "state": "available",
+                "[kas]": {
+                    "revision": 0,
+                    "observed": {},
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            },
             "spec": {},
-            "status": {},
-            "revision": 0,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z"
+            "status": {"metadata": {"state": "available"}, "spec": {}}
         }))
         .unwrap();
         let run: Resource = serde_json::from_value(json!({
-            "path": "/runs/echo-1",
-            "manifest": "/builtin/run",
-            "name": "echo-1",
+            "metadata": {
+                "path": "/runs/echo-1",
+                "manifest": "/builtin/run",
+                "name": "echo-1",
+                "state": "queued",
+                "[kas]": {
+                    "revision": 1,
+                    "observed": {},
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:01Z"
+                }
+            },
             "spec": {
                 "request_id": "10000000-0000-0000-0000-000000000001",
                 "resource": "/resources/source",
@@ -62,29 +85,48 @@ mod tests {
                 "driver": "/manifests/echo/driver",
                 "input": {"message": "hello"}
             },
-            "status": {"state": "running", "driver_generation": 1},
-            "revision": 1,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:01Z"
+            "status": {
+                "metadata": {"state": "running"},
+                "spec": {
+                    "request_id": "10000000-0000-0000-0000-000000000001",
+                    "resource": "/resources/source",
+                    "action": "/manifests/echo/actions/echo",
+                    "driver": "/manifests/echo/driver",
+                    "input": {"message": "hello"}
+                }
+            }
         }))
         .unwrap();
         let action: Resource = serde_json::from_value(json!({
-            "path": "/manifests/test/actions/echo",
-            "manifest": "/builtin/action",
-            "name": "echo",
+            "metadata": {
+                "path": "/manifests/test/actions/echo",
+                "manifest": "/builtin/action",
+                "name": "echo",
+                "state": "available",
+                "[kas]": {
+                    "revision": 0,
+                    "observed": {},
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            },
             "spec": {
                 "description": "Echo",
                 "input_schema": {},
                 "output_schema": {}
             },
-            "status": {},
-            "revision": 0,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z"
+            "status": {
+                "metadata": {"state": "available"},
+                "spec": {
+                    "description": "Echo",
+                    "input_schema": {},
+                    "output_schema": {}
+                }
+            }
         }))
         .unwrap();
 
-        let execution = TestDriver.execute(&resource, &action, &run).unwrap();
+        let execution = TestDriver.execute(&resource, &action, &run).await.unwrap();
 
         assert_eq!(execution.output["echo"]["message"], "hello");
         assert!(execution.mutations.is_empty());

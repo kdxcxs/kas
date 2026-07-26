@@ -8,11 +8,12 @@
     "type": "object",
     "required": [
       "sources",
-      "targets",
-      "type"
+      "targets"
     ]
   },
-  "states": [],
+  "states": [
+    "invalid"
+  ],
   "default_state": "available",
-  "initial_state": "available"
+  "initial_state": "pending"
 }

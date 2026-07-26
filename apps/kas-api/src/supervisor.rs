@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use kas_core::{DriverSpec, DriverState, DriverStatus, Resource, RestartPolicy};
+use kas_core::{DriverSpec, DriverState, Resource, RestartPolicy};
 use kas_store::Store;
 use tokio::{
     process::{Child, Command},
@@ -23,8 +23,11 @@ fn driver_spec(launch: &DriverLaunch) -> DriverSpec {
         .expect("Driver Resource was validated before supervisor launch")
 }
 
-fn driver_status(driver: &Resource) -> anyhow::Result<DriverStatus> {
-    serde_json::from_value(driver.status.clone()).map_err(Into::into)
+fn driver_state(driver: &Resource) -> anyhow::Result<DriverState> {
+    serde_json::from_value(serde_json::Value::String(
+        driver.status.metadata.state.clone(),
+    ))
+    .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
@@ -265,26 +268,27 @@ fn prepare_generation(
         .lock()
         .map_err(|_| anyhow::anyhow!("Store lock is poisoned"))?;
     let current = store.get_driver(driver_path)?;
-    let current_status = driver_status(&current)?;
+    let current_state = driver_state(&current)?;
+    let current_generation = store.driver_generation(driver_path)?;
     if prepared_generation.is_some_and(|generation| {
-        current_status.generation == generation && current_status.state == DriverState::Starting
+        current_generation == generation && current_state == DriverState::Starting
     }) {
         let credential = store.issue_driver_credential(driver_path)?;
-        return Ok((current_status.generation, credential.token));
+        return Ok((current_generation, credential.token));
     }
     if matches!(
-        current_status.state,
-        DriverState::Starting | DriverState::Ready | DriverState::Stopping
+        current_state,
+        DriverState::Starting | DriverState::Running | DriverState::Stopping
     ) {
-        if current_status.state != DriverState::Stopping {
+        if current_state != DriverState::Stopping {
             store.stop_driver(driver_path)?;
         }
-        store.mark_driver_stopped(driver_path, current_status.generation)?;
+        store.mark_driver_stopped(driver_path, current_generation)?;
     }
-    let driver = store.start_driver(driver_path)?;
-    let status = driver_status(&driver)?;
+    store.start_driver(driver_path)?;
+    let generation = store.driver_generation(driver_path)?;
     let credential = store.issue_driver_credential(driver_path)?;
-    Ok((status.generation, credential.token))
+    Ok((generation, credential.token))
 }
 
 fn spawn_process(
@@ -328,17 +332,15 @@ async fn wait_until_ready(
     let ready = async {
         loop {
             sleep(Duration::from_millis(50)).await;
-            let state = store
-                .lock()
-                .ok()
-                .and_then(|store| store.get_driver(driver_path).ok());
-            if state
-                .as_ref()
-                .and_then(|driver| driver_status(driver).ok())
-                .is_some_and(|status| {
-                    status.generation == generation && status.state == DriverState::Ready
-                })
-            {
+            let running = store.lock().ok().is_some_and(|store| {
+                store.driver_generation(driver_path).ok() == Some(generation)
+                    && store
+                        .get_driver(driver_path)
+                        .ok()
+                        .and_then(|driver| driver_state(&driver).ok())
+                        == Some(DriverState::Running)
+            });
+            if running {
                 return ReadyOutcome::Ready;
             }
         }
@@ -363,10 +365,8 @@ async fn stop_child(
         if store
             .get_driver(driver_path)
             .ok()
-            .and_then(|driver| driver_status(&driver).ok())
-            .is_some_and(|status| {
-                matches!(status.state, DriverState::Starting | DriverState::Ready)
-            })
+            .and_then(|driver| driver_state(&driver).ok())
+            .is_some_and(|state| matches!(state, DriverState::Starting | DriverState::Running))
         {
             let _ = store.stop_driver(driver_path);
         }
@@ -379,8 +379,8 @@ async fn stop_child(
         if store
             .get_driver(driver_path)
             .ok()
-            .and_then(|driver| driver_status(&driver).ok())
-            .is_some_and(|status| status.state == DriverState::Stopping)
+            .and_then(|driver| driver_state(&driver).ok())
+            .is_some_and(|state| state == DriverState::Stopping)
         {
             let _ = store.mark_driver_stopped(driver_path, generation);
         }
@@ -408,18 +408,16 @@ fn record_exit(
         if store
             .get_driver(driver_path)
             .ok()
-            .and_then(|driver| driver_status(&driver).ok())
-            .is_some_and(|status| {
-                matches!(status.state, DriverState::Starting | DriverState::Ready)
-            })
+            .and_then(|driver| driver_state(&driver).ok())
+            .is_some_and(|state| matches!(state, DriverState::Starting | DriverState::Running))
         {
             let _ = store.stop_driver(driver_path);
         }
         if store
             .get_driver(driver_path)
             .ok()
-            .and_then(|driver| driver_status(&driver).ok())
-            .is_some_and(|status| status.state == DriverState::Stopping)
+            .and_then(|driver| driver_state(&driver).ok())
+            .is_some_and(|state| state == DriverState::Stopping)
         {
             let _ = store.mark_driver_stopped(driver_path, generation);
         }
@@ -475,9 +473,18 @@ mod tests {
             manifest_path: "/manifests/echo".into(),
             package_root: package.path().to_owned(),
             driver: serde_json::from_value(json!({
-                "path": "/manifests/echo/driver",
-                "manifest": "/builtin/driver",
-                "name": "driver",
+                "metadata": {
+                    "path": "/manifests/echo/driver",
+                    "manifest": "/builtin/driver",
+                    "name": "driver",
+                    "state": "running",
+                    "[kas]": {
+                        "revision": 0,
+                        "observed": {},
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z"
+                    }
+                },
                 "spec": {
                     "runtime": "process",
                     "entrypoint": "./driver",
@@ -486,14 +493,20 @@ mod tests {
                     "restart": "never"
                 },
                 "status": {
-                    "desired_state": "running",
-                    "state": "stopped",
-                    "generation": 0,
-                    "metadata": {}
-                },
-                "revision": 0,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
+                    "metadata": {
+                        "path": "/manifests/echo/driver",
+                        "manifest": "/builtin/driver",
+                        "name": "driver",
+                        "state": "stopped",
+                        "[kas]": {
+                            "revision": 0,
+                            "observed": {},
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "updated_at": "2026-01-01T00:00:00Z"
+                        }
+                    },
+                    "spec": {}
+                }
             }))
             .unwrap(),
             prepared_generation: None,

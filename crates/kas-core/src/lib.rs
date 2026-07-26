@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use uuid::Uuid;
 
 pub const STATE_PENDING: &str = "pending";
@@ -15,40 +16,156 @@ pub const BUILTIN_PACKAGE_MEDIA_TYPE: &str = "application/vnd.kas.builtin+json";
 /// The only public persistent object in KAS.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resource {
-    pub path: String,
-    pub manifest: String,
-    pub name: String,
+    pub metadata: ResourceMetadata,
     pub spec: Value,
-    pub status: Value,
+    pub status: ResourceStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DriverObservation {
+    pub driver_revision: u64,
+    pub resource_revision: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResourceMetadata {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub manifest: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, rename = "[kas]")]
+    pub kas: KasMetadata,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct KasMetadata {
+    #[serde(default)]
     pub revision: u64,
+    #[serde(default)]
+    pub observed: BTreeMap<String, DriverObservation>,
+    #[serde(default)]
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PlannedResource {
+impl Deref for ResourceMetadata {
+    type Target = KasMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.kas
+    }
+}
+
+impl DerefMut for ResourceMetadata {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.kas
+    }
+}
+
+impl Deref for Resource {
+    type Target = ResourceMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
+impl DerefMut for Resource {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.metadata
+    }
+}
+
+impl Resource {
+    pub fn status_metadata(&self, state: impl Into<String>) -> ResourceMetadata {
+        let mut metadata = self.metadata.clone();
+        metadata.state = state.into();
+        metadata
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedResourceMetadata {
     pub path: String,
     pub manifest: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedResource {
+    pub metadata: PlannedResourceMetadata,
+    #[serde(default = "default_document")]
     pub spec: Value,
     #[serde(default)]
-    pub status: Value,
+    pub status: ResourceStatus,
+}
+
+impl Deref for PlannedResource {
+    type Target = PlannedResourceMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
+impl DerefMut for PlannedResource {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.metadata
+    }
 }
 
 pub type CreateResource = PlannedResource;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateResourceMetadata {
+    pub state: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateResource {
     pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<UpdateResourceMetadata>,
     pub spec: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateResourceStatus {
     pub expected_revision: u64,
-    pub status: Value,
+    pub status: ResourceStatus,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceStatus {
+    #[serde(default)]
+    pub metadata: ResourceMetadata,
+    #[serde(default = "default_document")]
+    pub spec: Value,
+}
+
+impl Default for ResourceStatus {
+    fn default() -> Self {
+        Self {
+            metadata: ResourceStatusMetadata::default(),
+            spec: default_document(),
+        }
+    }
+}
+
+pub type ResourceStatusMetadata = ResourceMetadata;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -90,10 +207,10 @@ pub enum ManifestSelector {
 impl ManifestSelector {
     pub fn matches(&self, manifest: &str) -> bool {
         match self {
-            Self::One(expected) => expected == "*" || expected == manifest,
+            Self::One(expected) => resource_path_matches(expected, manifest),
             Self::Many(expected) => expected
                 .iter()
-                .any(|value| value == "*" || value == manifest),
+                .any(|value| resource_path_matches(value, manifest)),
         }
     }
 }
@@ -153,15 +270,6 @@ pub struct ActionSpec {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RelationType {
-    OneToOne,
-    OneToMany,
-    ManyToOne,
-    ManyToMany,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum OnSourceDelete {
     Unlink,
     Cascade,
@@ -193,10 +301,6 @@ pub struct RelationSpec {
     pub inverse_name: Option<String>,
     pub sources: Vec<ResourceSelector>,
     pub targets: Vec<ResourceSelector>,
-    #[serde(rename = "type")]
-    pub relation_type: RelationType,
-    #[serde(default)]
-    pub ensure: bool,
     #[serde(default = "default_on_source_delete")]
     pub on_source_delete: OnSourceDelete,
     #[serde(default)]
@@ -206,12 +310,32 @@ pub struct RelationSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LinkSpec {
     pub relation: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    pub source: String,
+    pub target: String,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DriverWatch {
+    pub manifest: ManifestSelector,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+impl DriverWatch {
+    pub fn matches(&self, resource: &Resource) -> bool {
+        if !self.manifest.matches(&resource.manifest)
+            || (!self.paths.is_empty()
+                && !self
+                    .paths
+                    .iter()
+                    .any(|pattern| resource_path_matches(pattern, &resource.path)))
+        {
+            return false;
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,8 +361,13 @@ pub struct DriverSpec {
     pub runtime: DriverRuntime,
     pub entrypoint: String,
     pub service_account: String,
+    /// Explicit Manifest paths whose Resource status this singleton Driver owns.
+    #[serde(default)]
+    pub manages: Vec<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub watches: Vec<DriverWatch>,
     #[serde(default = "default_restart_policy")]
     pub restart: RestartPolicy,
 }
@@ -248,29 +377,16 @@ pub struct DriverSpec {
 pub enum DriverState {
     Stopped,
     Starting,
-    Ready,
+    Running,
     Stopping,
     Failed,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DriverDesiredState {
+pub enum DriverControlState {
     Stopped,
     Running,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DriverStatus {
-    pub desired_state: DriverDesiredState,
-    pub state: DriverState,
-    pub generation: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_id: Option<u32>,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,6 +397,10 @@ pub struct RunSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
     pub input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,17 +411,6 @@ pub enum RunState {
     Succeeded,
     Failed,
     Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RunStatus {
-    pub state: RunState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub driver_generation: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,6 +459,8 @@ pub struct CredentialSpec {
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// A Resource declaration loaded from one JSON file below `resources/`.
@@ -358,13 +469,29 @@ pub struct CredentialSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceDefinition {
-    pub path: String,
-    pub manifest: String,
-    pub name: String,
-    #[serde(default)]
+    pub metadata: PlannedResourceMetadata,
+    #[serde(default = "default_document")]
     pub spec: Value,
     #[serde(default)]
-    pub status: Value,
+    pub status: ResourceStatus,
+}
+
+fn default_document() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
+impl Deref for ResourceDefinition {
+    type Target = PlannedResourceMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
+impl DerefMut for ResourceDefinition {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.metadata
+    }
 }
 
 /// The transport document stored as `manifest.json`.
@@ -473,7 +600,7 @@ impl PackageDefinition {
         // This is the state of the Manifest Resource itself. The
         // default/initial states declared inside its spec apply to instances
         // defined by this Manifest, not to the Manifest Resource.
-        let manifest_status = json!({});
+        let manifest_status = ResourceStatus::default();
         let manifest_spec = serde_json::to_value(ManifestSpec {
             version: self.manifest.version,
             description: self.manifest.description,
@@ -491,9 +618,12 @@ impl PackageDefinition {
         let mut driver_count = 0;
         resource_owners.insert(root_path.clone(), root_path.clone());
         resources.push(PlannedResource {
-            path: root_path.clone(),
-            manifest: manifest_type,
-            name: self.manifest.name,
+            metadata: PlannedResourceMetadata {
+                path: root_path.clone(),
+                manifest: manifest_type,
+                name: self.manifest.name,
+                state: String::new(),
+            },
             spec: manifest_spec,
             status: manifest_status,
         });
@@ -501,11 +631,13 @@ impl PackageDefinition {
             resource.path = resolve_reference_path(&root_path, &resource.path)?;
             resource.manifest = resolve_reference_path(&root_path, &resource.manifest)?;
             if resource.manifest == MANIFEST_MANIFEST_PATH {
-                return Err(ManifestDefinitionError::NestedManifest(resource.path));
+                return Err(ManifestDefinitionError::NestedManifest(
+                    resource.metadata.path,
+                ));
             }
             if !resource_paths.insert(resource.path.clone()) {
                 return Err(ManifestDefinitionError::DuplicateResourcePath(
-                    resource.path,
+                    resource.metadata.path,
                 ));
             }
             if resource.manifest == "/builtin/driver" {
@@ -514,16 +646,15 @@ impl PackageDefinition {
                     return Err(ManifestDefinitionError::MultipleDrivers);
                 }
             }
+            let resource_manifest = resource.metadata.manifest.clone();
             resolve_embedded_resource_references(
                 &root_path,
-                &resource.manifest,
+                &resource_manifest,
                 &mut resource.spec,
             )?;
             resource_owners.insert(resource.path.clone(), root_path.clone());
             resources.push(PlannedResource {
-                path: resource.path,
-                manifest: resource.manifest,
-                name: resource.name,
+                metadata: resource.metadata,
                 spec: resource.spec,
                 status: resource.status,
             });
@@ -549,6 +680,19 @@ fn resolve_embedded_resource_references(
         "/builtin/driver" => {
             let mut value: DriverSpec = decode_resource_spec(spec)?;
             value.service_account = resolve_reference_path(manifest_path, &value.service_account)?;
+            if value.manages.is_empty() {
+                value.manages.push(manifest_path.to_owned());
+            } else {
+                for managed_manifest in &mut value.manages {
+                    *managed_manifest = resolve_reference_path(manifest_path, managed_manifest)?;
+                }
+            }
+            for watch in &mut value.watches {
+                resolve_manifest_selector(manifest_path, &mut watch.manifest)?;
+                for path in &mut watch.paths {
+                    resolve_relative_reference(manifest_path, path)?;
+                }
+            }
             *spec = serde_json::to_value(value).expect("DriverSpec serialization cannot fail");
         }
         "/builtin/relation" => {
@@ -564,8 +708,8 @@ fn resolve_embedded_resource_references(
         "/builtin/link" => {
             let mut value: LinkSpec = decode_resource_spec(spec)?;
             value.relation = resolve_reference_path(manifest_path, &value.relation)?;
-            resolve_optional_reference(manifest_path, &mut value.source)?;
-            resolve_optional_reference(manifest_path, &mut value.target)?;
+            value.source = resolve_reference_path(manifest_path, &value.source)?;
+            value.target = resolve_reference_path(manifest_path, &value.target)?;
             *spec = serde_json::to_value(value).expect("LinkSpec serialization cannot fail");
         }
         "/builtin/run" => {
@@ -718,22 +862,58 @@ fn is_absolute_object_path(path: &str) -> bool {
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
 }
 
-fn resource_path_matches(pattern: &str, path: &str) -> bool {
+pub fn resource_path_matches(pattern: &str, path: &str) -> bool {
     if pattern == "*" || pattern == path {
         return true;
     }
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path == prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('/'));
+    let pattern = pattern.trim_matches('/').split('/').collect::<Vec<_>>();
+    let path = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    glob_segments_match(&pattern, &path)
+}
+
+fn glob_segments_match(pattern: &[&str], path: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => path.is_empty(),
+        Some((segment, rest)) if *segment == "**" => {
+            glob_segments_match(rest, path)
+                || (!path.is_empty() && glob_segments_match(pattern, &path[1..]))
+        }
+        Some((segment, rest)) => {
+            !path.is_empty()
+                && glob_segment_matches(segment, path[0])
+                && glob_segments_match(rest, &path[1..])
+        }
     }
-    if let Some(prefix) = pattern.strip_suffix("/*") {
-        return path
-            .strip_prefix(prefix)
-            .is_some_and(|suffix| suffix.starts_with('/') && !suffix[1..].contains('/'));
+}
+
+fn glob_segment_matches(pattern: &str, value: &str) -> bool {
+    if pattern == "*" || pattern == value {
+        return true;
     }
-    false
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return false;
+    }
+    let mut remainder = value;
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if index == 0 {
+            let Some(next) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = next;
+        } else if index + 1 == parts.len() {
+            return remainder.ends_with(part);
+        } else {
+            let Some(offset) = remainder.find(part) else {
+                return false;
+            };
+            remainder = &remainder[offset + part.len()..];
+        }
+    }
+    parts.last().is_some_and(|part| part.is_empty()) || remainder.is_empty()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -745,6 +925,8 @@ pub enum Mutation {
     UpdateResource {
         resource_path: String,
         expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<UpdateResourceMetadata>,
         spec: Value,
     },
     DeleteResource {
@@ -754,7 +936,7 @@ pub enum Mutation {
     UpdateResourceStatus {
         resource_path: String,
         expected_revision: u64,
-        status: Value,
+        status: ResourceStatus,
     },
     CompleteRun {
         run_path: String,
@@ -805,6 +987,7 @@ pub enum RunResult {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DriverWork {
     Reconcile {
+        driver_revision: u64,
         resource: Resource,
     },
     Run {
@@ -845,20 +1028,33 @@ pub struct DriverReady {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn resource_is_the_single_persistent_shape() {
-        let resource = Resource {
+        let now = Utc::now();
+        let metadata = ResourceMetadata {
             path: "/agents/main".into(),
             manifest: "/manifests/agent".into(),
             name: "main".into(),
+            state: STATE_AVAILABLE.into(),
+            kas: KasMetadata {
+                revision: 1,
+                observed: BTreeMap::new(),
+                created_at: now,
+                updated_at: now,
+            },
+        };
+        let resource = Resource {
+            metadata: metadata.clone(),
             spec: json!({"working_directory": "/workspace"}),
-            status: json!({"state": "available"}),
-            revision: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            status: ResourceStatus {
+                metadata,
+                spec: json!({"working_directory": "/workspace"}),
+            },
         };
         assert_eq!(resource.manifest, "/manifests/agent");
+        assert_eq!(resource.metadata.kas.observed.len(), 0);
     }
 
     #[test]
@@ -898,11 +1094,14 @@ mod tests {
                 initial_state: STATE_PENDING.into(),
             },
             resources: vec![ResourceDefinition {
-                path: "./actions/example".into(),
-                manifest: "/builtin/action".into(),
-                name: "example".into(),
+                metadata: PlannedResourceMetadata {
+                    path: "./actions/example".into(),
+                    manifest: "/builtin/action".into(),
+                    name: "example".into(),
+                    state: String::new(),
+                },
                 spec: json!({"description":"","input_schema":{},"output_schema":{}}),
-                status: json!({}),
+                status: ResourceStatus::default(),
             }],
         };
         let expansion = definition.expand("digest").unwrap();
@@ -929,11 +1128,14 @@ mod tests {
                 initial_state: STATE_AVAILABLE.into(),
             },
             resources: vec![ResourceDefinition {
-                path: "./nested".into(),
-                manifest: MANIFEST_MANIFEST_PATH.into(),
-                name: "nested".into(),
+                metadata: PlannedResourceMetadata {
+                    path: "./nested".into(),
+                    manifest: MANIFEST_MANIFEST_PATH.into(),
+                    name: "nested".into(),
+                    state: String::new(),
+                },
                 spec: json!({}),
-                status: json!({}),
+                status: ResourceStatus::default(),
             }],
         };
         assert!(matches!(
@@ -958,15 +1160,18 @@ mod tests {
                 initial_state: STATE_AVAILABLE.into(),
             },
             resources: vec![ResourceDefinition {
-                path: "./driver".into(),
-                manifest: "/builtin/driver".into(),
-                name: "driver".into(),
+                metadata: PlannedResourceMetadata {
+                    path: "./driver".into(),
+                    manifest: "/builtin/driver".into(),
+                    name: "driver".into(),
+                    state: String::new(),
+                },
                 spec: json!({
                     "runtime":"process",
                     "entrypoint":"../driver",
                     "service_account":"./service-accounts/driver"
                 }),
-                status: json!({}),
+                status: ResourceStatus::default(),
             }],
         };
         assert!(matches!(

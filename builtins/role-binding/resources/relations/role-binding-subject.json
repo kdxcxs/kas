@@ -1,7 +1,9 @@
 {
-  "path": "/builtin/relations/role-binding-subject",
-  "manifest": "/builtin/relation",
-  "name": "role-binding-subject",
+  "metadata": {
+    "path": "/builtin/relations/role-binding-subject",
+    "manifest": "/builtin/relation",
+    "name": "role-binding-subject"
+  },
   "spec": {
     "role": "role_binding_subject",
     "sources": [
@@ -17,14 +19,9 @@
         ]
       }
     ],
-    "type": "many_to_many",
-    "ensure": true,
     "on_source_delete": "cascade",
     "metadata_schema": {
       "type": "object"
     }
-  },
-  "status": {
-    "state": "available"
   }
 }

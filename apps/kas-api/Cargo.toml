@@ -23,6 +23,5 @@ url = "2"
 [dev-dependencies]
 futures-util.workspace = true
 kas-test-driver = { path = "../kas-test-driver" }
-reqwest.workspace = true
 tempfile = "3.27.0"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }

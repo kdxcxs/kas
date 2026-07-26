@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "relationship-driver"
+  },
+  "spec": {
+    "description": "Built-in Relationship Driver permissions",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "delete"
+        ],
+        "paths": [
+          "/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/relation",
+          "/builtin/link"
+        ],
+        "verbs": [
+          "update"
+        ],
+        "paths": [
+          "/**"
+        ]
+      }
+    ]
+  }
+}

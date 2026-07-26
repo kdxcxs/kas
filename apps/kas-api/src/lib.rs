@@ -20,8 +20,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use kas_auth::{AuthContext, IssuedCredential};
 use kas_core::{
-    package_path_for_digest, DriverDesiredState, DriverReady, DriverSpec, DriverState,
-    DriverStatus, DriverWork, Mutation, PackageSpec, Resource, RestartPolicy, UpdateResource,
+    package_path_for_digest, DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork,
+    Mutation, PackageSpec, Resource, RestartPolicy, UpdateResource, BUILTIN_PACKAGE_MEDIA_TYPE,
     MANIFEST_PACKAGE_MEDIA_TYPE,
 };
 use kas_driver::{ClientMessage, MutationError, MutationStatus, ServerMessage};
@@ -117,11 +117,11 @@ fn recover_drivers(state: &AppState) {
         }
     };
     for driver in drivers {
-        let Ok(status) = decode_driver_status(&driver) else {
+        let Ok(current_state) = decode_driver_state(&driver) else {
             eprintln!("Driver {} has invalid status", driver.path);
             continue;
         };
-        if status.desired_state != DriverDesiredState::Running {
+        if driver.metadata.state != "running" {
             continue;
         }
         match driver_launch(state, driver, None) {
@@ -129,7 +129,7 @@ fn recover_drivers(state: &AppState) {
                 let restart = decode_driver_spec(&launch.driver)
                     .map(|spec| spec.restart)
                     .unwrap_or(RestartPolicy::Never);
-                if status.state == DriverState::Failed && restart == RestartPolicy::Never {
+                if current_state == DriverState::Failed && restart == RestartPolicy::Never {
                     continue;
                 }
                 if let Err(error) = state.supervisor.ensure_running(launch) {
@@ -151,11 +151,19 @@ fn driver_launch(
     let package = lock(state)?.package_for_driver(&driver.path)?;
     let package_spec: PackageSpec =
         serde_json::from_value(package.spec.clone()).map_err(internal_error)?;
-    let hex = package_spec
-        .digest
-        .strip_prefix("sha256:")
-        .ok_or_else(|| internal_error("Package digest is invalid"))?;
-    let package_root = state.data_dir.join("packages").join("sha256").join(hex);
+    let package_root = if package_spec.media_type == BUILTIN_PACKAGE_MEDIA_TYPE {
+        std::env::current_exe()
+            .map_err(internal_error)?
+            .parent()
+            .ok_or_else(|| internal_error("KAS executable has no parent directory"))?
+            .to_owned()
+    } else {
+        let hex = package_spec
+            .digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| internal_error("Package digest is invalid"))?;
+        state.data_dir.join("packages").join("sha256").join(hex)
+    };
     let entrypoint = definition
         .entrypoint
         .strip_prefix("./")
@@ -167,7 +175,7 @@ fn driver_launch(
         )));
     }
     Ok(DriverLaunch {
-        manifest_path: manifest.path,
+        manifest_path: manifest.path.clone(),
         package_root,
         driver,
         prepared_generation,
@@ -342,8 +350,7 @@ async fn install_package(
     )?;
     if let Some(driver_path) = driver_path {
         let driver = lock(&state)?.get_driver(&driver_path)?;
-        let status = decode_driver_status(&driver)?;
-        if status.desired_state == DriverDesiredState::Running {
+        if driver.metadata.state == "running" {
             let launch = driver_launch(&state, driver, None)?;
             state
                 .supervisor
@@ -357,7 +364,7 @@ async fn install_package(
 #[derive(Debug, Deserialize)]
 struct DriverControl {
     path: String,
-    desired_state: DriverDesiredState,
+    state: DriverControlState,
 }
 
 async fn control_driver(
@@ -372,10 +379,10 @@ async fn control_driver(
         "update",
         Some(&input.path),
     )?;
-    match input.desired_state {
-        DriverDesiredState::Running => {
+    match input.state {
+        DriverControlState::Running => {
             let driver = lock(&state)?.start_driver(&input.path)?;
-            let generation = decode_driver_status(&driver)?.generation;
+            let generation = lock(&state)?.driver_generation(&input.path)?;
             let launch = driver_launch(&state, driver.clone(), Some(generation))?;
             state
                 .supervisor
@@ -383,7 +390,7 @@ async fn control_driver(
                 .map_err(internal_error)?;
             Ok(Json(driver))
         }
-        DriverDesiredState::Stopped => {
+        DriverControlState::Stopped => {
             let driver = lock(&state)?.stop_driver(&input.path)?;
             state.supervisor.stop(input.path).map_err(internal_error)?;
             Ok(Json(driver))
@@ -454,11 +461,12 @@ async fn connect_driver(
     let auth = authenticate(&state, &headers)?;
     require_bound_driver(&auth, &query.path, query.generation)?;
     let driver = lock(&state)?.get_driver(&query.path)?;
-    let status = decode_driver_status(&driver)?;
-    if status.generation != query.generation
+    let current_generation = lock(&state)?.driver_generation(&query.path)?;
+    let current_state = decode_driver_state(&driver)?;
+    if current_generation != query.generation
         || !matches!(
-            status.state,
-            DriverState::Starting | DriverState::Ready | DriverState::Stopping
+            current_state,
+            DriverState::Starting | DriverState::Running | DriverState::Stopping
         )
     {
         return Err(ApiError(
@@ -529,12 +537,15 @@ async fn serve_driver_socket(
                     Ok(driver) => driver,
                     Err(_) => break,
                 };
-                let status = match decode_driver_status(&driver) {
-                    Ok(status) if status.generation == generation => status,
+                let current_state = match decode_driver_state(&driver) {
+                    Ok(driver_state)
+                        if lock(&state)
+                            .and_then(|store| store.driver_generation(&driver_path).map_err(Into::into))
+                            .is_ok_and(|current| current == generation) => driver_state,
                     _ => break,
                 };
-                match status.state {
-                    DriverState::Ready if in_flight.is_none() => {
+                match current_state {
+                    DriverState::Running if in_flight.is_none() => {
                         let delivery = match lock(&state).and_then(|mut store| {
                             store.claim_driver_delivery(&driver_path, generation).map_err(Into::into)
                         }) {
@@ -546,7 +557,7 @@ async fn serve_driver_socket(
                         };
                         if let Some(delivery) = delivery {
                             let message = match delivery.work {
-                                DriverWork::Reconcile { resource } => ServerMessage::Reconcile {
+                                DriverWork::Reconcile { resource, .. } => ServerMessage::Reconcile {
                                     delivery_id: delivery.id,
                                     resource,
                                 },
@@ -672,8 +683,8 @@ fn handle_driver_message(
                 return Err(forbidden());
             }
             let driver = lock(state)?.get_driver(driver_path)?;
-            let status = decode_driver_status(&driver)?;
-            if status.state == DriverState::Starting {
+            let current_state = decode_driver_state(&driver)?;
+            if current_state == DriverState::Starting {
                 lock(state)?.mark_driver_ready(
                     driver_path,
                     DriverReady {
@@ -682,7 +693,7 @@ fn handle_driver_message(
                         metadata,
                     },
                 )?;
-            } else if status.state == DriverState::Ready {
+            } else if current_state == DriverState::Running {
                 lock(state)?.heartbeat_driver(driver_path, generation)?;
             } else {
                 return Err(ApiError(
@@ -773,7 +784,7 @@ fn apply_driver_mutation(
         return Err(forbidden());
     }
     match delivery.work {
-        DriverWork::Reconcile { resource } => {
+        DriverWork::Reconcile { resource, .. } => {
             for operation in &operations {
                 match operation {
                     Mutation::UpdateResourceStatus { resource_path, .. }
@@ -917,13 +928,11 @@ fn decode_driver_spec(driver: &Resource) -> ApiResult<DriverSpec> {
     })
 }
 
-fn decode_driver_status(driver: &Resource) -> ApiResult<DriverStatus> {
-    serde_json::from_value(driver.status.clone()).map_err(|error| {
-        ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Driver {} has invalid status: {error}", driver.path),
-        )
-    })
+fn decode_driver_state(driver: &Resource) -> ApiResult<DriverState> {
+    serde_json::from_value(serde_json::Value::String(
+        driver.status.metadata.state.clone(),
+    ))
+    .map_err(internal_error)
 }
 
 fn require(

@@ -1,7 +1,9 @@
 {
-  "path": "/builtin/relations/run-action",
-  "manifest": "/builtin/relation",
-  "name": "run-action",
+  "metadata": {
+    "path": "/builtin/relations/run-action",
+    "manifest": "/builtin/relation",
+    "name": "run-action"
+  },
   "spec": {
     "role": "run_action",
     "sources": [
@@ -14,14 +16,9 @@
         "manifest": "/builtin/action"
       }
     ],
-    "type": "many_to_one",
-    "ensure": true,
     "on_source_delete": "unlink",
     "metadata_schema": {
       "type": "object"
     }
-  },
-  "status": {
-    "state": "available"
   }
 }

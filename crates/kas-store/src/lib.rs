@@ -6,12 +6,13 @@ use chrono::{DateTime, Duration, Utc};
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
     package_path_for_digest, ActionSpec, CreateResource, CreateRun, CredentialSpec, DeliveryStatus,
-    DriverDelivery, DriverDesiredState, DriverReady, DriverSpec, DriverState, DriverStatus,
-    DriverWork, Event, EventFilter, EventType, FinishRun, LinkSpec, ManifestDefinition,
-    ManifestSpec, Mutation, PackageDefinition, PackageExpansion, PackageSpec, PlannedResource,
-    RelationRole, RelationSpec, Resource, ResourceDefinition, RestartPolicy, RoleBindingSpec,
-    RoleSpec, RunResult, RunSpec, RunState, RunStatus, SystemRole, UpdateResource,
-    UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE, STATE_AVAILABLE, STATE_DELETED,
+    DriverDelivery, DriverObservation, DriverReady, DriverSpec, DriverState, DriverWork, Event,
+    EventFilter, EventType, FinishRun, KasMetadata, LinkSpec, ManifestDefinition, ManifestSpec,
+    Mutation, PackageDefinition, PackageExpansion, PackageSpec, PlannedResource, RelationRole,
+    RelationSpec, Resource, ResourceDefinition, ResourceMetadata, ResourceStatus,
+    ResourceStatusMetadata, RestartPolicy, RoleBindingSpec, RoleSpec, RunResult, RunSpec, RunState,
+    SystemRole, UpdateResource, UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE,
+    STATE_AVAILABLE, STATE_DELETED,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::de::DeserializeOwned;
@@ -21,7 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 9;
+pub const LATEST_SCHEMA_VERSION: u32 = 10;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -58,10 +59,15 @@ const MIGRATIONS: &[(u32, &str)] = &[
         9,
         include_str!("../migrations/0009_single_resource_primitive.sql"),
     ),
+    (
+        10,
+        include_str!("../migrations/0010_resource_metadata_and_driver_watches.sql"),
+    ),
 ];
 
 const RESOURCE_SELECT: &str =
-    "SELECT path,manifest_path,name,spec_json,status_json,revision,created_at,updated_at
+    "SELECT path,manifest_path,name,spec_json,status_json,revision,state,observed_json,
+            created_at,updated_at
      FROM resources";
 
 #[derive(Debug, Error)]
@@ -252,28 +258,27 @@ impl Store {
                         continue;
                     }
                     validate_resource_identity(planned)?;
-                    let (planned, status) = normalized_initial_documents(&tx, planned)?;
+                    let planned = normalized_initial_documents(&tx, planned)?;
                     insert_resource_row(
                         &tx,
                         &planned,
-                        &status,
                         true,
                         &format!("package:{}", root.path),
                         now,
                     )?;
                     stored_paths.push(planned.path.clone());
-                    projections.push((planned, status, owner_manifest.clone()));
+                    projections.push((planned, owner_manifest.clone()));
                 }
             }
         }
-        projections.sort_by_key(|(planned, _, _)| match planned.manifest.as_str() {
+        projections.sort_by_key(|(planned, _)| match planned.manifest.as_str() {
             MANIFEST_MANIFEST => 0,
             LINK_MANIFEST => 2,
             RUN_MANIFEST => 3,
             _ => 1,
         });
-        for (planned, status, owner_manifest) in &projections {
-            project_resource(&tx, planned, status, owner_manifest, now)?;
+        for (planned, owner_manifest) in &projections {
+            project_resource(&tx, planned, owner_manifest, now)?;
         }
         let stored_resources = stored_paths
             .iter()
@@ -290,25 +295,28 @@ impl Store {
                 media_type: installation.media_type.clone(),
             };
             let package = PlannedResource {
-                path: package_path.clone(),
-                manifest: PACKAGE_MANIFEST.into(),
-                name: package_spec.digest.clone(),
+                metadata: kas_core::PlannedResourceMetadata {
+                    path: package_path.clone(),
+                    manifest: PACKAGE_MANIFEST.into(),
+                    name: package_spec.digest.clone(),
+                    state: String::new(),
+                },
                 spec: serde_json::to_value(&package_spec)?,
-                status: serde_json::to_value(&package_spec)?,
+                status: ResourceStatus {
+                    metadata: ResourceStatusMetadata::default(),
+                    spec: serde_json::to_value(&package_spec)?,
+                },
             };
             validate_resource_identity(&package)?;
-            let (package, package_status) = normalized_initial_documents(&tx, &package)?;
-            insert_resource_row(
-                &tx,
-                &package,
-                &package_status,
-                true,
-                &format!("package:{}", root.path),
-                now,
-            )?;
-            project_resource(&tx, &package, &package_status, &root.path, now)?;
+            let package = normalized_initial_documents(&tx, &package)?;
+            insert_resource_row(&tx, &package, true, &format!("package:{}", root.path), now)?;
+            project_resource(&tx, &package, &root.path, now)?;
             let package_resource = resource_in(&tx, &package.path)?;
             append_event(&tx, EventType::Created, &package_resource, now)?;
+            tx.execute(
+                "INSERT INTO manifest_packages(manifest_path,package_path) VALUES (?,?)",
+                params![root.path, package_resource.path],
+            )?;
             package_resources.push(package_resource);
         }
 
@@ -322,8 +330,8 @@ impl Store {
                     &tx,
                     &format!("{package_path}/links/manifest"),
                     RelationRole::PackageManifest,
-                    Some(&package.path),
-                    Some(&root.path),
+                    &package.path,
+                    &root.path,
                     now,
                 )?;
             }
@@ -346,8 +354,8 @@ impl Store {
                         &tx,
                         &format!("{}/links/manifest-resource", packaged_resource.path),
                         RelationRole::ManifestResource,
-                        Some(owner),
-                        Some(&packaged_resource.path),
+                        owner,
+                        &packaged_resource.path,
                         now,
                     )?;
                 }
@@ -356,6 +364,7 @@ impl Store {
         for resource in &stored_resources {
             project_declared_relationships(&tx, resource, now)?;
         }
+        reconcile_all_resources(&tx, "package_registered", now)?;
         tx.commit()?;
         Ok(package_resources)
     }
@@ -369,10 +378,16 @@ impl Store {
         }
         let tx = self.connection.transaction()?;
         let now = Utc::now();
-        let (input, status) = normalized_initial_documents(&tx, &input)?;
-        validate_against_manifest(&tx, &input.manifest, &input.spec, &status)?;
-        insert_resource_row(&tx, &input, &status, false, "user", now)?;
-        project_resource(&tx, &input, &status, "", now)?;
+        let input = normalized_initial_documents(&tx, &input)?;
+        validate_against_manifest(
+            &tx,
+            &input.manifest,
+            &input.metadata.state,
+            &input.spec,
+            &input.status,
+        )?;
+        insert_resource_row(&tx, &input, false, "user", now)?;
+        project_resource(&tx, &input, "", now)?;
         let resource = tx.query_row(
             &format!("{RESOURCE_SELECT} WHERE path=?"),
             [&input.path],
@@ -381,7 +396,6 @@ impl Store {
         project_declared_relationships(&tx, &planned_from_resource(resource.clone()), now)?;
         append_event(&tx, EventType::Created, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "created", now)?;
-        reconcile_ensures(&tx, now)?;
         tx.commit()?;
         Ok(resource)
     }
@@ -422,13 +436,19 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let current = resource_in(&tx, path)?;
-        validate_against_manifest(&tx, &current.manifest, &input.spec, &current.status)?;
+        let state = input
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.state.as_str())
+            .unwrap_or(&current.metadata.state);
+        validate_against_manifest(&tx, &current.manifest, state, &input.spec, &current.status)?;
         let now = Utc::now();
         let changed = tx.execute(
-            "UPDATE resources SET spec_json=?,revision=revision+1,updated_at=?
+            "UPDATE resources SET spec_json=?,state=?,revision=revision+1,updated_at=?
              WHERE path=? AND revision=? AND protected=0",
             params![
                 serde_json::to_string(&input.spec)?,
+                state,
                 stamp(now),
                 path,
                 input.expected_revision
@@ -452,19 +472,24 @@ impl Store {
         path: &str,
         driver_path: &str,
         generation: u64,
-        input: UpdateResourceStatus,
+        mut input: UpdateResourceStatus,
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         assert_driver_owns(&tx, path, driver_path, generation)?;
         let current = resource_in(&tx, path)?;
-        validate_against_manifest(&tx, &current.manifest, &current.spec, &input.status)?;
+        normalize_submitted_status(&current, &mut input.status);
+        validate_against_manifest(
+            &tx,
+            &current.manifest,
+            &current.metadata.state,
+            &current.spec,
+            &input.status,
+        )?;
         let now = Utc::now();
         let changed = tx.execute(
-            "UPDATE resources SET status_json=?,updated_at=?
-             WHERE path=? AND revision=?",
+            "UPDATE resources SET status_json=? WHERE path=? AND revision=?",
             params![
                 serde_json::to_string(&input.status)?,
-                stamp(now),
                 path,
                 input.expected_revision
             ],
@@ -475,12 +500,7 @@ impl Store {
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
-        if resource.spec == resource.status && document_state(&resource.spec) == Some(STATE_DELETED)
-        {
-            hard_delete_resource(&tx, path, now)?;
-        } else {
-            enqueue_if_drifted(&tx, &resource, "status_updated", now)?;
-        }
+        maybe_finish_deleted_resource(&tx, path, now)?;
         tx.commit()?;
         Ok(resource)
     }
@@ -502,22 +522,26 @@ impl Store {
                 "Resource {path} is protected"
             )));
         }
-        set_document_state(&mut resource.spec, STATE_DELETED)?;
+        resource.metadata.state = STATE_DELETED.into();
         let now = Utc::now();
         tx.execute(
-            "UPDATE resources SET spec_json=?,revision=revision+1,updated_at=? WHERE path=?",
-            params![serde_json::to_string(&resource.spec)?, stamp(now), path],
+            "UPDATE resources SET state=?,revision=revision+1,updated_at=? WHERE path=?",
+            params![STATE_DELETED, stamp(now), path],
         )?;
         resource = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
-        if driver_for_resource(&tx, &resource)?.is_some() {
-            enqueue_if_drifted(&tx, &resource, "delete_requested", now)?;
-        } else {
+        enqueue_if_drifted(&tx, &resource, "delete_requested", now)?;
+        if driver_for_resource(&tx, &resource)?.is_none() {
+            let mut status = resource.status.clone();
+            let actual = status.metadata.kas.observed.clone();
+            status.metadata = resource.metadata.clone();
+            status.metadata.kas.observed = actual;
+            status.spec = resource.spec.clone();
             tx.execute(
-                "UPDATE resources SET status_json=?,updated_at=? WHERE path=?",
-                params![serde_json::to_string(&resource.spec)?, stamp(now), path],
+                "UPDATE resources SET status_json=? WHERE path=?",
+                params![serde_json::to_string(&status)?, path],
             )?;
-            hard_delete_resource(&tx, path, now)?;
+            maybe_finish_deleted_resource(&tx, path, now)?;
         }
         tx.commit()?;
         Ok(resource)
@@ -534,38 +558,27 @@ impl Store {
         target: Option<&str>,
         either_endpoint: bool,
     ) -> Result<Vec<Resource>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT r.path,r.manifest_path,r.name,r.spec_json,r.status_json,r.revision,
-                    r.created_at,r.updated_at
-             FROM link_index l JOIN resources r ON r.path=l.link_path
-             WHERE (?1 IS NULL OR l.source_path=?1 OR (?4=1 AND l.target_path=?1))
-               AND (?2 IS NULL OR l.relation_path=?2)
-               AND (?3 IS NULL OR l.target_path=?3 OR (?4=1 AND l.source_path=?3))
-             ORDER BY r.created_at,r.path",
-        )?;
-        let rows = statement.query_map(
-            params![source, relation, target, either_endpoint],
-            resource_from_row,
-        )?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        Ok(self
+            .list_resources(Some(LINK_MANIFEST))?
+            .into_iter()
+            .filter(|resource| {
+                let Ok(link) = decode::<LinkSpec>(&resource.spec, "Link spec") else {
+                    return false;
+                };
+                source.is_none_or(|expected| {
+                    link.source == expected || (either_endpoint && link.target == expected)
+                }) && relation.is_none_or(|expected| link.relation == expected)
+                    && target.is_none_or(|expected| {
+                        link.target == expected || (either_endpoint && link.source == expected)
+                    })
+            })
+            .collect())
     }
 
     pub fn get_link(&self, path: &str) -> Result<Resource, StoreError> {
         let resource = self.get_resource(path)?;
         require_manifest(&resource, LINK_MANIFEST)?;
         Ok(resource)
-    }
-
-    pub fn delete_link(&mut self, path: &str) -> Result<(), StoreError> {
-        let resource = self.get_link(path)?;
-        if is_protected(&self.connection, path)? {
-            return Err(StoreError::Conflict(format!("Link {path} is protected")));
-        }
-        let tx = self.connection.transaction()?;
-        hard_delete_resource(&tx, &resource.path, Utc::now())?;
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn current_event_sequence(&self) -> Result<u64, StoreError> {
@@ -610,7 +623,7 @@ impl Store {
         let path: Option<String> = self
             .connection
             .query_row(
-                "SELECT driver_path FROM driver_runtime WHERE owner_manifest_path=?",
+                "SELECT driver_path FROM driver_manifests WHERE manifest_path=?",
                 [manifest_path],
                 |row| row.get(0),
             )
@@ -647,24 +660,28 @@ impl Store {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
         require_manifest(&driver, DRIVER_MANIFEST)?;
-        let mut status: DriverStatus = decode(&driver.status, "Driver status")?;
-        if !matches!(status.state, DriverState::Stopped | DriverState::Failed) {
+        let state = driver_state(&driver)?;
+        if !matches!(state, DriverState::Stopped | DriverState::Failed) {
             return Err(StoreError::Conflict(format!(
                 "Driver {path} cannot start from {:?}",
-                status.state
+                state
             )));
         }
-        status.desired_state = DriverDesiredState::Running;
-        status.state = DriverState::Starting;
-        status.generation += 1;
-        status.process_id = None;
-        status.error = None;
         let now = Utc::now();
-        update_status_document(&tx, path, &status, now)?;
+        if driver.metadata.state != "running" {
+            tx.execute(
+                "UPDATE resources SET state='running',revision=revision+1,updated_at=? WHERE path=?",
+                params![stamp(now), path],
+            )?;
+            driver = resource_in(&tx, path)?;
+            reconcile_all_resources(&tx, "driver_started", now)?;
+        }
+        let generation = driver_runtime_generation_in(&tx, path)? + 1;
+        update_status_document(&tx, path, DriverState::Starting, &driver.status.spec, now)?;
         tx.execute(
             "UPDATE driver_runtime SET generation=?,process_id=NULL,started_at=?,
              heartbeat_at=NULL,stopped_at=NULL,error=NULL WHERE driver_path=?",
-            params![status.generation, stamp(now), path],
+            params![generation, stamp(now), path],
         )?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
@@ -679,16 +696,13 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        let mut status: DriverStatus = decode(&driver.status, "Driver status")?;
-        if status.generation != ready.generation || status.state != DriverState::Starting {
+        if driver_runtime_generation_in(&tx, path)? != ready.generation
+            || driver_state(&driver)? != DriverState::Starting
+        {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
-        status.state = DriverState::Ready;
-        status.process_id = Some(ready.process_id);
-        status.metadata = ready.metadata;
-        status.error = None;
         let now = Utc::now();
-        update_status_document(&tx, path, &status, now)?;
+        update_status_document(&tx, path, DriverState::Running, &driver.spec, now)?;
         tx.execute(
             "UPDATE driver_runtime SET process_id=?,heartbeat_at=? WHERE driver_path=?",
             params![ready.process_id, stamp(now), path],
@@ -705,8 +719,9 @@ impl Store {
         generation: u64,
     ) -> Result<Resource, StoreError> {
         let driver = self.get_driver(path)?;
-        let status: DriverStatus = decode(&driver.status, "Driver status")?;
-        if status.generation != generation || status.state != DriverState::Ready {
+        if self.driver_generation(path)? != generation
+            || driver_state(&driver)? != DriverState::Running
+        {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
         self.connection.execute(
@@ -719,13 +734,23 @@ impl Store {
     pub fn stop_driver(&mut self, path: &str) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        let mut status: DriverStatus = decode(&driver.status, "Driver status")?;
-        status.desired_state = DriverDesiredState::Stopped;
-        if matches!(status.state, DriverState::Starting | DriverState::Ready) {
-            status.state = DriverState::Stopping;
-        }
+        require_manifest(&driver, DRIVER_MANIFEST)?;
+        let state = driver_state(&driver)?;
         let now = Utc::now();
-        update_status_document(&tx, path, &status, now)?;
+        if driver.metadata.state != "stopped" {
+            tx.execute(
+                "UPDATE resources SET state='stopped',revision=revision+1,updated_at=? WHERE path=?",
+                params![stamp(now), path],
+            )?;
+            driver = resource_in(&tx, path)?;
+            reconcile_all_resources(&tx, "driver_stopped", now)?;
+        }
+        let state = if matches!(state, DriverState::Starting | DriverState::Running) {
+            DriverState::Stopping
+        } else {
+            state
+        };
+        update_status_document(&tx, path, state, &driver.status.spec, now)?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
@@ -740,18 +765,15 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        let mut status: DriverStatus = decode(&driver.status, "Driver status")?;
-        if status.generation != generation {
+        if driver_runtime_generation_in(&tx, path)? != generation {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
-        status.state = DriverState::Failed;
-        status.process_id = None;
-        status.error = Some(error.into());
+        let error = error.into();
         let now = Utc::now();
-        update_status_document(&tx, path, &status, now)?;
+        update_status_document(&tx, path, DriverState::Failed, &driver.status.spec, now)?;
         tx.execute(
             "UPDATE driver_runtime SET process_id=NULL,error=?,stopped_at=? WHERE driver_path=?",
-            params![status.error, stamp(now), path],
+            params![error, stamp(now), path],
         )?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
@@ -766,16 +788,11 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        let mut status: DriverStatus = decode(&driver.status, "Driver status")?;
-        if status.generation != generation {
+        if driver_runtime_generation_in(&tx, path)? != generation {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
-        status.desired_state = DriverDesiredState::Stopped;
-        status.state = DriverState::Stopped;
-        status.process_id = None;
-        status.error = None;
         let now = Utc::now();
-        update_status_document(&tx, path, &status, now)?;
+        update_status_document(&tx, path, DriverState::Stopped, &driver.spec, now)?;
         tx.execute(
             "UPDATE driver_runtime SET process_id=NULL,stopped_at=?,error=NULL WHERE driver_path=?",
             params![stamp(now), path],
@@ -784,6 +801,17 @@ impl Store {
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
         Ok(driver)
+    }
+
+    pub fn driver_generation(&self, path: &str) -> Result<u64, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT generation FROM driver_runtime WHERE driver_path=?",
+                [path],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("Driver {path}")))
     }
 
     pub fn enqueue_run(&mut self, input: CreateRun) -> Result<Resource, StoreError> {
@@ -799,19 +827,25 @@ impl Store {
             request_id: input.request_id,
             resource: input.resource,
             action: input.action,
-            driver: Some(driver.path),
+            driver: Some(driver.path.clone()),
             input: input.input,
-        })?;
-        let status = serde_json::to_value(RunStatus {
-            state: RunState::Queued,
-            driver_generation: None,
             output: None,
             error: None,
         })?;
+        let status = ResourceStatus {
+            metadata: ResourceStatusMetadata {
+                state: run_state_name(RunState::Queued).into(),
+                ..Default::default()
+            },
+            spec: spec.clone(),
+        };
         self.create_resource(PlannedResource {
-            path: input.path,
-            manifest: RUN_MANIFEST.into(),
-            name: input.request_id.to_string(),
+            metadata: kas_core::PlannedResourceMetadata {
+                path: input.path,
+                manifest: RUN_MANIFEST.into(),
+                name: input.request_id.to_string(),
+                state: run_state_name(RunState::Queued).into(),
+            },
             spec,
             status,
         })
@@ -827,15 +861,23 @@ impl Store {
         let tx = self.connection.transaction()?;
         let mut run = resource_in(&tx, run_path)?;
         require_manifest(&run, RUN_MANIFEST)?;
-        let mut status: RunStatus = decode(&run.status, "Run status")?;
-        if status.driver_generation != Some(input.driver_generation)
-            || status.state != RunState::Running
+        let active_generation: Option<u64> = tx
+            .query_row(
+                "SELECT driver_generation FROM run_runtime WHERE run_path=?",
+                [run_path],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if active_generation != Some(input.driver_generation)
+            || run_state(&run)? != RunState::Running
         {
             return Err(StoreError::Conflict("Run generation is stale".into()));
         }
-        apply_run_result(&mut status, input.result);
+        let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
+        let state = apply_run_result(&mut spec, input.result);
         let now = Utc::now();
-        update_status_document(&tx, run_path, &status, now)?;
+        update_platform_resource(&tx, run_path, state, &spec, now)?;
         tx.execute(
             "UPDATE run_runtime SET finished_at=? WHERE run_path=?",
             params![stamp(now), run_path],
@@ -898,13 +940,37 @@ impl Store {
             params![stamp(now), delivery_id.to_string()],
         )?;
         match delivery.work {
-            DriverWork::Reconcile { resource } => {
+            DriverWork::Reconcile {
+                driver_revision,
+                resource,
+            } => {
+                if let Ok(mut current) = resource_in(&tx, &resource.path) {
+                    current.status.metadata.kas.observed.insert(
+                        driver_path.into(),
+                        DriverObservation {
+                            driver_revision,
+                            resource_revision: resource.revision,
+                        },
+                    );
+                    tx.execute(
+                        "UPDATE resources SET status_json=? WHERE path=?",
+                        params![serde_json::to_string(&current.status)?, resource.path],
+                    )?;
+                }
                 tx.execute(
-                    "DELETE FROM reconcile_queue WHERE resource_path=?",
-                    [&resource.path],
+                    "DELETE FROM reconcile_queue
+                     WHERE driver_path=? AND resource_path=?
+                       AND target_driver_revision<=? AND target_resource_revision<=?",
+                    params![
+                        driver_path,
+                        resource.path,
+                        driver_revision,
+                        resource.revision
+                    ],
                 )?;
                 if let Ok(current) = resource_in(&tx, &resource.path) {
                     enqueue_if_drifted(&tx, &current, "delivery_completed", now)?;
+                    maybe_finish_deleted_resource(&tx, &resource.path, now)?;
                 }
             }
             DriverWork::Run { .. } => {}
@@ -939,17 +1005,18 @@ impl Store {
         }
 
         let now = Utc::now();
-        let reconcile_path: Option<String> = tx
+        let reconcile: Option<(String, u64)> = tx
             .query_row(
-                "SELECT resource_path FROM reconcile_queue
+                "SELECT resource_path,target_driver_revision FROM reconcile_queue
                  WHERE driver_path=? AND available_at<=?
                  ORDER BY available_at,updated_at,resource_path LIMIT 1",
                 params![driver_path, stamp(now)],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let work = if let Some(path) = reconcile_path {
+        let work = if let Some((path, driver_revision)) = reconcile {
             Some(DriverWork::Reconcile {
+                driver_revision,
                 resource: resource_in(&tx, &path)?,
             })
         } else {
@@ -957,7 +1024,7 @@ impl Store {
                 .query_row(
                     "SELECT rr.run_path FROM run_runtime rr
                      JOIN resources r ON r.path=rr.run_path
-                     WHERE rr.driver_path=? AND json_extract(r.status_json,'$.state')='queued'
+                     WHERE rr.driver_path=? AND json_extract(r.status_json,'$.metadata.state')='queued'
                      ORDER BY r.created_at,r.path LIMIT 1",
                     [driver_path],
                     |row| row.get(0),
@@ -966,10 +1033,7 @@ impl Store {
             if let Some(path) = run_path {
                 let mut run = resource_in(&tx, &path)?;
                 let spec: RunSpec = decode(&run.spec, "Run spec")?;
-                let mut status: RunStatus = decode(&run.status, "Run status")?;
-                status.state = RunState::Running;
-                status.driver_generation = Some(generation);
-                update_status_document(&tx, &path, &status, now)?;
+                update_platform_resource(&tx, &path, RunState::Running, &spec, now)?;
                 tx.execute(
                     "UPDATE run_runtime SET driver_generation=?,started_at=? WHERE run_path=?",
                     params![generation, stamp(now), path],
@@ -1093,10 +1157,10 @@ impl Store {
         self.connection
             .query_row(
                 &format!(
-                    "{RESOURCE_SELECT} r
-                     JOIN link_index l ON l.source_path=r.path
-                     JOIN relation_index relation ON relation.relation_path=l.relation_path
-                     WHERE relation.role='package_manifest' AND l.target_path=?"
+                    "{RESOURCE_SELECT}
+                     WHERE path=(
+                         SELECT package_path FROM manifest_packages WHERE manifest_path=?
+                     )"
                 ),
                 [manifest_path],
                 resource_from_row,
@@ -1115,11 +1179,17 @@ impl Store {
         let path = format!("/users/{}", permission_segment(name));
         if self.get_resource(&path).is_err() {
             self.create_resource(PlannedResource {
-                path: path.clone(),
-                manifest: USER_MANIFEST.into(),
-                name: name.into(),
+                metadata: kas_core::PlannedResourceMetadata {
+                    path: path.clone(),
+                    manifest: USER_MANIFEST.into(),
+                    name: name.into(),
+                    state: String::new(),
+                },
                 spec: serde_json::to_value(UserSpec { disabled: false })?,
-                status: serde_json::to_value(UserSpec { disabled: false })?,
+                status: ResourceStatus {
+                    metadata: ResourceStatusMetadata::default(),
+                    spec: serde_json::to_value(UserSpec { disabled: false })?,
+                },
             })?;
         }
         let admin_role = self
@@ -1133,14 +1203,17 @@ impl Store {
         let binding_path = format!("{path}/role-bindings/admin");
         if self.get_resource(&binding_path).is_err() {
             self.create_resource(PlannedResource {
-                path: binding_path,
-                manifest: ROLE_BINDING_MANIFEST.into(),
-                name: format!("{name}-admin"),
+                metadata: kas_core::PlannedResourceMetadata {
+                    path: binding_path,
+                    manifest: ROLE_BINDING_MANIFEST.into(),
+                    name: format!("{name}-admin"),
+                    state: String::new(),
+                },
                 spec: serde_json::to_value(RoleBindingSpec {
-                    role: admin_role.path,
+                    role: admin_role.path.clone(),
                     subjects: vec![path.clone()],
                 })?,
-                status: json!({"state": STATE_AVAILABLE}),
+                status: ResourceStatus::default(),
             })?;
         }
         self.issue_credential(&path, None)
@@ -1160,11 +1233,10 @@ impl Store {
     ) -> Result<IssuedCredential, StoreError> {
         let driver = self.get_driver(driver_path)?;
         let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
-        let status: DriverStatus = decode(&driver.status, "Driver status")?;
         self.issue_credential_for_generation(
             &spec.service_account,
             Some(Utc::now() + Duration::hours(1)),
-            Some(status.generation),
+            Some(self.driver_generation(driver_path)?),
         )
     }
 
@@ -1186,18 +1258,25 @@ impl Store {
         let spec = CredentialSpec {
             subject: subject_path.into(),
             expires_at,
+            revoked_at: None,
         };
         let tx = self.connection.transaction()?;
         let now = Utc::now();
         let planned = PlannedResource {
-            path: credential_path.clone(),
-            manifest: CREDENTIAL_MANIFEST.into(),
-            name: id.to_string(),
+            metadata: kas_core::PlannedResourceMetadata {
+                path: credential_path.clone(),
+                manifest: CREDENTIAL_MANIFEST.into(),
+                name: id.to_string(),
+                state: String::new(),
+            },
             spec: serde_json::to_value(&spec)?,
-            status: json!({"revoked_at": null}),
+            status: ResourceStatus {
+                metadata: ResourceStatusMetadata::default(),
+                spec: serde_json::to_value(&spec)?,
+            },
         };
-        let (planned, status) = normalized_initial_documents(&tx, &planned)?;
-        insert_resource_row(&tx, &planned, &status, false, "system", now)?;
+        let planned = normalized_initial_documents(&tx, &planned)?;
+        insert_resource_row(&tx, &planned, false, "system", now)?;
         tx.execute(
             "INSERT INTO credential_material(credential_path,token_hash,driver_generation)
              VALUES (?,?,?)",
@@ -1227,12 +1306,7 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound("Credential".into()))?;
         let credential = self.get_resource(&credential_path)?;
         let spec: CredentialSpec = decode(&credential.spec, "Credential spec")?;
-        if spec.expires_at.is_some_and(|expiry| expiry <= Utc::now())
-            || credential
-                .status
-                .get("revoked_at")
-                .is_some_and(|value| !value.is_null())
-        {
+        if spec.expires_at.is_some_and(|expiry| expiry <= Utc::now()) || spec.revoked_at.is_some() {
             return Err(StoreError::NotFound("Credential".into()));
         }
         let subject_resource = self.get_resource(&spec.subject)?;
@@ -1274,8 +1348,8 @@ impl Store {
         };
         Ok(AuthContext {
             subject: Subject {
-                path: subject_resource.path,
-                manifest: subject_resource.manifest,
+                path: subject_resource.path.clone(),
+                manifest: subject_resource.manifest.clone(),
             },
             rules,
             driver_path,
@@ -1285,18 +1359,13 @@ impl Store {
 
     pub fn revoke_credential(&mut self, path: &str) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
-        let mut resource = resource_in(&tx, path)?;
+        let resource = resource_in(&tx, path)?;
         require_manifest(&resource, CREDENTIAL_MANIFEST)?;
-        resource.status = json!({
-            "state": STATE_AVAILABLE,
-            "revoked_at": Utc::now()
-        });
+        let mut spec: CredentialSpec = decode(&resource.spec, "Credential spec")?;
+        spec.revoked_at = Some(Utc::now());
         let now = Utc::now();
-        tx.execute(
-            "UPDATE resources SET status_json=?,updated_at=? WHERE path=?",
-            params![serde_json::to_string(&resource.status)?, stamp(now), path],
-        )?;
-        resource = resource_in(&tx, path)?;
+        update_platform_resource(&tx, path, "revoked", &spec, now)?;
+        let resource = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         tx.commit()?;
         Ok(resource)
@@ -1330,7 +1399,12 @@ fn builtin_documents() -> [BuiltinDocuments; 12] {
         },
         BuiltinDocuments {
             manifest: include_str!("../../../builtins/link/manifest.json"),
-            resources: &[],
+            resources: &[
+                include_str!("../../../builtins/link/resources/service-accounts/driver.json"),
+                include_str!("../../../builtins/link/resources/roles/driver.json"),
+                include_str!("../../../builtins/link/resources/role-bindings/driver.json"),
+                include_str!("../../../builtins/link/resources/drivers/driver.json"),
+            ],
         },
         BuiltinDocuments {
             manifest: include_str!("../../../builtins/driver/manifest.json"),
@@ -1452,14 +1526,20 @@ fn digest_documents(manifest: &str, resources: &[&str]) -> String {
 
 fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
     Ok(Resource {
-        path: row.get(0)?,
-        manifest: row.get(1)?,
-        name: row.get(2)?,
+        metadata: ResourceMetadata {
+            path: row.get(0)?,
+            manifest: row.get(1)?,
+            name: row.get(2)?,
+            state: row.get(6)?,
+            kas: KasMetadata {
+                revision: row.get(5)?,
+                observed: json_from_row(row, 7)?,
+                created_at: time_from_row(row, 8)?,
+                updated_at: time_from_row(row, 9)?,
+            },
+        },
         spec: json_from_row(row, 3)?,
         status: json_from_row(row, 4)?,
-        revision: row.get(5)?,
-        created_at: time_from_row(row, 6)?,
-        updated_at: time_from_row(row, 7)?,
     })
 }
 
@@ -1566,32 +1646,40 @@ fn permission_segment(name: &str) -> String {
 fn normalized_initial_documents(
     tx: &Transaction<'_>,
     planned: &PlannedResource,
-) -> Result<(PlannedResource, Value), StoreError> {
+) -> Result<PlannedResource, StoreError> {
     let mut planned = planned.clone();
     if planned.path == MANIFEST_MANIFEST && planned.manifest == MANIFEST_MANIFEST {
         let manifest_spec: ManifestSpec = decode(&planned.spec, "Manifest spec")?;
-        ensure_state(&mut planned.spec, &manifest_spec.default_state)?;
-        let mut status = planned.status.clone();
-        ensure_state(&mut status, &manifest_spec.initial_state)?;
-        return Ok((planned, status));
+        normalize_resource_states(&mut planned, &manifest_spec);
+        return Ok(planned);
     }
     let manifest = resource_in(tx, &planned.manifest)?;
     require_manifest(&manifest, MANIFEST_MANIFEST)?;
     let manifest_spec: ManifestSpec = decode(&manifest.spec, "Manifest spec")?;
-    ensure_state(&mut planned.spec, &manifest_spec.default_state)?;
-    let mut status = planned.status.clone();
-    if status.is_null() {
-        status = json!({});
+    normalize_resource_states(&mut planned, &manifest_spec);
+    Ok(planned)
+}
+
+fn normalize_resource_states(planned: &mut PlannedResource, manifest: &ManifestSpec) {
+    if planned.metadata.state.is_empty() {
+        planned.metadata.state = manifest.default_state.clone();
     }
-    ensure_state(&mut status, &manifest_spec.initial_state)?;
-    Ok((planned, status))
+    if planned.status.metadata.state.is_empty() {
+        planned.status.metadata.state = manifest.initial_state.clone();
+    }
+    if planned.status.spec == json!({}) {
+        planned.status.spec = planned.spec.clone();
+    }
 }
 
 fn planned_from_resource(resource: Resource) -> PlannedResource {
     PlannedResource {
-        path: resource.path,
-        manifest: resource.manifest,
-        name: resource.name,
+        metadata: kas_core::PlannedResourceMetadata {
+            path: resource.metadata.path,
+            manifest: resource.metadata.manifest,
+            name: resource.metadata.name,
+            state: resource.metadata.state,
+        },
         spec: resource.spec,
         status: resource.status,
     }
@@ -1600,9 +1688,12 @@ fn planned_from_resource(resource: Resource) -> PlannedResource {
 fn validate_against_manifest(
     tx: &Transaction<'_>,
     manifest_path: &str,
+    state: &str,
     spec: &Value,
-    status: &Value,
+    status: &ResourceStatus,
 ) -> Result<(), StoreError> {
+    validate_no_reserved_keys("Resource spec", spec)?;
+    validate_no_reserved_keys("Resource status spec", &status.spec)?;
     if manifest_path == MANIFEST_MANIFEST
         && tx
             .query_row(
@@ -1618,14 +1709,40 @@ fn validate_against_manifest(
     let manifest = resource_in(tx, manifest_path)?;
     require_manifest(&manifest, MANIFEST_MANIFEST)?;
     let definition: ManifestSpec = decode(&manifest.spec, "Manifest spec")?;
-    validate_resource_state("Resource spec", spec, &definition)?;
-    validate_resource_state("Resource status", status, &definition)?;
-    let mut business_spec = spec.clone();
-    business_spec
-        .as_object_mut()
-        .ok_or_else(|| StoreError::Invalid("Resource spec must be an object".into()))?
-        .remove("state");
-    validate_json_schema("Resource spec", &definition.resource_schema, &business_spec)
+    validate_resource_state("Resource metadata", state, &definition)?;
+    validate_resource_state(
+        "Resource status metadata",
+        &status.metadata.state,
+        &definition,
+    )?;
+    validate_json_schema("Resource spec", &definition.resource_schema, spec)?;
+    validate_json_schema(
+        "Resource status spec",
+        &definition.resource_schema,
+        &status.spec,
+    )
+}
+
+fn validate_no_reserved_keys(kind: &str, value: &Value) -> Result<(), StoreError> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key.contains('[') || key.contains(']') {
+                    return Err(StoreError::Invalid(format!(
+                        "{kind} field {key:?} contains reserved '[' or ']' characters"
+                    )));
+                }
+                validate_no_reserved_keys(kind, child)?;
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                validate_no_reserved_keys(kind, child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn validate_json_schema(kind: &str, schema: &Value, value: &Value) -> Result<(), StoreError> {
@@ -1640,23 +1757,39 @@ fn validate_json_schema(kind: &str, schema: &Value, value: &Value) -> Result<(),
 fn insert_resource_row(
     tx: &Transaction<'_>,
     planned: &PlannedResource,
-    status: &Value,
     protected: bool,
     managed_by: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
-    validate_against_manifest(tx, &planned.manifest, &planned.spec, status)?;
+    let mut status = planned.status.clone();
+    status.metadata.path = planned.path.clone();
+    status.metadata.manifest = planned.manifest.clone();
+    status.metadata.name = planned.name.clone();
+    status.metadata.kas = KasMetadata {
+        revision: 0,
+        observed: Default::default(),
+        created_at: now,
+        updated_at: now,
+    };
+    validate_against_manifest(
+        tx,
+        &planned.manifest,
+        &planned.metadata.state,
+        &planned.spec,
+        &status,
+    )?;
     tx.execute(
         "INSERT INTO resources(
-            path,manifest_path,name,spec_json,status_json,revision,protected,managed_by,
-            created_at,updated_at
-         ) VALUES (?,?,?,?,?,0,?,?,?,?)",
+            path,manifest_path,name,spec_json,status_json,revision,state,observed_json,
+            protected,managed_by,created_at,updated_at
+         ) VALUES (?,?,?,?,?,0,?,'{}',?,?,?,?)",
         params![
             planned.path,
             planned.manifest,
             planned.name,
             serde_json::to_string(&planned.spec)?,
-            serde_json::to_string(status)?,
+            serde_json::to_string(&status)?,
+            planned.metadata.state,
             protected,
             managed_by,
             stamp(now),
@@ -1670,7 +1803,6 @@ fn insert_resource_row(
 fn project_resource(
     tx: &Transaction<'_>,
     planned: &PlannedResource,
-    status: &Value,
     owner_manifest: &str,
     _now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
@@ -1683,22 +1815,7 @@ fn project_resource(
                 params![planned.path, spec.version],
             )?;
         }
-        RELATION_MANIFEST => {
-            let spec: RelationSpec = decode(&planned.spec, "Relation spec")?;
-            tx.execute(
-                "INSERT INTO relation_index(
-                    relation_path,owner_manifest_path,role,relation_type,ensure,on_source_delete
-                 ) VALUES (?,?,?,?,?,?)",
-                params![
-                    planned.path,
-                    owner_manifest,
-                    spec.role.map(relation_role),
-                    relation_type(spec.relation_type),
-                    spec.ensure,
-                    on_source_delete(spec.on_source_delete)
-                ],
-            )?;
-        }
+        RELATION_MANIFEST => {}
         ACTION_MANIFEST => {
             let _: ActionSpec = decode(&planned.spec, "Action spec")?;
             tx.execute(
@@ -1707,26 +1824,29 @@ fn project_resource(
             )?;
         }
         DRIVER_MANIFEST => {
-            let _: DriverSpec = decode(&planned.spec, "Driver spec")?;
-            let driver_status: DriverStatus = decode(status, "Driver status")?;
+            let spec: DriverSpec = decode(&planned.spec, "Driver spec")?;
             tx.execute(
                 "INSERT INTO driver_runtime(
                     driver_path,owner_manifest_path,generation
                  ) VALUES (?,?,?)",
-                params![planned.path, owner_manifest, driver_status.generation],
+                params![planned.path, owner_manifest, 0],
+            )?;
+            project_driver_manifests(tx, &planned.path, &spec)?;
+            tx.execute(
+                "INSERT INTO driver_service_accounts(driver_path,service_account_path)
+                 VALUES (?,?)",
+                params![planned.path, spec.service_account],
             )?;
         }
-        LINK_MANIFEST => {
-            project_link(tx, planned)?;
-        }
+        LINK_MANIFEST => {}
         RUN_MANIFEST => {
-            project_run(tx, planned, status)?;
+            project_run(tx, planned)?;
         }
         ROLE_MANIFEST => {
             let _: RoleSpec = decode(&planned.spec, "Role spec")?;
         }
         ROLE_BINDING_MANIFEST => {
-            let _: RoleBindingSpec = decode(&planned.spec, "RoleBinding spec")?;
+            project_role_binding_runtime(tx, planned)?;
         }
         CREDENTIAL_MANIFEST => {
             let _: CredentialSpec = decode(&planned.spec, "Credential spec")?;
@@ -1773,13 +1893,47 @@ fn validate_manifest_states(spec: &ManifestSpec) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn project_driver_manifests(
+    tx: &Transaction<'_>,
+    driver_path: &str,
+    spec: &DriverSpec,
+) -> Result<(), StoreError> {
+    if spec.manages.is_empty() {
+        return Err(StoreError::Invalid(
+            "Driver must manage at least one Manifest".into(),
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for manifest_path in &spec.manages {
+        if !unique.insert(manifest_path) {
+            return Err(StoreError::Invalid(format!(
+                "Driver manages Manifest {manifest_path} more than once"
+            )));
+        }
+        let manifest = resource_in(tx, manifest_path)?;
+        require_manifest(&manifest, MANIFEST_MANIFEST)?;
+        tx.execute(
+            "INSERT INTO driver_manifests(driver_path,manifest_path) VALUES (?,?)",
+            params![driver_path, manifest_path],
+        )
+        .map_err(|error| {
+            constraint(
+                error,
+                &format!("Manifest {manifest_path} already has a managing Driver"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_resource_state(
     kind: &str,
-    document: &Value,
+    state: &str,
     manifest: &ManifestSpec,
 ) -> Result<(), StoreError> {
-    let state = document_state(document)
-        .ok_or_else(|| StoreError::Invalid(format!("{kind} must contain string state")))?;
+    if state.is_empty() {
+        return Err(StoreError::Invalid(format!("{kind} state cannot be empty")));
+    }
     if is_builtin_state(state) || manifest.states.iter().any(|declared| declared == state) {
         Ok(())
     } else {
@@ -1796,63 +1950,25 @@ fn is_builtin_state(state: &str) -> bool {
     )
 }
 
-fn project_link(tx: &Transaction<'_>, planned: &PlannedResource) -> Result<(), StoreError> {
-    let spec: LinkSpec = decode(&planned.spec, "Link spec")?;
-    let relation = resource_in(tx, &spec.relation)?;
-    require_manifest(&relation, RELATION_MANIFEST)?;
-    if spec.source.is_none() && spec.target.is_none() {
-        return Err(StoreError::Invalid(
-            "Link source and target cannot both be null".into(),
-        ));
-    }
-    if let Some(source) = &spec.source {
-        let source = resource_in(tx, source)?;
-        let relation_spec: RelationSpec = decode(&relation.spec, "Relation spec")?;
-        if !relation_spec
-            .sources
-            .iter()
-            .any(|selector| selector.matches(&source))
-        {
-            return Err(StoreError::Invalid(format!(
-                "Link source {} is not accepted by Relation {}",
-                source.path, relation.path
-            )));
-        }
-    }
-    if let Some(target) = &spec.target {
-        let target = resource_in(tx, target)?;
-        let relation_spec: RelationSpec = decode(&relation.spec, "Relation spec")?;
-        if !relation_spec
-            .targets
-            .iter()
-            .any(|selector| selector.matches(&target))
-        {
-            return Err(StoreError::Invalid(format!(
-                "Link target {} is not accepted by Relation {}",
-                target.path, relation.path
-            )));
-        }
-    }
-    let relation_spec: RelationSpec = decode(&relation.spec, "Relation spec")?;
-    enforce_cardinality(tx, &spec, relation_spec.relation_type, None)?;
-    validate_json_schema(
-        "Link metadata",
-        &relation_spec.metadata_schema,
-        &spec.metadata,
-    )?;
+fn project_role_binding_runtime(
+    tx: &Transaction<'_>,
+    planned: &PlannedResource,
+) -> Result<(), StoreError> {
+    let spec: RoleBindingSpec = decode(&planned.spec, "RoleBinding spec")?;
     tx.execute(
-        "INSERT INTO link_index(link_path,relation_path,source_path,target_path)
-         VALUES (?,?,?,?)",
-        params![planned.path, spec.relation, spec.source, spec.target],
+        "INSERT INTO role_binding_roles(role_binding_path,role_path) VALUES (?,?)",
+        params![planned.path, spec.role],
     )?;
+    for subject in spec.subjects {
+        tx.execute(
+            "INSERT INTO role_binding_subjects(role_binding_path,subject_path) VALUES (?,?)",
+            params![planned.path, subject],
+        )?;
+    }
     Ok(())
 }
 
-fn project_run(
-    tx: &Transaction<'_>,
-    planned: &PlannedResource,
-    status: &Value,
-) -> Result<(), StoreError> {
+fn project_run(tx: &Transaction<'_>, planned: &PlannedResource) -> Result<(), StoreError> {
     let mut spec: RunSpec = decode(&planned.spec, "Run spec")?;
     let target = resource_in(tx, &spec.resource)?;
     let action = resource_in(tx, &spec.action)?;
@@ -1866,7 +1982,6 @@ fn project_run(
             .ok_or_else(|| StoreError::Invalid("Resource Manifest has no Driver".into()))?
     };
     spec.driver = Some(driver_path.clone());
-    let run_status: RunStatus = decode(status, "Run status")?;
     let mut stored_spec = planned.spec.clone();
     stored_spec
         .as_object_mut()
@@ -1886,7 +2001,7 @@ fn project_run(
             spec.resource,
             spec.action,
             driver_path,
-            run_status.driver_generation
+            Option::<u64>::None
         ],
     )?;
     Ok(())
@@ -1906,15 +2021,9 @@ fn project_declared_relationships(
                     tx,
                     &link_path,
                     RelationRole::DriverServiceAccount,
-                    Some(&resource.path),
-                    Some(&spec.service_account),
+                    &resource.path,
+                    &spec.service_account,
                     now,
-                )?;
-                tx.execute(
-                    "INSERT INTO driver_service_accounts(
-                        driver_path,service_account_path,link_path
-                     ) VALUES (?,?,?)",
-                    params![resource.path, spec.service_account, link_path],
                 )?;
             }
         }
@@ -1926,14 +2035,9 @@ fn project_declared_relationships(
                     tx,
                     &link_path,
                     RelationRole::RoleBindingRole,
-                    Some(&resource.path),
-                    Some(&spec.role),
+                    &resource.path,
+                    &spec.role,
                     now,
-                )?;
-                tx.execute(
-                    "INSERT INTO role_binding_roles(role_binding_path,role_path,link_path)
-                     VALUES (?,?,?)",
-                    params![resource.path, spec.role, link_path],
                 )?;
             }
             if relation_path_for_role(tx, RelationRole::RoleBindingSubject)?.is_some() {
@@ -1943,15 +2047,9 @@ fn project_declared_relationships(
                         tx,
                         &link_path,
                         RelationRole::RoleBindingSubject,
-                        Some(&resource.path),
-                        Some(subject),
+                        &resource.path,
+                        subject,
                         now,
-                    )?;
-                    tx.execute(
-                        "INSERT INTO role_binding_subjects(
-                            role_binding_path,subject_path,link_path
-                         ) VALUES (?,?,?)",
-                        params![resource.path, subject, link_path],
                     )?;
                 }
             }
@@ -1978,8 +2076,8 @@ fn project_declared_relationships(
                         tx,
                         &format!("{}/links/{suffix}", resource.path),
                         role,
-                        Some(&resource.path),
-                        Some(target),
+                        &resource.path,
+                        target,
                         now,
                     )?;
                 }
@@ -1994,8 +2092,8 @@ fn create_system_link(
     tx: &Transaction<'_>,
     path: &str,
     role: RelationRole,
-    source: Option<&str>,
-    target: Option<&str>,
+    source: &str,
+    target: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<Resource>, StoreError> {
     let Some(relation) = relation_path_for_role(tx, role)? else {
@@ -2003,16 +2101,22 @@ fn create_system_link(
     };
     let spec = LinkSpec {
         relation,
-        source: source.map(str::to_owned),
-        target: target.map(str::to_owned),
+        source: source.to_owned(),
+        target: target.to_owned(),
         metadata: json!({}),
     };
     let planned = PlannedResource {
-        path: path.into(),
-        manifest: LINK_MANIFEST.into(),
-        name: path.rsplit('/').next().unwrap_or("link").into(),
+        metadata: kas_core::PlannedResourceMetadata {
+            path: path.into(),
+            manifest: LINK_MANIFEST.into(),
+            name: path.rsplit('/').next().unwrap_or("link").into(),
+            state: String::new(),
+        },
         spec: serde_json::to_value(&spec)?,
-        status: serde_json::to_value(&spec)?,
+        status: ResourceStatus {
+            metadata: ResourceStatusMetadata::default(),
+            spec: serde_json::to_value(&spec)?,
+        },
     };
     if tx
         .query_row("SELECT 1 FROM resources WHERE path=?", [path], |_| Ok(()))
@@ -2021,31 +2125,11 @@ fn create_system_link(
     {
         return Ok(Some(resource_in(tx, path)?));
     }
-    // A Manifest-resource relationship only applies when the declared selectors
-    // accept both endpoints. System Manifest Resources themselves are not
-    // packaged Resources of another business Manifest.
-    if let (Some(source), Some(target)) = (source, target) {
-        let relation_resource = resource_in(tx, &spec.relation)?;
-        let relation_spec: RelationSpec = decode(&relation_resource.spec, "Relation spec")?;
-        let source_resource = resource_in(tx, source)?;
-        let target_resource = resource_in(tx, target)?;
-        if !relation_spec
-            .sources
-            .iter()
-            .any(|selector| selector.matches(&source_resource))
-            || !relation_spec
-                .targets
-                .iter()
-                .any(|selector| selector.matches(&target_resource))
-        {
-            return Ok(None);
-        }
-    }
-    let (planned, status) = normalized_initial_documents(tx, &planned)?;
-    insert_resource_row(tx, &planned, &status, true, "system", now)?;
-    project_link(tx, &planned)?;
+    let planned = normalized_initial_documents(tx, &planned)?;
+    insert_resource_row(tx, &planned, true, "system", now)?;
     let resource = resource_in(tx, path)?;
     append_event(tx, EventType::Created, &resource, now)?;
+    enqueue_if_drifted(tx, &resource, "system_link_created", now)?;
     Ok(Some(resource))
 }
 
@@ -2053,88 +2137,13 @@ fn relation_path_for_role(
     tx: &Transaction<'_>,
     role: RelationRole,
 ) -> Result<Option<String>, StoreError> {
-    tx.query_row(
-        "SELECT relation_path FROM relation_index WHERE role=?",
-        [relation_role(role)],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(StoreError::from)
-}
-
-fn relation_role(role: RelationRole) -> &'static str {
-    match role {
-        RelationRole::ManifestResource => "manifest_resource",
-        RelationRole::PackageManifest => "package_manifest",
-        RelationRole::ResourceManifest => "resource_manifest",
-        RelationRole::RunResource => "run_resource",
-        RelationRole::RunAction => "run_action",
-        RelationRole::RunDriver => "run_driver",
-        RelationRole::DriverServiceAccount => "driver_service_account",
-        RelationRole::RoleBindingRole => "role_binding_role",
-        RelationRole::RoleBindingSubject => "role_binding_subject",
+    for relation in resources_for_manifest_in(tx, RELATION_MANIFEST)? {
+        let spec: RelationSpec = decode(&relation.spec, "Relation spec")?;
+        if spec.role == Some(role) {
+            return Ok(Some(relation.path.clone()));
+        }
     }
-}
-
-fn relation_type(value: kas_core::RelationType) -> &'static str {
-    match value {
-        kas_core::RelationType::OneToOne => "one_to_one",
-        kas_core::RelationType::OneToMany => "one_to_many",
-        kas_core::RelationType::ManyToOne => "many_to_one",
-        kas_core::RelationType::ManyToMany => "many_to_many",
-    }
-}
-
-fn on_source_delete(value: kas_core::OnSourceDelete) -> &'static str {
-    match value {
-        kas_core::OnSourceDelete::Unlink => "unlink",
-        kas_core::OnSourceDelete::Cascade => "cascade",
-    }
-}
-
-fn enforce_cardinality(
-    tx: &Transaction<'_>,
-    link: &LinkSpec,
-    relation_type: kas_core::RelationType,
-    excluding: Option<&str>,
-) -> Result<(), StoreError> {
-    let excluded = excluding.unwrap_or("");
-    let source_taken: bool = if let Some(source) = &link.source {
-        tx.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM link_index
-                WHERE relation_path=? AND source_path=? AND link_path<>?
-             )",
-            params![link.relation, source, excluded],
-            |row| row.get(0),
-        )?
-    } else {
-        false
-    };
-    let target_taken: bool = if let Some(target) = &link.target {
-        tx.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM link_index
-                WHERE relation_path=? AND target_path=? AND link_path<>?
-             )",
-            params![link.relation, target, excluded],
-            |row| row.get(0),
-        )?
-    } else {
-        false
-    };
-    let invalid = match relation_type {
-        kas_core::RelationType::OneToOne => source_taken || target_taken,
-        kas_core::RelationType::OneToMany => target_taken,
-        kas_core::RelationType::ManyToOne => source_taken,
-        kas_core::RelationType::ManyToMany => false,
-    };
-    if invalid {
-        return Err(StoreError::Conflict(
-            "Relation cardinality would be violated".into(),
-        ));
-    }
-    Ok(())
+    Ok(None)
 }
 
 fn refresh_projection(
@@ -2143,36 +2152,44 @@ fn refresh_projection(
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     match resource.manifest.as_str() {
-        LINK_MANIFEST => {
-            tx.execute("DELETE FROM link_index WHERE link_path=?", [&resource.path])?;
-            project_link(
-                tx,
-                &PlannedResource {
-                    path: resource.path.clone(),
-                    manifest: resource.manifest.clone(),
-                    name: resource.name.clone(),
-                    spec: resource.spec.clone(),
-                    status: resource.status.clone(),
-                },
+        DRIVER_MANIFEST => {
+            let spec: DriverSpec = decode(&resource.spec, "Driver spec")?;
+            tx.execute(
+                "DELETE FROM driver_manifests WHERE driver_path=?",
+                [&resource.path],
             )?;
+            project_driver_manifests(tx, &resource.path, &spec)?;
+            tx.execute(
+                "UPDATE driver_service_accounts SET service_account_path=? WHERE driver_path=?",
+                params![spec.service_account, resource.path],
+            )?;
+            reconcile_all_resources(tx, "driver_management_updated", now)?;
         }
         ROLE_BINDING_MANIFEST => {
             let link_paths = {
                 let mut statement = tx.prepare(
-                    "SELECT link_path FROM role_binding_roles WHERE role_binding_path=?
-                     UNION ALL
-                     SELECT link_path FROM role_binding_subjects WHERE role_binding_path=?",
+                    "SELECT path FROM resources
+                     WHERE managed_by='system'
+                       AND substr(path,1,length(?))=?",
                 )?;
+                let prefix = format!("{}/links/", resource.path);
                 let rows = statement
-                    .query_map(params![resource.path, resource.path], |row| {
-                        row.get::<_, String>(0)
-                    })?
+                    .query_map(params![prefix, prefix], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
                 rows
             };
             for link_path in link_paths {
                 hard_delete_resource(tx, &link_path, now)?;
             }
+            tx.execute(
+                "DELETE FROM role_binding_roles WHERE role_binding_path=?",
+                [&resource.path],
+            )?;
+            tx.execute(
+                "DELETE FROM role_binding_subjects WHERE role_binding_path=?",
+                [&resource.path],
+            )?;
+            project_role_binding_runtime(tx, &planned_from_resource(resource.clone()))?;
             project_declared_relationships(tx, &planned_from_resource(resource.clone()), now)?;
         }
         _ => {}
@@ -2185,7 +2202,7 @@ fn driver_path_for_manifest(
     manifest_path: &str,
 ) -> Result<Option<String>, StoreError> {
     tx.query_row(
-        "SELECT driver_path FROM driver_runtime WHERE owner_manifest_path=?",
+        "SELECT driver_path FROM driver_manifests WHERE manifest_path=?",
         [manifest_path],
         |row| row.get(0),
     )
@@ -2197,20 +2214,40 @@ fn driver_for_resource(
     tx: &Transaction<'_>,
     resource: &Resource,
 ) -> Result<Option<String>, StoreError> {
-    if resource.manifest == LINK_MANIFEST {
-        let link: LinkSpec = decode(&resource.spec, "Link spec")?;
-        return tx
-            .query_row(
-                "SELECT d.driver_path FROM relation_index r
-                 JOIN driver_runtime d ON d.owner_manifest_path=r.owner_manifest_path
-                 WHERE r.relation_path=?",
-                [link.relation],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from);
-    }
     driver_path_for_manifest(tx, &resource.manifest)
+}
+
+fn matching_drivers(
+    tx: &Transaction<'_>,
+    resource: &Resource,
+) -> Result<std::collections::BTreeMap<String, u64>, StoreError> {
+    let mut matched = std::collections::BTreeMap::new();
+    if let Some(owner) = driver_for_resource(tx, resource)? {
+        let driver = resource_in(tx, &owner)?;
+        if driver.metadata.state == "running" {
+            matched.insert(owner, driver.revision);
+        }
+    }
+    let drivers = {
+        let mut statement = tx.prepare(&format!(
+            "{RESOURCE_SELECT} r JOIN driver_runtime d ON d.driver_path=r.path
+             ORDER BY r.path"
+        ))?;
+        let rows = statement
+            .query_map([], resource_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for driver in drivers {
+        if driver.metadata.state != "running" {
+            continue;
+        }
+        let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
+        if spec.watches.iter().any(|watch| watch.matches(resource)) {
+            matched.insert(driver.path.clone(), driver.revision);
+        }
+    }
+    Ok(matched)
 }
 
 fn enqueue_if_drifted(
@@ -2219,81 +2256,87 @@ fn enqueue_if_drifted(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
-    if resource.spec == resource.status {
+    let drivers = matching_drivers(tx, resource)?;
+    let expected = drivers
+        .iter()
+        .map(|(driver, driver_revision)| {
+            (
+                driver.clone(),
+                DriverObservation {
+                    driver_revision: *driver_revision,
+                    resource_revision: resource.revision,
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if expected != resource.metadata.kas.observed {
         tx.execute(
-            "DELETE FROM reconcile_queue WHERE resource_path=?",
-            [&resource.path],
+            "UPDATE resources SET observed_json=? WHERE path=?",
+            params![serde_json::to_string(&expected)?, resource.path],
         )?;
-        return Ok(());
     }
-    let Some(driver) = driver_for_resource(tx, resource)? else {
-        return Ok(());
-    };
+    let mut actual = resource.status.metadata.kas.observed.clone();
+    actual.retain(|driver, _| expected.contains_key(driver));
+    if actual != resource.status.metadata.kas.observed {
+        let mut status = resource.status.clone();
+        status.metadata.kas.observed = actual.clone();
+        tx.execute(
+            "UPDATE resources SET status_json=? WHERE path=?",
+            params![serde_json::to_string(&status)?, resource.path],
+        )?;
+    }
     tx.execute(
-        "INSERT INTO reconcile_queue(
-            resource_path,driver_path,reason,available_at,updated_at
-         ) VALUES (?,?,?,?,?)
-         ON CONFLICT(resource_path) DO UPDATE SET
-            driver_path=excluded.driver_path,
-            reason=excluded.reason,
-            available_at=excluded.available_at,
-            updated_at=excluded.updated_at",
-        params![resource.path, driver, reason, stamp(now), stamp(now)],
+        "DELETE FROM reconcile_queue
+         WHERE resource_path=?
+           AND driver_path NOT IN (
+             SELECT key FROM json_each(?)
+           )",
+        params![resource.path, serde_json::to_string(&drivers)?],
     )?;
+    let owner = driver_for_resource(tx, resource)?;
+    for (driver, target) in expected {
+        let current = actual.get(&driver);
+        let status_drifted =
+            owner.as_deref() == Some(driver.as_str()) && !desired_document_matches_status(resource);
+        if current == Some(&target) && !status_drifted {
+            tx.execute(
+                "DELETE FROM reconcile_queue WHERE driver_path=? AND resource_path=?",
+                params![driver, resource.path],
+            )?;
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO reconcile_queue(
+                driver_path,resource_path,target_driver_revision,target_resource_revision,
+                reason,available_at,updated_at
+             ) VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(driver_path,resource_path) DO UPDATE SET
+                target_driver_revision=excluded.target_driver_revision,
+                target_resource_revision=excluded.target_resource_revision,
+                reason=excluded.reason,
+                available_at=excluded.available_at,
+                updated_at=excluded.updated_at",
+            params![
+                driver,
+                resource.path,
+                target.driver_revision,
+                target.resource_revision,
+                reason,
+                stamp(now),
+                stamp(now)
+            ],
+        )?;
+    }
     Ok(())
 }
 
-fn reconcile_ensures(tx: &Transaction<'_>, now: DateTime<Utc>) -> Result<(), StoreError> {
-    let relation_paths = {
-        let mut statement = tx.prepare(
-            "SELECT relation_path FROM relation_index
-             WHERE ensure=1 AND relation_type='one_to_one' ORDER BY relation_path",
-        )?;
-        let values = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        values
-    };
-    for relation_path in relation_paths {
-        let relation = resource_in(tx, &relation_path)?;
-        let spec: RelationSpec = decode(&relation.spec, "Relation spec")?;
-        let resources = all_resources_in(tx)?;
-        for source in resources.iter().filter(|resource| {
-            spec.sources
-                .iter()
-                .any(|selector| selector.matches(resource))
-        }) {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM link_index WHERE relation_path=? AND source_path=?
-                 )",
-                params![relation_path, source.path],
-                |row| row.get(0),
-            )?;
-            if exists {
-                continue;
-            }
-            let link_path = format!("{}/links/ensure-{}", relation_path, Uuid::new_v4());
-            let link = LinkSpec {
-                relation: relation_path.clone(),
-                source: Some(source.path.clone()),
-                target: None,
-                metadata: json!({}),
-            };
-            let planned = PlannedResource {
-                path: link_path,
-                manifest: LINK_MANIFEST.into(),
-                name: "ensure".into(),
-                spec: serde_json::to_value(&link)?,
-                status: json!({"state": kas_core::STATE_PENDING}),
-            };
-            let (planned, status) = normalized_initial_documents(tx, &planned)?;
-            insert_resource_row(tx, &planned, &status, true, "system", now)?;
-            project_link(tx, &planned)?;
-            let resource = resource_in(tx, &planned.path)?;
-            append_event(tx, EventType::Created, &resource, now)?;
-            enqueue_if_drifted(tx, &resource, "relation_ensure", now)?;
-        }
+fn reconcile_all_resources(
+    tx: &Transaction<'_>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    for resource in all_resources_in(tx)? {
+        enqueue_if_drifted(tx, &resource, reason, now)?;
     }
     Ok(())
 }
@@ -2301,10 +2344,7 @@ fn reconcile_ensures(tx: &Transaction<'_>, now: DateTime<Utc>) -> Result<(), Sto
 fn reconcile_platform_state(store: &mut Store) -> Result<(), StoreError> {
     let tx = store.connection.transaction()?;
     let now = Utc::now();
-    for resource in all_resources_in(&tx)? {
-        enqueue_if_drifted(&tx, &resource, "startup_resync", now)?;
-    }
-    reconcile_ensures(&tx, now)?;
+    reconcile_all_resources(&tx, "startup_resync", now)?;
     tx.commit()?;
     Ok(())
 }
@@ -2324,9 +2364,15 @@ fn apply_mutation(
                     "Package Resources can only be created by POST /packages".into(),
                 ));
             }
-            let (resource, status) = normalized_initial_documents(tx, &resource)?;
-            validate_against_manifest(tx, &resource.manifest, &resource.spec, &status)?;
-            insert_resource_row(tx, &resource, &status, false, "driver", now)?;
+            let resource = normalized_initial_documents(tx, &resource)?;
+            validate_against_manifest(
+                tx,
+                &resource.manifest,
+                &resource.metadata.state,
+                &resource.spec,
+                &resource.status,
+            )?;
+            insert_resource_row(tx, &resource, false, "driver", now)?;
             let owner_manifest = tx
                 .query_row(
                     "SELECT owner_manifest_path FROM driver_runtime WHERE driver_path=?",
@@ -2334,7 +2380,7 @@ fn apply_mutation(
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap_or_default();
-            project_resource(tx, &resource, &status, &owner_manifest, now)?;
+            project_resource(tx, &resource, &owner_manifest, now)?;
             let created = resource_in(tx, &resource.path)?;
             project_declared_relationships(tx, &planned_from_resource(created.clone()), now)?;
             append_event(tx, EventType::Created, &created, now)?;
@@ -2344,15 +2390,21 @@ fn apply_mutation(
         Mutation::UpdateResource {
             resource_path,
             expected_revision,
+            metadata,
             spec,
         } => {
             let current = resource_in(tx, &resource_path)?;
-            validate_against_manifest(tx, &current.manifest, &spec, &current.status)?;
+            let state = metadata
+                .as_ref()
+                .map(|metadata| metadata.state.as_str())
+                .unwrap_or(&current.metadata.state);
+            validate_against_manifest(tx, &current.manifest, state, &spec, &current.status)?;
             let changed = tx.execute(
-                "UPDATE resources SET spec_json=?,revision=revision+1,updated_at=?
-                 WHERE path=? AND revision=? AND protected=0",
+                "UPDATE resources SET spec_json=?,state=?,revision=revision+1,updated_at=?
+                 WHERE path=? AND revision=?",
                 params![
                     serde_json::to_string(&spec)?,
+                    state,
                     stamp(now),
                     resource_path,
                     expected_revision
@@ -2372,39 +2424,50 @@ fn apply_mutation(
             expected_revision,
         } => {
             let mut resource = resource_in(tx, &resource_path)?;
-            if resource.revision != expected_revision || is_protected(tx, &resource_path)? {
-                return Err(StoreError::Conflict(
-                    "Resource revision is stale or protected".into(),
-                ));
+            if resource.revision != expected_revision {
+                return Err(StoreError::Conflict("Resource revision is stale".into()));
             }
-            set_document_state(&mut resource.spec, STATE_DELETED)?;
+            resource.metadata.state = STATE_DELETED.into();
             tx.execute(
-                "UPDATE resources SET spec_json=?,revision=revision+1,updated_at=? WHERE path=?",
-                params![
-                    serde_json::to_string(&resource.spec)?,
-                    stamp(now),
-                    resource_path
-                ],
+                "UPDATE resources SET state=?,revision=revision+1,updated_at=? WHERE path=?",
+                params![STATE_DELETED, stamp(now), resource_path],
             )?;
             resource = resource_in(tx, &resource_path)?;
             append_event(tx, EventType::Updated, &resource, now)?;
             enqueue_if_drifted(tx, &resource, "driver_delete_requested", now)?;
+            if driver_for_resource(tx, &resource)?.is_none() {
+                let mut status = resource.status.clone();
+                let actual = status.metadata.kas.observed.clone();
+                status.metadata = resource.metadata.clone();
+                status.metadata.kas.observed = actual;
+                status.spec = resource.spec.clone();
+                tx.execute(
+                    "UPDATE resources SET status_json=? WHERE path=?",
+                    params![serde_json::to_string(&status)?, resource_path],
+                )?;
+                maybe_finish_deleted_resource(tx, &resource_path, now)?;
+            }
             Ok(serde_json::to_value(resource)?)
         }
         Mutation::UpdateResourceStatus {
             resource_path,
             expected_revision,
-            status,
+            mut status,
         } => {
             assert_driver_owns(tx, &resource_path, driver_path, generation)?;
             let current = resource_in(tx, &resource_path)?;
-            validate_against_manifest(tx, &current.manifest, &current.spec, &status)?;
+            normalize_submitted_status(&current, &mut status);
+            validate_against_manifest(
+                tx,
+                &current.manifest,
+                &current.metadata.state,
+                &current.spec,
+                &status,
+            )?;
             let changed = tx.execute(
-                "UPDATE resources SET status_json=?,updated_at=?
-                 WHERE path=? AND revision=?",
+                "UPDATE resources SET status_json=? WHERE path=? AND revision=?",
                 params![
                     serde_json::to_string(&status)?,
-                    stamp(now),
                     resource_path,
                     expected_revision
                 ],
@@ -2415,24 +2478,26 @@ fn apply_mutation(
             let updated = resource_in(tx, &resource_path)?;
             refresh_projection(tx, &updated, now)?;
             append_event(tx, EventType::Updated, &updated, now)?;
-            if updated.spec == updated.status
-                && document_state(&updated.spec) == Some(STATE_DELETED)
-            {
-                hard_delete_resource(tx, &resource_path, now)?;
-            } else {
-                enqueue_if_drifted(tx, &updated, "driver_status_updated", now)?;
-            }
+            maybe_finish_deleted_resource(tx, &resource_path, now)?;
             Ok(serde_json::to_value(updated)?)
         }
         Mutation::CompleteRun { run_path, result } => {
             let mut run = resource_in(tx, &run_path)?;
             require_manifest(&run, RUN_MANIFEST)?;
-            let mut status: RunStatus = decode(&run.status, "Run status")?;
-            if status.driver_generation != Some(generation) {
+            let active_generation: Option<u64> = tx
+                .query_row(
+                    "SELECT driver_generation FROM run_runtime WHERE run_path=?",
+                    [&run_path],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            if active_generation != Some(generation) {
                 return Err(StoreError::Conflict("Run generation is stale".into()));
             }
-            apply_run_result(&mut status, result);
-            update_status_document(tx, &run_path, &status, now)?;
+            let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
+            let state = apply_run_result(&mut spec, result);
+            update_platform_resource(tx, &run_path, state, &spec, now)?;
             tx.execute(
                 "UPDATE run_runtime SET finished_at=? WHERE run_path=? AND driver_path=?",
                 params![stamp(now), run_path, driver_path],
@@ -2450,57 +2515,6 @@ fn hard_delete_resource(
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let resource = resource_in(tx, path)?;
-
-    let linked = {
-        let mut statement = tx.prepare(
-            "SELECT l.link_path,l.source_path,l.target_path,r.on_source_delete
-             FROM link_index l
-             JOIN relation_index r ON r.relation_path=l.relation_path
-             WHERE (l.source_path=? OR l.target_path=?) AND l.link_path<>?",
-        )?;
-        let rows = statement
-            .query_map(params![path, path, path], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
-    let cascade_targets = linked
-        .iter()
-        .filter_map(|(_, source, target, on_delete)| {
-            (source.as_deref() == Some(path) && on_delete == "cascade")
-                .then(|| target.clone())
-                .flatten()
-        })
-        .filter(|target| target != path)
-        .collect::<Vec<_>>();
-    for (link, _, _, _) in linked {
-        if tx
-            .query_row("SELECT 1 FROM resources WHERE path=?", [&link], |_| Ok(()))
-            .optional()?
-            .is_some()
-        {
-            hard_delete_resource(tx, &link, now)?;
-        }
-    }
-    for target in cascade_targets {
-        if tx
-            .query_row(
-                "SELECT 1 FROM resources WHERE path=?",
-                [&target],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
-        {
-            hard_delete_resource(tx, &target, now)?;
-        }
-    }
     let run_paths = {
         let mut statement = tx.prepare("SELECT run_path FROM run_runtime WHERE resource_path=?")?;
         let rows = statement
@@ -2511,20 +2525,53 @@ fn hard_delete_resource(
     for run in run_paths {
         hard_delete_resource(tx, &run, now)?;
     }
-    if resource.manifest == LINK_MANIFEST {
-        tx.execute(
-            "DELETE FROM driver_service_accounts WHERE link_path=?",
-            [path],
-        )?;
-        tx.execute("DELETE FROM role_binding_roles WHERE link_path=?", [path])?;
-        tx.execute(
-            "DELETE FROM role_binding_subjects WHERE link_path=?",
-            [path],
-        )?;
-    }
     append_deleted_event(tx, &resource, now)?;
     tx.execute("DELETE FROM resources WHERE path=?", [path])?;
     Ok(())
+}
+
+fn maybe_finish_deleted_resource(
+    tx: &Transaction<'_>,
+    path: &str,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let resource = resource_in(tx, path)?;
+    if resource.metadata.state != STATE_DELETED || resource.status.metadata.state != STATE_DELETED {
+        return Ok(());
+    }
+    let complete = resource
+        .metadata
+        .kas
+        .observed
+        .iter()
+        .all(|(driver, expected)| {
+            resource.status.metadata.kas.observed.get(driver) == Some(expected)
+        });
+    if complete {
+        hard_delete_resource(tx, path, now)?;
+    }
+    Ok(())
+}
+
+fn desired_document_matches_status(resource: &Resource) -> bool {
+    resource.metadata.path == resource.status.metadata.path
+        && resource.metadata.manifest == resource.status.metadata.manifest
+        && resource.metadata.name == resource.status.metadata.name
+        && resource.metadata.state == resource.status.metadata.state
+        && resource.metadata.kas.revision == resource.status.metadata.kas.revision
+        && resource.metadata.kas.created_at == resource.status.metadata.kas.created_at
+        && resource.metadata.kas.updated_at == resource.status.metadata.kas.updated_at
+        && resource.spec == resource.status.spec
+}
+
+fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) {
+    status.metadata.path = resource.metadata.path.clone();
+    status.metadata.manifest = resource.metadata.manifest.clone();
+    status.metadata.name = resource.metadata.name.clone();
+    status.metadata.kas.revision = resource.metadata.kas.revision;
+    status.metadata.kas.created_at = resource.metadata.kas.created_at;
+    status.metadata.kas.updated_at = resource.metadata.kas.updated_at;
+    status.metadata.kas.observed = resource.status.metadata.kas.observed.clone();
 }
 
 fn assert_driver_owns(
@@ -2549,38 +2596,128 @@ fn assert_driver_generation(
 ) -> Result<(), StoreError> {
     let driver = resource_in(tx, driver_path)?;
     require_manifest(&driver, DRIVER_MANIFEST)?;
-    let status: DriverStatus = decode(&driver.status, "Driver status")?;
-    if status.generation != generation || status.state != DriverState::Ready {
+    if driver_runtime_generation_in(tx, driver_path)? != generation
+        || driver_state(&driver)? != DriverState::Running
+    {
         return Err(StoreError::Conflict("Driver generation is stale".into()));
     }
     Ok(())
 }
 
-fn update_status_document<T: Serialize>(
+fn driver_runtime_generation_in(
+    tx: &Transaction<'_>,
+    driver_path: &str,
+) -> Result<u64, StoreError> {
+    tx.query_row(
+        "SELECT generation FROM driver_runtime WHERE driver_path=?",
+        [driver_path],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| StoreError::NotFound(format!("Driver {driver_path}")))
+}
+
+fn update_status_document<S: Serialize, T: Serialize>(
     tx: &Transaction<'_>,
     path: &str,
+    state: S,
     status: &T,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
+    let state = serde_json::to_value(state)?;
+    let state = state
+        .as_str()
+        .ok_or_else(|| StoreError::Invalid("Resource status state must be a string".into()))?;
+    let resource = resource_in(tx, path)?;
+    let mut metadata = resource.status_metadata(state);
+    metadata.kas.observed = resource.status.metadata.kas.observed.clone();
+    let status = ResourceStatus {
+        metadata,
+        spec: serde_json::to_value(status)?,
+    };
     tx.execute(
-        "UPDATE resources SET status_json=?,updated_at=? WHERE path=?",
-        params![serde_json::to_string(status)?, stamp(now), path],
+        "UPDATE resources SET status_json=? WHERE path=?",
+        params![serde_json::to_string(&status)?, path],
     )?;
     Ok(())
 }
 
-fn apply_run_result(status: &mut RunStatus, result: RunResult) {
+fn update_platform_resource<S: Serialize, T: Serialize>(
+    tx: &Transaction<'_>,
+    path: &str,
+    state: S,
+    spec: &T,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let state = serde_json::to_value(state)?;
+    let state = state
+        .as_str()
+        .ok_or_else(|| StoreError::Invalid("Resource state must be a string".into()))?;
+    let current = resource_in(tx, path)?;
+    let spec = serde_json::to_value(spec)?;
+    let mut metadata = current.metadata.clone();
+    metadata.state = state.into();
+    metadata.kas.revision += 1;
+    metadata.kas.updated_at = now;
+    let mut status_metadata = metadata.clone();
+    status_metadata.kas.observed = current.status.metadata.kas.observed;
+    let status = ResourceStatus {
+        metadata: status_metadata,
+        spec: spec.clone(),
+    };
+    tx.execute(
+        "UPDATE resources
+         SET spec_json=?,status_json=?,state=?,revision=revision+1,updated_at=?
+         WHERE path=?",
+        params![
+            serde_json::to_string(&spec)?,
+            serde_json::to_string(&status)?,
+            state,
+            stamp(now),
+            path
+        ],
+    )?;
+    let updated = resource_in(tx, path)?;
+    enqueue_if_drifted(tx, &updated, "platform_updated", now)?;
+    Ok(())
+}
+
+fn apply_run_result(spec: &mut RunSpec, result: RunResult) -> RunState {
     match result {
         RunResult::Succeeded { output } => {
-            status.state = RunState::Succeeded;
-            status.output = Some(output);
-            status.error = None;
+            spec.output = Some(output);
+            spec.error = None;
+            RunState::Succeeded
         }
         RunResult::Failed { error } => {
-            status.state = RunState::Failed;
-            status.output = None;
-            status.error = Some(error);
+            spec.output = None;
+            spec.error = Some(error);
+            RunState::Failed
         }
+    }
+}
+
+fn driver_state(resource: &Resource) -> Result<DriverState, StoreError> {
+    decode(
+        &Value::String(resource.status.metadata.state.clone()),
+        "Driver status state",
+    )
+}
+
+fn run_state(resource: &Resource) -> Result<RunState, StoreError> {
+    decode(
+        &Value::String(resource.status.metadata.state.clone()),
+        "Run status state",
+    )
+}
+
+fn run_state_name(state: RunState) -> &'static str {
+    match state {
+        RunState::Queued => "queued",
+        RunState::Running => "running",
+        RunState::Succeeded => "succeeded",
+        RunState::Failed => "failed",
+        RunState::Cancelled => "cancelled",
     }
 }
 
@@ -2637,6 +2774,18 @@ fn all_resources_in(tx: &Transaction<'_>) -> Result<Vec<Resource>, StoreError> {
         .map_err(StoreError::from)
 }
 
+fn resources_for_manifest_in(
+    tx: &Transaction<'_>,
+    manifest: &str,
+) -> Result<Vec<Resource>, StoreError> {
+    let mut statement = tx.prepare(&format!(
+        "{RESOURCE_SELECT} WHERE manifest_path=? ORDER BY created_at,path"
+    ))?;
+    let rows = statement.query_map([manifest], resource_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+}
+
 fn is_protected(connection: &Connection, path: &str) -> Result<bool, StoreError> {
     connection
         .query_row(
@@ -2656,34 +2805,6 @@ fn require_manifest(resource: &Resource, expected: &str) -> Result<(), StoreErro
         )));
     }
     Ok(())
-}
-
-fn ensure_state(document: &mut Value, state: &str) -> Result<(), StoreError> {
-    if document.is_null() {
-        *document = json!({});
-    }
-    let object = document
-        .as_object_mut()
-        .ok_or_else(|| StoreError::Invalid("Resource document must be an object".into()))?;
-    object
-        .entry("state")
-        .or_insert_with(|| Value::String(state.into()));
-    Ok(())
-}
-
-fn set_document_state(document: &mut Value, state: &str) -> Result<(), StoreError> {
-    if document.is_null() {
-        *document = json!({});
-    }
-    document
-        .as_object_mut()
-        .ok_or_else(|| StoreError::Invalid("Resource document must be an object".into()))?
-        .insert("state".into(), Value::String(state.into()));
-    Ok(())
-}
-
-fn document_state(document: &Value) -> Option<&str> {
-    document.get("state").and_then(Value::as_str)
 }
 
 fn decode<T: DeserializeOwned>(value: &Value, kind: &str) -> Result<T, StoreError> {
@@ -2746,9 +2867,24 @@ fn constraint(error: rusqlite::Error, message: &str) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kas_core::{ManifestDefinition, PackageDefinition, ResourceDefinition};
+    use kas_core::{
+        ManifestDefinition, PackageDefinition, PlannedResourceMetadata, ResourceDefinition,
+    };
 
-    fn echo_manifest(ensure_peer: bool) -> PackageExpansion {
+    fn planned(path: &str, manifest: &str, name: &str, spec: Value) -> PlannedResource {
+        PlannedResource {
+            metadata: PlannedResourceMetadata {
+                path: path.into(),
+                manifest: manifest.into(),
+                name: name.into(),
+                state: String::new(),
+            },
+            spec,
+            status: ResourceStatus::default(),
+        }
+    }
+
+    fn echo_manifest() -> PackageExpansion {
         PackageDefinition {
             manifest: ManifestDefinition {
                 path: "/manifests/test/echo".into(),
@@ -2767,18 +2903,19 @@ mod tests {
                 initial_state: kas_core::STATE_PENDING.into(),
             },
             resources: vec![ResourceDefinition {
-                path: "./relations/peer".into(),
-                manifest: RELATION_MANIFEST.into(),
-                name: "peer".into(),
+                metadata: PlannedResourceMetadata {
+                    path: "./relations/peer".into(),
+                    manifest: RELATION_MANIFEST.into(),
+                    name: "peer".into(),
+                    state: String::new(),
+                },
                 spec: json!({
                     "sources": [{"manifest": "/manifests/test/echo"}],
                     "targets": [{"manifest": "/manifests/test/echo"}],
-                    "type": if ensure_peer { "one_to_one" } else { "many_to_many" },
-                    "ensure": ensure_peer,
                     "on_source_delete": "unlink",
                     "metadata_schema": {"type": "object"}
                 }),
-                status: json!({}),
+                status: ResourceStatus::default(),
             }],
         }
         .expand(format!("sha256:{}", "deadbeef".repeat(8)))
@@ -2791,7 +2928,7 @@ mod tests {
 
         let root = store.get_resource(MANIFEST_MANIFEST).unwrap();
         assert_eq!(root.path, root.manifest);
-        assert_eq!(root.spec["state"], STATE_AVAILABLE);
+        assert_eq!(root.metadata.state, STATE_AVAILABLE);
         assert!(store
             .list_resources(Some(MANIFEST_MANIFEST))
             .unwrap()
@@ -2803,7 +2940,7 @@ mod tests {
             .unwrap()
             .digest
             .starts_with("sha256:"));
-        let mut builtin_packages = std::collections::BTreeSet::from([package.path]);
+        let mut builtin_packages = std::collections::BTreeSet::from([package.path.clone()]);
         for manifest_path in [
             ACTION_MANIFEST,
             RELATION_MANIFEST,
@@ -2817,7 +2954,13 @@ mod tests {
             CREDENTIAL_MANIFEST,
             PACKAGE_MANIFEST,
         ] {
-            builtin_packages.insert(store.package_for_manifest(manifest_path).unwrap().path);
+            builtin_packages.insert(
+                store
+                    .package_for_manifest(manifest_path)
+                    .unwrap()
+                    .path
+                    .clone(),
+            );
         }
         assert_eq!(builtin_packages.len(), 12);
         assert!(store
@@ -2828,30 +2971,47 @@ mod tests {
                 decode::<RoleSpec>(&resource.spec, "Role spec")
                     .is_ok_and(|role| role.system_role == Some(SystemRole::Admin))
             }));
+        let relation_driver = store
+            .driver_for_manifest(RELATION_MANIFEST)
+            .unwrap()
+            .unwrap();
+        let link_driver = store.driver_for_manifest(LINK_MANIFEST).unwrap().unwrap();
+        assert_eq!(relation_driver.path, "/builtin/link/driver");
+        assert_eq!(relation_driver.path, link_driver.path);
+        assert!(matches!(
+            store.get_resource("/builtin/relation/driver"),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]
     fn generic_resource_creation_applies_manifest_states_and_schema() {
         let mut store = Store::memory().unwrap();
         store
-            .install_package(
-                echo_manifest(false),
-                123,
-                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
-            )
+            .install_package(echo_manifest(), 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE)
             .unwrap();
 
         let created = store
-            .create_resource(PlannedResource {
-                path: "/resources/test/echo-1".into(),
-                manifest: "/manifests/test/echo".into(),
-                name: "echo-1".into(),
-                spec: json!({"label": "one"}),
-                status: Value::Null,
-            })
+            .create_resource(planned(
+                "/resources/test/echo-1",
+                "/manifests/test/echo",
+                "echo-1",
+                json!({"label": "one"}),
+            ))
             .unwrap();
-        assert_eq!(created.spec, json!({"label": "one", "state": "available"}));
-        assert_eq!(created.status, json!({"state": "pending"}));
+        assert_eq!(created.spec, json!({"label": "one"}));
+        assert_eq!(created.status.spec, created.spec);
+        assert_eq!(created.metadata.state, STATE_AVAILABLE);
+        assert_eq!(created.status.metadata.state, kas_core::STATE_PENDING);
+        assert_eq!(created.status.metadata.path, created.metadata.path);
+        assert_eq!(created.status.metadata.manifest, created.metadata.manifest);
+        assert_eq!(created.status.metadata.name, created.metadata.name);
+        assert_eq!(
+            created.status.metadata.kas.revision,
+            created.metadata.kas.revision
+        );
+        assert!(created.metadata.kas.observed.is_empty());
+        assert!(created.status.metadata.kas.observed.is_empty());
         assert_eq!(
             store
                 .list_events(None, 100)
@@ -2862,42 +3022,41 @@ mod tests {
             created.path
         );
 
-        let invalid = store.create_resource(PlannedResource {
-            path: "/resources/test/invalid".into(),
-            manifest: "/manifests/test/echo".into(),
-            name: "invalid".into(),
-            spec: json!({"label": 7}),
-            status: Value::Null,
-        });
+        let invalid = store.create_resource(planned(
+            "/resources/test/invalid",
+            "/manifests/test/echo",
+            "invalid",
+            json!({"label": 7}),
+        ));
         assert!(matches!(invalid, Err(StoreError::Invalid(_))));
 
-        let forged_package = store.create_resource(PlannedResource {
-            path: "/packages/sha256/cafe".into(),
-            manifest: PACKAGE_MANIFEST.into(),
-            name: "sha256:cafe".into(),
-            spec: json!({
+        let forged_package = store.create_resource(planned(
+            "/packages/sha256/cafe",
+            PACKAGE_MANIFEST,
+            "sha256:cafe",
+            json!({
                 "digest": "sha256:cafe",
                 "size_bytes": 1,
                 "media_type": kas_core::MANIFEST_PACKAGE_MEDIA_TYPE
             }),
-            status: Value::Null,
-        });
+        ));
         assert!(matches!(forged_package, Err(StoreError::Invalid(_))));
 
-        let unknown_state = store.create_resource(PlannedResource {
-            path: "/resources/test/unknown-state".into(),
-            manifest: "/manifests/test/echo".into(),
-            name: "unknown-state".into(),
-            spec: json!({"label": "invalid", "state": "mystery"}),
-            status: Value::Null,
-        });
+        let mut unknown = planned(
+            "/resources/test/unknown-state",
+            "/manifests/test/echo",
+            "unknown-state",
+            json!({"label": "invalid"}),
+        );
+        unknown.metadata.state = "mystery".into();
+        let unknown_state = store.create_resource(unknown);
         assert!(matches!(unknown_state, Err(StoreError::Invalid(_))));
     }
 
     #[test]
     fn manifest_cannot_redeclare_platform_states() {
         let mut store = Store::memory().unwrap();
-        let mut package = echo_manifest(false);
+        let mut package = echo_manifest();
         package.resources[0].spec["states"] = json!([STATE_AVAILABLE]);
 
         let result = store.install_package(package, 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE);
@@ -2905,36 +3064,77 @@ mod tests {
     }
 
     #[test]
-    fn links_are_resources_and_ensure_creates_a_pending_partial_link() {
+    fn bracketed_business_fields_are_reserved_for_kas() {
+        assert!(matches!(
+            validate_no_reserved_keys(
+                "Resource spec",
+                &json!({"nested": {"[kas]": {"forged": true}}})
+            ),
+            Err(StoreError::Invalid(_))
+        ));
+
+        let mut store = Store::memory().unwrap();
+        let mut package = echo_manifest();
+        package.resources[0].spec["resource_schema"]["properties"]["bad[field]"] =
+            json!({"type": "string"});
+        let result = store.install_package(package, 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE);
+        assert!(matches!(result, Err(StoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn links_are_ordinary_resources_pending_driver_validation() {
         let mut store = Store::memory().unwrap();
         store
-            .install_package(
-                echo_manifest(true),
-                123,
-                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
-            )
+            .install_package(echo_manifest(), 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE)
             .unwrap();
-        let resource = store
-            .create_resource(PlannedResource {
-                path: "/resources/test/echo-1".into(),
-                manifest: "/manifests/test/echo".into(),
-                name: "echo-1".into(),
-                spec: json!({"label": "one"}),
-                status: Value::Null,
-            })
+        let source = store
+            .create_resource(planned(
+                "/resources/test/echo-1",
+                "/manifests/test/echo",
+                "echo-1",
+                json!({"label": "one"}),
+            ))
+            .unwrap();
+        let target = store
+            .create_resource(planned(
+                "/resources/test/echo-2",
+                "/manifests/test/echo",
+                "echo-2",
+                json!({"label": "two"}),
+            ))
+            .unwrap();
+        let link = store
+            .create_resource(planned(
+                "/links/test/peer",
+                LINK_MANIFEST,
+                "peer",
+                json!({
+                    "relation": "/manifests/test/echo/relations/peer",
+                    "source": source.path.as_str(),
+                    "target": target.path.as_str(),
+                    "metadata": {}
+                }),
+            ))
             .unwrap();
 
-        let links = store.links_for_resource(&resource.path).unwrap();
-        let ensured = links
-            .iter()
-            .find(|link| {
-                link.spec["relation"] == "/manifests/test/echo/relations/peer"
-                    && link.spec["source"] == resource.path
-            })
+        assert_eq!(link.manifest, LINK_MANIFEST);
+        assert_eq!(store.links_for_resource(&source.path).unwrap().len(), 1);
+        assert_eq!(link.metadata.state, STATE_AVAILABLE);
+        assert_eq!(link.status.metadata.state, kas_core::STATE_PENDING);
+
+        let unresolved = store
+            .create_resource(planned(
+                "/links/test/unresolved",
+                LINK_MANIFEST,
+                "unresolved",
+                json!({
+                    "relation": "/manifests/test/echo/relations/peer",
+                    "source": "/resources/test/missing",
+                    "target": target.path.as_str(),
+                    "metadata": {}
+                }),
+            ))
             .unwrap();
-        assert_eq!(ensured.manifest, LINK_MANIFEST);
-        assert!(ensured.spec["target"].is_null());
-        assert_eq!(ensured.spec["state"], STATE_AVAILABLE);
-        assert_eq!(ensured.status["state"], kas_core::STATE_PENDING);
+        assert_eq!(unresolved.status.metadata.state, kas_core::STATE_PENDING);
     }
 }

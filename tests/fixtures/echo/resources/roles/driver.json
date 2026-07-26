@@ -1,7 +1,9 @@
 {
-  "path": "./roles/driver",
-  "manifest": "/builtin/role",
-  "name": "echo-driver",
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "echo-driver"
+  },
   "spec": {
     "description": "Echo Driver business permissions",
     "rules": [

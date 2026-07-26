@@ -1,7 +1,9 @@
 {
-  "path": "./actions/echo",
-  "manifest": "/builtin/action",
-  "name": "echo",
+  "metadata": {
+    "path": "./actions/echo",
+    "manifest": "/builtin/action",
+    "name": "echo"
+  },
   "spec": {
     "description": "Echo the supplied message",
     "input_schema": {

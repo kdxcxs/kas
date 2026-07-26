@@ -2,6 +2,6 @@
   "metadata": {
     "path": "./service-accounts/driver",
     "manifest": "/builtin/service-account",
-    "name": "echo-driver"
+    "name": "relationship-driver"
   }
 }

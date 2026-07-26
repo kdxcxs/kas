@@ -7,7 +7,9 @@
   "resource_schema": {
     "type": "object",
     "required": [
-      "relation"
+      "relation",
+      "source",
+      "target"
     ],
     "properties": {
       "relation": {
@@ -24,7 +26,9 @@
       }
     }
   },
-  "states": [],
+  "states": [
+    "invalid"
+  ],
   "default_state": "available",
-  "initial_state": "available"
+  "initial_state": "pending"
 }

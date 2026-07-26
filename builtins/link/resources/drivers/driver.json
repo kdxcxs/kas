@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "path": "./driver",
+    "manifest": "/builtin/driver",
+    "name": "relationship-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./kas-builtin-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      ".",
+      "/builtin/relation"
+    ],
+    "args": [],
+    "watches": [
+      {
+        "manifest": "*"
+      }
+    ],
+    "restart": "always"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}

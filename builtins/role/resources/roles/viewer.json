@@ -1,7 +1,9 @@
 {
-  "path": "/builtin/roles/viewer",
-  "manifest": "/builtin/role",
-  "name": "system:viewer",
+  "metadata": {
+    "path": "/builtin/roles/viewer",
+    "manifest": "/builtin/role",
+    "name": "system:viewer"
+  },
   "spec": {
     "description": "Read Resources",
     "system_role": "viewer",
@@ -17,8 +19,5 @@
         "paths": []
       }
     ]
-  },
-  "status": {
-    "state": "available"
   }
 }
