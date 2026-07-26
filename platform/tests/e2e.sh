@@ -1012,7 +1012,7 @@ MESSAGE_PATH="/messages/e2e-user"
 post_resource "$(
   jq -n \
     --arg path "$MESSAGE_PATH" \
-    --arg body "@e2e Use \$e2e-bundle and remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file. Also POST a Message Resource at $SKILL_PROOF_PATH with name e2e-agent-skill-proof, spec.role system, and spec.body set to the exact Skill bundle marker supplied by \$e2e-bundle. After both POST requests succeed, read both Resources back and verify their bodies, then reply with exactly CREATED and no other text." '{
+    --arg body "@e2e Use \$e2e-bundle and remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file. Also POST a Message Resource at $SKILL_PROOF_PATH with name e2e-agent-skill-proof, spec.role system, and spec.body set to the exact Skill bundle marker supplied by \$e2e-bundle. After both POST requests succeed, read both Resources back and verify their bodies, then publish the assistant reply CREATED through the KAS API exactly as required by \$kas. Do not rely on your final terminal response." '{
     metadata: {
       path: $path,
       manifest: "/manifests/message",
@@ -1145,7 +1145,7 @@ UPDATED_SKILL_PROOF_PATH="/messages/e2e-agent-skill-update-proof"
 post_resource "$(
   jq -n \
     --arg path "$SECOND_MESSAGE_PATH" \
-    --arg body "@e2e Use \$e2e-bundle and POST a Message Resource at $UPDATED_SKILL_PROOF_PATH with name e2e-agent-skill-update-proof, spec.role system, and spec.body set to its exact current Skill bundle marker. Then reply with exactly the secret I asked you to remember in the previous turn; do not add the marker to your reply." '{
+    --arg body "@e2e Use \$e2e-bundle and POST a Message Resource at $UPDATED_SKILL_PROOF_PATH with name e2e-agent-skill-update-proof, spec.role system, and spec.body set to its exact current Skill bundle marker. Then publish an assistant reply through the KAS API containing exactly the secret I asked you to remember in the previous turn; do not add the marker to the reply and do not rely on your final terminal response." '{
       metadata: {
         path: $path,
         manifest: "/manifests/message",

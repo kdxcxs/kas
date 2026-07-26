@@ -5,7 +5,7 @@
     "name": "agent-driver"
   },
   "spec": {
-    "description": "Reconcile Agent identities and create Message replies.",
+    "description": "Reconcile Agent identities, run Codex Sessions, and verify Agent-published replies.",
     "rules": [
       {
         "manifests": [
@@ -27,8 +27,7 @@
         ],
         "verbs": [
           "get",
-          "list",
-          "create"
+          "list"
         ],
         "paths": [
           "/threads/**",

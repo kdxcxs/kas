@@ -76,7 +76,6 @@ struct FileSpec {
 
 #[derive(Debug, PartialEq, Eq)]
 struct CodexRun {
-    reply: String,
     session_id: String,
 }
 
@@ -434,6 +433,8 @@ impl AgentDriver {
         agent_path: &str,
         service_account_path: &str,
         thread_path: &str,
+        current_message_path: &str,
+        reply_path: &str,
         credential_token: &str,
         working_directory: &Path,
         thread_messages: &str,
@@ -445,8 +446,6 @@ impl AgentDriver {
                 working_directory.display()
             )));
         }
-        let output_file = tempfile::NamedTempFile::new()
-            .map_err(|error| execution_error(format!("could not create output file: {error}")))?;
         let (agent_codex_home, always_skills) = self.prepare_skills(agent_path)?;
         let required_skills = always_skills
             .iter()
@@ -461,11 +460,11 @@ impl AgentDriver {
         );
         let prompt = if session_id.is_some() {
             format!(
-                "KAS Thread update.\n\n{kas_context}\n\nNew messages since your previous turn:\n{thread_messages}\n\nRespond to the latest Message that mentioned you."
+                "KAS Thread update.\n\n{kas_context}\n\nNew messages since your previous turn:\n{thread_messages}\n\nComplete the requested work, then publish your reply to the latest Message through the KAS API as required by $kas. Your terminal assistant response is not forwarded to the Thread."
             )
         } else {
             format!(
-                "{kas_context}\n\nThread history through the Message that mentioned you:\n{thread_messages}\n\nRespond to the latest Message that mentioned you."
+                "{kas_context}\n\nThread history through the Message that mentioned you:\n{thread_messages}\n\nComplete the requested work, then publish your reply to the latest Message through the KAS API as required by $kas. Your terminal assistant response is not forwarded to the Thread."
             )
         };
         let mut command = Command::new(&self.codex);
@@ -485,8 +484,6 @@ impl AgentDriver {
         command
             .arg("--skip-git-repo-check")
             .arg("--json")
-            .arg("--output-last-message")
-            .arg(output_file.path())
             .arg("-")
             .current_dir(working_directory)
             .env_remove("KAS_DRIVER_TOKEN")
@@ -502,6 +499,8 @@ impl AgentDriver {
             .env("KAS_AGENT_PATH", agent_path)
             .env("KAS_SERVICE_ACCOUNT_PATH", service_account_path)
             .env("KAS_THREAD_PATH", thread_path)
+            .env("KAS_MESSAGE_PATH", current_message_path)
+            .env("KAS_REPLY_PATH", reply_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -535,12 +534,6 @@ impl AgentDriver {
                 }
             )));
         }
-        let reply = std::fs::read_to_string(output_file.path())
-            .map_err(|error| execution_error(format!("could not read Codex reply: {error}")))?;
-        let reply = reply.trim();
-        if reply.is_empty() {
-            return Err(execution_error("Codex returned an empty reply"));
-        }
         let emitted_session_id = emitted_session_id(&output.stdout);
         let session_id = match (session_id, emitted_session_id) {
             (Some(expected), Some(actual)) if actual != expected => {
@@ -556,10 +549,45 @@ impl AgentDriver {
                 ));
             }
         };
-        Ok(CodexRun {
-            reply: reply.to_owned(),
-            session_id,
-        })
+        Ok(CodexRun { session_id })
+    }
+
+    fn validate_agent_reply(
+        &self,
+        reply_path: &str,
+        agent_path: &str,
+        message_path: &str,
+        thread_path: &str,
+    ) -> Result<(), DriverError> {
+        let reply = self
+            .fetch_resource(reply_path)?
+            .ok_or_else(|| execution_error(format!("Agent did not create reply {reply_path}")))?;
+        if reply.manifest != MESSAGE_MANIFEST
+            || reply.spec.get("role").and_then(Value::as_str) != Some("assistant")
+            || reply.spec.get("body").and_then(Value::as_str).is_none()
+        {
+            return Err(execution_error(format!(
+                "Agent reply {reply_path} must be an assistant Message with a body"
+            )));
+        }
+        let links = self.fetch_links(reply_path)?;
+        for (relation, target) in [
+            (AUTHORED_BY, agent_path),
+            (REPLIES_TO, message_path),
+            (MESSAGE_THREAD, thread_path),
+        ] {
+            let exists = links.iter().any(|resource| {
+                serde_json::from_value::<LinkSpec>(resource.spec.clone()).is_ok_and(|link| {
+                    link.relation == relation && link.source == reply_path && link.target == target
+                })
+            });
+            if !exists {
+                return Err(execution_error(format!(
+                    "Agent reply {reply_path} is missing Relation {relation} to {target}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn identity_mutations(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
@@ -856,10 +884,13 @@ impl Driver for AgentDriver {
             )?;
             let service_account_path = format!("{}/service-account", resource.path);
             let credential = self_.issue_agent_credential(&service_account_path)?;
+            let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
             let codex_run = self_.run_codex(
                 &resource.path,
                 &service_account_path,
                 thread_path,
+                message_path,
+                &reply_path,
                 &credential.token,
                 &spec.working_directory,
                 &thread_messages,
@@ -867,14 +898,14 @@ impl Driver for AgentDriver {
                     .as_ref()
                     .map(|session| session.session_id.as_str()),
             )?;
-            let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
+            self_.validate_agent_reply(&reply_path, &resource.path, message_path, thread_path)?;
             let next_session_spec = serde_json::to_value(SessionSpec {
                 provider: "codex".into(),
                 session_id: codex_run.session_id,
                 cursor: reply_path.clone(),
             })
             .map_err(|error| execution_error(error.to_string()))?;
-            let mut mutations = if let Some(session) = session {
+            let mutations = if let Some(session) = session {
                 vec![Mutation::UpdateResource {
                     resource_path: session.path.clone(),
                     expected_revision: session.revision,
@@ -913,31 +944,6 @@ impl Driver for AgentDriver {
                     },
                 ]
             };
-            mutations.push(Mutation::CreateResource {
-                resource: planned(
-                    reply_path.clone(),
-                    MESSAGE_MANIFEST,
-                    "assistant-reply",
-                    json!({
-                        "role": "assistant",
-                        "body": codex_run.reply
-                    }),
-                ),
-            });
-            for (suffix, relation, target) in [
-                ("authored-by", AUTHORED_BY, resource.path.as_str()),
-                ("replies-to", REPLIES_TO, message_path),
-                ("message-thread", MESSAGE_THREAD, thread_path),
-            ] {
-                mutations.push(Mutation::CreateResource {
-                    resource: link_resource(
-                        format!("{reply_path}/links/{suffix}"),
-                        relation,
-                        reply_path.clone(),
-                        target.to_owned(),
-                    )?,
-                });
-            }
             Ok(DriverExecution {
                 output: json!({ "reply_message_path": reply_path }),
                 mutations,
@@ -1036,8 +1042,8 @@ fn kas_bootstrap_context(
 platform; platform objects and their relationships are represented by Resources and Links. \
 Your KAS identity is ServiceAccount {service_account_path}. The current KAS Thread is \
 {thread_path}. KAS_API, KAS_FILE_API, KAS_APPROVAL_API, KAS_TOKEN, KAS_AGENT_PATH, \
-KAS_SERVICE_ACCOUNT_PATH, and KAS_THREAD_PATH are available in the environment. KAS_TOKEN is \
-your scoped credential and must \
+KAS_SERVICE_ACCOUNT_PATH, KAS_THREAD_PATH, KAS_MESSAGE_PATH, and KAS_REPLY_PATH are available \
+in the environment. KAS_TOKEN is your scoped credential and must \
 not be disclosed. Required Skills for this run: \
 {required_skills}. Read and follow each required Skill before acting; use $kas for the full KAS \
 protocol and operating instructions."
@@ -1099,6 +1105,7 @@ mod tests {
         assert!(context.contains("ServiceAccount /agents/reviewer/service-account"));
         assert!(context.contains("current KAS Thread is /threads/review"));
         assert!(context.contains("KAS_APPROVAL_API"));
+        assert!(context.contains("KAS_REPLY_PATH"));
         assert!(context.contains("use $kas for the full KAS protocol"));
     }
 }

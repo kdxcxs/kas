@@ -75,7 +75,10 @@ an immutable File selected by its `bundle` Link. Replacing a bundle updates the
 existing Link target; it does not replace the Skill or Link Resource.
 `message` owns the fanout Driver that turns validated `mentioned` Links into
 Agent Runs. `agent` owns the Codex Driver that executes those Runs and manages
-both Agent and Session Resources. Agent-to-Skill assignment uses a `uses`
+both Agent and Session Resources. The Agent publishes its own assistant Message
+and required Links through the scoped KAS API; the Driver validates that reply
+and never converts Codex's final terminal output into a Message.
+Agent-to-Skill assignment uses a `uses`
 Link. The built-in KAS operating context is itself the `/skills/kas` Skill and
 is assigned to every Agent. The fixed Agent prompt contains only enough
 bootstrap context to identify KAS, the Agent's ServiceAccount, and its API

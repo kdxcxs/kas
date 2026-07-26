@@ -86,15 +86,80 @@ curl -sS -G \
   "$KAS_API/resources"
 ```
 
-Create a Message:
+## Reply to the current Message
+
+When KAS runs you for a Message, `$KAS_MESSAGE_PATH` is the Message that
+mentioned you and `$KAS_REPLY_PATH` is the exact path where you must publish
+your reply. Your final terminal response is not forwarded to the Thread.
+
+Before finishing the run, create one assistant Message at `$KAS_REPLY_PATH`,
+then create all three required Links:
+
+- `authored-by`: reply → `$KAS_AGENT_PATH`
+- `replies-to`: reply → `$KAS_MESSAGE_PATH`
+- `message-thread`: reply → `$KAS_THREAD_PATH`
+
+Use the following shape, replacing `<reply>` with the response for the user:
 
 ```bash
-curl -sS \
+reply_body='<reply>'
+curl -fsS \
   -H "Authorization: Bearer $KAS_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"metadata":{"path":"/messages/example","manifest":"/manifests/message","name":"example"},"spec":{"role":"system","body":"example"}}' \
+  -d "$(jq -n --arg path "$KAS_REPLY_PATH" --arg body "$reply_body" '{
+    metadata: {
+      path: $path,
+      manifest: "/manifests/message",
+      name: "assistant-reply"
+    },
+    spec: {role: "assistant", body: $body}
+  }')" \
   "$KAS_API/resources"
+
+create_reply_link() {
+  relation_name="$1"
+  relation_path="$2"
+  target_path="$3"
+  curl -fsS \
+    -H "Authorization: Bearer $KAS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg path "$KAS_REPLY_PATH/links/$relation_name" \
+      --arg relation "$relation_path" \
+      --arg source "$KAS_REPLY_PATH" \
+      --arg target "$target_path" '{
+        metadata: {
+          path: $path,
+          manifest: "/builtin/link",
+          name: ($path | split("/") | last)
+        },
+        spec: {
+          relation: $relation,
+          source: $source,
+          target: $target,
+          metadata: {}
+        }
+      }')" \
+    "$KAS_API/resources"
+}
+
+create_reply_link \
+  authored-by \
+  /manifests/message/relations/authored-by \
+  "$KAS_AGENT_PATH"
+create_reply_link \
+  replies-to \
+  /manifests/message/relations/replies-to \
+  "$KAS_MESSAGE_PATH"
+create_reply_link \
+  message-thread \
+  /manifests/message/relations/message-thread \
+  "$KAS_THREAD_PATH"
 ```
+
+The Agent Driver validates this Message and its Links but never creates the
+reply from your final Codex output. If any required write fails, fix it before
+ending the run.
 
 Upload a new immutable File:
 

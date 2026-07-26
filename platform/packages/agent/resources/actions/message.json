@@ -5,7 +5,7 @@
     "name": "message"
   },
   "spec": {
-    "description": "Send a stored user Message to this Agent and create its assistant reply.",
+    "description": "Send a stored user Message to this Agent and verify the assistant reply it publishes through KAS.",
     "input_schema": {
       "type": "object",
       "required": [
