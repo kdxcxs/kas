@@ -1347,6 +1347,7 @@ impl Store {
             None
         };
         Ok(AuthContext {
+            credential_path,
             subject: Subject {
                 path: subject_resource.path.clone(),
                 manifest: subject_resource.manifest.clone(),

@@ -18,7 +18,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use kas_auth::{AuthContext, IssuedCredential};
+use kas_auth::{AuthContext, AuthorizationCheck, AuthorizationDecision, IssuedCredential};
 use kas_core::{
     package_path_for_digest, DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork,
     Mutation, PackageSpec, Resource, RestartPolicy, UpdateResource, BUILTIN_PACKAGE_MEDIA_TYPE,
@@ -98,6 +98,8 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
         .route("/drivers/credentials", post(issue_driver_credential))
         .route("/drivers/connect", get(connect_driver))
         .route("/credentials/issue", post(issue_credential))
+        .route("/auth", get(auth_context))
+        .route("/auth/check", post(check_authorization))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             authenticate_request,
@@ -184,6 +186,40 @@ fn driver_launch(
 
 async fn health() -> Json<Value> {
     Json(json!({"ok": true}))
+}
+
+async fn auth_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<AuthContext>> {
+    Ok(Json(authenticate(&state, &headers)?))
+}
+
+async fn check_authorization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AuthorizationCheck>,
+) -> ApiResult<Json<AuthorizationDecision>> {
+    kas_auth::validate_path(&input.manifest).map_err(|error| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("invalid manifest: {error}"),
+        )
+    })?;
+    kas_auth::validate_path(&input.path)
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, format!("invalid path: {error}")))?;
+    if input.verb.is_empty() || input.verb.chars().any(char::is_whitespace) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "verb must be a non-empty string without whitespace".into(),
+        ));
+    }
+    let auth = authenticate(&state, &headers)?;
+    Ok(Json(AuthorizationDecision {
+        allowed: kas_auth::allows(&auth.rules, &input.manifest, &input.verb, Some(&input.path)),
+        credential_path: auth.credential_path,
+        subject: auth.subject,
+    }))
 }
 
 async fn authenticate_request(
