@@ -1,0 +1,33 @@
+{
+  "path": "/manifests/session",
+  "manifest": "/builtin/manifest",
+  "name": "session",
+  "version": 1,
+  "description": "A persistent provider session for one Agent participating in one Thread.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "provider",
+      "session_id",
+      "cursor"
+    ],
+    "properties": {
+      "provider": {
+        "const": "codex"
+      },
+      "session_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "cursor": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  }
+}

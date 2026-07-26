@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "path": "./relations/thread-session",
+    "manifest": "/builtin/relation",
+    "name": "thread-session"
+  },
+  "spec": {
+    "inverse_name": "thread",
+    "sources": [
+      {
+        "manifest": "/manifests/thread",
+        "paths": [
+          "/threads/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/threads/**/sessions/**"
+        ]
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

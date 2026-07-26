@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "path": "./relations/agent-session",
+    "manifest": "/builtin/relation",
+    "name": "agent-session"
+  },
+  "spec": {
+    "inverse_name": "agent",
+    "sources": [
+      {
+        "manifest": "/manifests/agent",
+        "paths": [
+          "/agents/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/threads/**/sessions/**"
+        ]
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

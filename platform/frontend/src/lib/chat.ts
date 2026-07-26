@@ -3,6 +3,7 @@ import type { CreateResource, ObjectKind, PlannedLink, Resource } from './types'
 export const AGENT_MANIFEST = '/manifests/agent';
 export const THREAD_MANIFEST = '/manifests/thread';
 export const MESSAGE_MANIFEST = '/manifests/message';
+export const SESSION_MANIFEST = '/manifests/session';
 export const PARTICIPANTS = '/manifests/thread/relations/participants';
 export const AUTHORED_BY = '/manifests/message/relations/authored-by';
 export const MESSAGE_THREAD = '/manifests/message/relations/message-thread';
@@ -92,6 +93,19 @@ export function threadParticipantLink(
     participantPath.startsWith('/users/') ? 'user' : 'resource',
     participantPath
   );
+}
+
+export function sessionPath(threadPath: string, agentPath: string): string {
+  return `${threadPath}/sessions/${slugify(agentPath)}`;
+}
+
+export function sessionForThreadAgent(
+  sessions: Resource[],
+  threadPath: string,
+  agentPath: string
+): Resource | null {
+  const path = sessionPath(threadPath, agentPath);
+  return sessions.find((session) => session.path === path) ?? null;
 }
 
 export function buildUserMessage(

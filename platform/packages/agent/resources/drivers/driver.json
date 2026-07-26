@@ -10,7 +10,8 @@
     "entrypoint": "./driver/bin/kas-agent-driver",
     "service_account": "./service-accounts/driver",
     "manages": [
-      "."
+      ".",
+      "/manifests/session"
     ],
     "args": [],
     "watches": [],

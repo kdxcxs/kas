@@ -38,7 +38,8 @@ mkdir -p \
   "$OUTPUT_DIR" \
   "$STAGING_ROOT/agent/driver/bin" \
   "$STAGING_ROOT/message/driver/bin" \
-  "$STAGING_ROOT/thread"
+  "$STAGING_ROOT/thread" \
+  "$STAGING_ROOT/session"
 cp "$PLATFORM_ROOT/packages/agent/manifest.json" "$STAGING_ROOT/agent/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/agent/resources" "$STAGING_ROOT/agent/resources"
 cp \
@@ -53,11 +54,15 @@ cp \
 chmod 755 "$STAGING_ROOT/message/driver/bin/kas-message-driver"
 cp "$PLATFORM_ROOT/packages/thread/manifest.json" "$STAGING_ROOT/thread/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/thread/resources" "$STAGING_ROOT/thread/resources"
+cp "$PLATFORM_ROOT/packages/session/manifest.json" "$STAGING_ROOT/session/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/session/resources" "$STAGING_ROOT/session/resources"
 
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/agent" -cf "$OUTPUT_DIR/agent.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/thread" -cf "$OUTPUT_DIR/thread.kas" manifest.json resources
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/session" -cf "$OUTPUT_DIR/session.kas" manifest.json resources
 
 echo "$OUTPUT_DIR/thread.kas"
+echo "$OUTPUT_DIR/session.kas"
 echo "$OUTPUT_DIR/message.kas"
 echo "$OUTPUT_DIR/agent.kas"

@@ -11,6 +11,8 @@ import {
   mentionedAgentPaths,
   messagesForThread,
   participantAgentPaths,
+  sessionForThreadAgent,
+  sessionPath,
   slugify,
   threadParticipantLink,
   threadsForAgent
@@ -86,6 +88,27 @@ describe('Thread resources', () => {
     expect(threadParticipantLink(thread.path, '/agents/reviewer').path).toBe(
       '/threads/planning/links/participants/agents-reviewer'
     );
+  });
+
+  it('addresses one Session per Thread-Agent pair', () => {
+    const session = resource(
+      '/threads/planning/sessions/agents-planner',
+      '/manifests/session',
+      'planning-planner',
+      {
+        provider: 'codex',
+        session_id: 'session-1',
+        cursor: '/messages/one'
+      }
+    );
+
+    expect(sessionPath('/threads/planning', '/agents/planner')).toBe(session.path);
+    expect(
+      sessionForThreadAgent([session], '/threads/planning', '/agents/planner')
+    ).toBe(session);
+    expect(
+      sessionForThreadAgent([session], '/threads/planning', '/agents/reviewer')
+    ).toBeNull();
   });
 });
 

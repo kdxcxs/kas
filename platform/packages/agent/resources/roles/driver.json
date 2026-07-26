@@ -37,6 +37,20 @@
       },
       {
         "manifests": [
+          "/manifests/session"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update"
+        ],
+        "paths": [
+          "/threads/**/sessions/**"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/link"
         ],
         "verbs": [

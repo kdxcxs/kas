@@ -565,6 +565,72 @@ button:disabled {
   line-height: 1.5;
 }
 
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-list-title,
+.session-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.session-list-title {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.session-list-title small {
+  color: var(--quiet);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.session-list article {
+  padding: 11px 12px;
+  background: #131610;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.session-list article > div {
+  min-width: 0;
+}
+
+.session-list strong,
+.session-list code,
+.session-list article small {
+  display: block;
+}
+
+.session-list strong {
+  color: var(--warm);
+  font-size: 12px;
+}
+
+.session-list code,
+.session-list article small {
+  max-width: 440px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--quiet);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-list .danger-button {
+  flex: 0 0 auto;
+}
+
 .thread-editor .modal-actions {
   margin-top: auto;
 }

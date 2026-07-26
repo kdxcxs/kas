@@ -11,10 +11,12 @@ use kas_core::{
 };
 use kas_driver::{Driver, DriverError};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+const AGENT_MANIFEST: &str = "/manifests/agent";
 const MESSAGE_MANIFEST: &str = "/manifests/message";
+const SESSION_MANIFEST: &str = "/manifests/session";
 const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const LINK_MANIFEST: &str = "/builtin/link";
 const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
@@ -22,6 +24,8 @@ const ROLE_BINDING_MANIFEST: &str = "/builtin/role-binding";
 const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
 const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
 const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
+const THREAD_SESSION: &str = "/manifests/session/relations/thread-session";
+const AGENT_SESSION: &str = "/manifests/session/relations/agent-session";
 const SERVICE_ACCOUNT_RELATION: &str = "/manifests/agent/relations/service-account";
 const AGENT_RUNTIME_ROLE: &str = "/manifests/agent/roles/runtime";
 
@@ -30,6 +34,7 @@ pub struct AgentDriver {
     api: String,
     token: String,
     codex: PathBuf,
+    codex_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +49,19 @@ struct IssuedCredential {
     token: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct SessionSpec {
+    provider: String,
+    session_id: String,
+    cursor: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CodexRun {
+    reply: String,
+    session_id: String,
+}
+
 impl AgentDriver {
     pub fn new(
         api: impl Into<String>,
@@ -54,7 +72,32 @@ impl AgentDriver {
             api: api.into().trim_end_matches('/').to_owned(),
             token: token.into(),
             codex: codex.into(),
+            codex_home: None,
         }
+    }
+
+    pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
+        self.codex_home = Some(path.into());
+        self
+    }
+
+    fn list_resources(&self, manifest: &str) -> Result<Vec<Resource>, DriverError> {
+        let api = self.api.clone();
+        let token = self.token.clone();
+        let manifest = manifest.to_owned();
+        std::thread::spawn(move || {
+            reqwest::blocking::Client::new()
+                .get(format!("{api}/resources"))
+                .bearer_auth(token)
+                .query(&[("manifest", manifest.as_str())])
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .and_then(reqwest::blocking::Response::json)
+                .map_err(|error| format!("could not list {manifest} Resources: {error}"))
+        })
+        .join()
+        .map_err(|_| execution_error("Resource REST worker panicked"))?
+        .map_err(execution_error)
     }
 
     fn fetch_resource(&self, path: &str) -> Result<Option<Resource>, DriverError> {
@@ -137,6 +180,78 @@ impl AgentDriver {
         .map_err(execution_error)
     }
 
+    fn thread_messages(
+        &self,
+        thread_path: &str,
+        current_message_path: &str,
+        cursor: Option<&str>,
+    ) -> Result<String, DriverError> {
+        let links = self.list_resources(LINK_MANIFEST)?;
+        let mut messages = self
+            .list_resources(MESSAGE_MANIFEST)?
+            .into_iter()
+            .filter(|message| message.metadata.state != kas_core::STATE_DELETED)
+            .filter(|message| {
+                links.iter().any(|resource| {
+                    serde_json::from_value::<LinkSpec>(resource.spec.clone()).is_ok_and(|link| {
+                        link.relation == MESSAGE_THREAD
+                            && link.source == message.path
+                            && link.target == thread_path
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        messages.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+
+        let end = messages
+            .iter()
+            .position(|message| message.path == current_message_path)
+            .ok_or_else(|| {
+                execution_error(format!(
+                    "Message {current_message_path} was not found in Thread {thread_path}"
+                ))
+            })?;
+        let start = cursor
+            .and_then(|cursor| messages.iter().position(|message| message.path == cursor))
+            .map_or(0, |index| index.saturating_add(1));
+        let selected = if start <= end {
+            &messages[start..=end]
+        } else {
+            &messages[end..=end]
+        };
+
+        let mut transcript = String::new();
+        for message in selected {
+            let role = message
+                .spec
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let body = message
+                .spec
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let author = links
+                .iter()
+                .find_map(|resource| {
+                    let link = serde_json::from_value::<LinkSpec>(resource.spec.clone()).ok()?;
+                    (link.relation == AUTHORED_BY && link.source == message.path)
+                        .then_some(link.target)
+                })
+                .unwrap_or_else(|| "unknown".into());
+            transcript.push_str(&format!(
+                "[{role} by {author} at {}]\n{body}\n\n",
+                message.path
+            ));
+        }
+        Ok(transcript.trim_end().to_owned())
+    }
+
     fn run_codex(
         &self,
         agent_path: &str,
@@ -144,8 +259,9 @@ impl AgentDriver {
         credential_token: &str,
         working_directory: &Path,
         instructions: &str,
-        message: &str,
-    ) -> Result<String, DriverError> {
+        thread_messages: &str,
+        session_id: Option<&str>,
+    ) -> Result<CodexRun, DriverError> {
         if !working_directory.is_dir() {
             return Err(execution_error(format!(
                 "working directory {} does not exist or is not a directory",
@@ -174,27 +290,38 @@ impl AgentDriver {
 - Operations are restricted by the RBAC permissions of your ServiceAccount.
 - Never print, persist, or place $KAS_TOKEN in a Resource, Message, Link, or file."#
         );
-        let prompt = format!(
-            "{platform_context}\n\nAgent instructions:\n{}\n\nUser message:\n{message}",
-            instructions.trim()
-        );
-        let mut child = Command::new(&self.codex)
+        let prompt = if session_id.is_some() {
+            format!(
+                "KAS Thread update.\n\nCurrent Agent instructions:\n{}\n\nNew messages since your previous turn:\n{thread_messages}\n\nRespond to the latest Message that mentioned you.",
+                instructions.trim()
+            )
+        } else {
+            format!(
+                "{platform_context}\n\nAgent instructions:\n{}\n\nThread history through the Message that mentioned you:\n{thread_messages}\n\nRespond to the latest Message that mentioned you.",
+                instructions.trim()
+            )
+        };
+        let mut command = Command::new(&self.codex);
+        command
             .arg("--ask-for-approval")
             .arg("never")
             .arg("--sandbox")
             .arg("workspace-write")
             .arg("-c")
             .arg("sandbox_workspace_write.network_access=true")
-            .arg("exec")
-            .arg("--ephemeral")
+            .arg("exec");
+        if let Some(session_id) = session_id {
+            command.arg("resume").arg(session_id);
+        } else {
+            command.arg("-C").arg(working_directory);
+        }
+        command
             .arg("--skip-git-repo-check")
-            .arg("--color")
-            .arg("never")
-            .arg("-C")
-            .arg(working_directory)
+            .arg("--json")
             .arg("--output-last-message")
             .arg(output_file.path())
             .arg("-")
+            .current_dir(working_directory)
             .env_remove("KAS_DRIVER_TOKEN")
             .env_remove("KAS_DRIVER_PATH")
             .env_remove("KAS_DRIVER_GENERATION")
@@ -207,14 +334,16 @@ impl AgentDriver {
             .env("KAS_SERVICE_ACCOUNT_PATH", service_account_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                execution_error(format!(
-                    "could not start Codex executable {}: {error}",
-                    self.codex.display()
-                ))
-            })?;
+            .stderr(Stdio::piped());
+        if let Some(codex_home) = &self.codex_home {
+            command.env("CODEX_HOME", codex_home);
+        }
+        let mut child = command.spawn().map_err(|error| {
+            execution_error(format!(
+                "could not start Codex executable {}: {error}",
+                self.codex.display()
+            ))
+        })?;
         child
             .stdin
             .take()
@@ -244,7 +373,25 @@ impl AgentDriver {
         if reply.is_empty() {
             return Err(execution_error("Codex returned an empty reply"));
         }
-        Ok(reply.to_owned())
+        let emitted_session_id = emitted_session_id(&output.stdout);
+        let session_id = match (session_id, emitted_session_id) {
+            (Some(expected), Some(actual)) if actual != expected => {
+                return Err(execution_error(format!(
+                    "Codex resumed unexpected Session {actual}; expected {expected}"
+                )));
+            }
+            (Some(expected), _) => expected.to_owned(),
+            (None, Some(created)) => created,
+            (None, None) => {
+                return Err(execution_error(
+                    "Codex JSON output did not include thread.started.thread_id",
+                ));
+            }
+        };
+        Ok(CodexRun {
+            reply: reply.to_owned(),
+            session_id,
+        })
     }
 
     fn identity_mutations(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
@@ -312,6 +459,28 @@ impl Driver for AgentDriver {
     }
 
     async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+        if resource.manifest == SESSION_MANIFEST {
+            serde_json::from_value::<SessionSpec>(resource.spec.clone()).map_err(|error| {
+                execution_error(format!(
+                    "invalid Session spec at {}: {error}",
+                    resource.path
+                ))
+            })?;
+            return Ok(vec![Mutation::UpdateResourceStatus {
+                resource_path: resource.path.clone(),
+                expected_revision: resource.revision,
+                status: ResourceStatus {
+                    metadata: resource.status_metadata(resource.metadata.state.clone()),
+                    spec: resource.spec.clone(),
+                },
+            }]);
+        }
+        if resource.manifest != AGENT_MANIFEST {
+            return Err(execution_error(format!(
+                "Agent Driver cannot reconcile Manifest {}",
+                resource.manifest
+            )));
+        }
         let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
             .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
         if resource.metadata.state != kas_core::STATE_DELETED && !spec.working_directory.is_dir() {
@@ -358,11 +527,11 @@ impl Driver for AgentDriver {
         let message = self
             .fetch_resource(message_path)?
             .ok_or_else(|| execution_error(format!("Message {message_path} does not exist")))?;
-        let body = message
-            .spec
-            .get("body")
-            .and_then(Value::as_str)
-            .ok_or_else(|| execution_error(format!("Message {message_path} has no spec.body")))?;
+        if message.spec.get("body").and_then(Value::as_str).is_none() {
+            return Err(execution_error(format!(
+                "Message {message_path} has no spec.body"
+            )));
+        }
         let belongs_to_thread = self.fetch_links(message_path)?.into_iter().any(|link| {
             serde_json::from_value::<LinkSpec>(link.spec).is_ok_and(|spec| {
                 spec.relation == MESSAGE_THREAD
@@ -375,28 +544,107 @@ impl Driver for AgentDriver {
                 "Message {message_path} does not belong to Thread {thread_path}"
             )));
         }
+        let session_path = session_path(thread_path, &resource.path);
+        let session = self.fetch_resource(&session_path)?;
+        if session
+            .as_ref()
+            .is_some_and(|session| session.metadata.state == kas_core::STATE_DELETED)
+        {
+            return Err(execution_error(format!(
+                "Session {session_path} is still being reset"
+            )));
+        }
+        let session_spec = session
+            .as_ref()
+            .map(|session| {
+                serde_json::from_value::<SessionSpec>(session.spec.clone()).map_err(|error| {
+                    execution_error(format!("invalid Session spec at {session_path}: {error}"))
+                })
+            })
+            .transpose()?;
+        if session_spec
+            .as_ref()
+            .is_some_and(|session| session.provider != "codex")
+        {
+            return Err(execution_error(format!(
+                "Session {session_path} is not a Codex Session"
+            )));
+        }
+        let thread_messages = self.thread_messages(
+            thread_path,
+            message_path,
+            session_spec.as_ref().map(|session| session.cursor.as_str()),
+        )?;
         let service_account_path = format!("{}/service-account", resource.path);
         let credential = self.issue_agent_credential(&service_account_path)?;
-        let reply = self.run_codex(
+        let codex_run = self.run_codex(
             &resource.path,
             &service_account_path,
             &credential.token,
             &spec.working_directory,
             &spec.instructions,
-            body,
+            &thread_messages,
+            session_spec
+                .as_ref()
+                .map(|session| session.session_id.as_str()),
         )?;
         let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
-        let mut mutations = vec![Mutation::CreateResource {
+        let next_session_spec = serde_json::to_value(SessionSpec {
+            provider: "codex".into(),
+            session_id: codex_run.session_id,
+            cursor: reply_path.clone(),
+        })
+        .map_err(|error| execution_error(error.to_string()))?;
+        let mut mutations = if let Some(session) = session {
+            vec![Mutation::UpdateResource {
+                resource_path: session.path.clone(),
+                expected_revision: session.revision,
+                metadata: None,
+                spec: next_session_spec,
+            }]
+        } else {
+            vec![
+                Mutation::CreateResource {
+                    resource: planned(
+                        session_path.clone(),
+                        SESSION_MANIFEST,
+                        format!(
+                            "{}-{}",
+                            resource_name(thread_path),
+                            resource_name(&resource.path)
+                        ),
+                        next_session_spec,
+                    ),
+                },
+                Mutation::CreateResource {
+                    resource: link_resource(
+                        format!("{session_path}/links/thread"),
+                        THREAD_SESSION,
+                        thread_path,
+                        session_path.clone(),
+                    )?,
+                },
+                Mutation::CreateResource {
+                    resource: link_resource(
+                        format!("{session_path}/links/agent"),
+                        AGENT_SESSION,
+                        resource.path.clone(),
+                        session_path.clone(),
+                    )?,
+                },
+            ]
+        };
+        mutations.push(Mutation::CreateResource {
             resource: planned(
                 reply_path.clone(),
                 MESSAGE_MANIFEST,
                 "assistant-reply",
                 json!({
                     "role": "assistant",
-                    "body": reply
+                    "body": codex_run.reply
                 }),
             ),
-        }];
+        });
         for (suffix, relation, target) in [
             ("authored-by", AUTHORED_BY, resource.path.as_str()),
             ("replies-to", REPLIES_TO, message_path),
@@ -463,6 +711,68 @@ fn resource_name(path: &str) -> &str {
         .unwrap_or("resource")
 }
 
+fn session_path(thread_path: &str, agent_path: &str) -> String {
+    format!("{thread_path}/sessions/{}", path_slug(agent_path))
+}
+
+fn path_slug(path: &str) -> String {
+    let mut slug = String::new();
+    let mut separated = false;
+    for character in path.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            separated = false;
+        } else if !slug.is_empty() && !separated {
+            slug.push('-');
+            separated = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+fn emitted_session_id(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|event| {
+            (event.get("type").and_then(Value::as_str) == Some("thread.started"))
+                .then(|| {
+                    event
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten()
+        })
+}
+
 fn execution_error(message: impl Into<String>) -> DriverError {
     DriverError::Execution(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emitted_session_id, session_path};
+
+    #[test]
+    fn session_path_is_stable_for_a_thread_agent_pair() {
+        assert_eq!(
+            session_path("/threads/planning", "/agents/Release Planner"),
+            "/threads/planning/sessions/agents-release-planner"
+        );
+    }
+
+    #[test]
+    fn reads_codex_thread_started_event() {
+        let output = br#"{"type":"turn.started"}
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
+{"type":"turn.completed"}"#;
+        assert_eq!(
+            emitted_session_id(output).as_deref(),
+            Some("0199a213-81c0-7800-8aa1-bbab2a035a53")
+        );
+    }
 }

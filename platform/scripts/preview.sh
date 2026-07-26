@@ -97,6 +97,16 @@ export KAS_ADDRESS="127.0.0.1:$API_PORT"
 export KAS_API_URL="$API"
 export KAS_CODEX_BIN="$CODEX_BIN"
 
+SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+export KAS_CODEX_HOME="$PREVIEW_DIR/codex-home"
+mkdir -p "$KAS_CODEX_HOME"
+chmod 700 "$KAS_CODEX_HOME"
+for entry in auth.json config.toml; do
+  if [[ -e "$SOURCE_CODEX_HOME/$entry" ]]; then
+    ln -s "$SOURCE_CODEX_HOME/$entry" "$KAS_CODEX_HOME/$entry"
+  fi
+done
+
 mkdir -p "$KAS_DATA_DIR"
 target/debug/kas-migrate
 ADMIN_TOKEN="$(target/debug/kas-admin bootstrap preview-admin)"
@@ -129,9 +139,10 @@ install_package() {
     "$API/packages"
 }
 
-echo "Installing Agent, Thread, and Message packages..."
-install_package "$PACKAGES_DIR/agent.kas" >/dev/null
+echo "Installing Thread, Session, Agent, and Message packages..."
 install_package "$PACKAGES_DIR/thread.kas" >/dev/null
+install_package "$PACKAGES_DIR/session.kas" >/dev/null
+install_package "$PACKAGES_DIR/agent.kas" >/dev/null
 install_package "$PACKAGES_DIR/message.kas" >/dev/null
 
 wait_for_driver() {

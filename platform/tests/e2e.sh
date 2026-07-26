@@ -143,6 +143,16 @@ wait_for_run() {
   return 1
 }
 
+control_driver() {
+  local path="$1" state="$2"
+  request --fail --silent \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg path "$path" --arg state "$state" '{path: $path, state: $state}')" \
+    "$API/drivers/control" >/dev/null
+  wait_for_state "$path" "$state" >/dev/null
+}
+
 cd "$ROOT"
 CARGO_TARGET_DIR="$CORE_TARGET" cargo build --workspace
 CARGO_TARGET_DIR="$PLATFORM_TARGET" "$PLATFORM_ROOT/scripts/build-packages.sh" "$E2E_DIR/packages"
@@ -154,6 +164,15 @@ export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
 export KAS_CODEX_BIN="$CODEX_BIN"
+SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+export KAS_CODEX_HOME="$E2E_DIR/codex-home"
+mkdir -p "$KAS_CODEX_HOME"
+chmod 700 "$KAS_CODEX_HOME"
+for entry in auth.json config.toml; do
+  if [[ -e "$SOURCE_CODEX_HOME/$entry" ]]; then
+    ln -s "$SOURCE_CODEX_HOME/$entry" "$KAS_CODEX_HOME/$entry"
+  fi
+done
 
 "$CORE_TARGET/debug/kas-migrate"
 ADMIN_TOKEN="$("$CORE_TARGET/debug/kas-admin" bootstrap platform-admin)"
@@ -177,10 +196,11 @@ install_package() {
     "$API/packages"
 }
 
-AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 THREAD_PACKAGE="$(install_package "$E2E_DIR/packages/thread.kas")"
+SESSION_PACKAGE="$(install_package "$E2E_DIR/packages/session.kas")"
+AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
-for package in "$AGENT_PACKAGE" "$THREAD_PACKAGE" "$MESSAGE_PACKAGE"; do
+for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE"; do
   jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
 
@@ -189,6 +209,9 @@ for path in \
   /manifests/agent/actions/message \
   /manifests/thread \
   /manifests/thread/relations/participants \
+  /manifests/session \
+  /manifests/session/relations/thread-session \
+  /manifests/session/relations/agent-session \
   /manifests/message \
   /manifests/message/relations/authored-by \
   /manifests/message/relations/message-thread \
@@ -211,6 +234,7 @@ AGENT_PATH="/agents/e2e"
 OBSERVER_PATH="/agents/observer"
 PROOF_PATH="/messages/e2e-agent-network-proof"
 KAS_PROOF="KAS_NETWORK_$(uuidgen | tr '[:lower:]' '[:upper:]')"
+SESSION_SECRET="$KAS_PROOF"
 
 create_agent() {
   local path="$1" name="$2" instructions="$3"
@@ -234,7 +258,7 @@ create_agent() {
 }
 
 create_agent "$AGENT_PATH" "e2e-agent" \
-  "Use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec {\"role\":\"system\",\"body\":\"$KAS_PROOF\"}. After the POST succeeds, reply with exactly CREATED and no other text."
+  "Follow the latest user Message exactly. Preserve facts the user asks you to remember in this Codex Session."
 create_agent "$OBSERVER_PATH" "observer" "Reply with exactly OBSERVER."
 wait_for_state "$AGENT_PATH" available >/dev/null
 wait_for_state "$OBSERVER_PATH" available >/dev/null
@@ -267,7 +291,9 @@ create_link "$THREAD_PATH/links/participants/observer" \
 
 MESSAGE_PATH="/messages/e2e-user"
 post_resource "$(
-  jq -n --arg path "$MESSAGE_PATH" '{
+  jq -n \
+    --arg path "$MESSAGE_PATH" \
+    --arg body "@e2e Remember $SESSION_SECRET. Use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec {\"role\":\"system\",\"body\":\"$KAS_PROOF\"}. After the POST succeeds, reply with exactly CREATED and no other text." '{
     metadata: {
       path: $path,
       manifest: "/manifests/message",
@@ -275,7 +301,7 @@ post_resource "$(
     },
     spec: {
       role: "user",
-      body: "@e2e hello from platform e2e"
+      body: $body
     }
   }'
 )" >/dev/null
@@ -336,16 +362,85 @@ jq -e --arg reply "$REPLY_PATH" --arg agent "$AGENT_PATH" --arg parent "$MESSAGE
   and ([.[] | select(.spec.relation == "/manifests/message/relations/thread-root")] | length) == 0
 ' <<<"$LINKS" >/dev/null
 
-stop_driver() {
-  local path="$1"
-  request --fail --silent \
+SESSION_PATH="$THREAD_PATH/sessions/agents-e2e"
+SESSION="$(wait_for_state "$SESSION_PATH" available)"
+SESSION_ID="$(jq -r '.spec.session_id' <<<"$SESSION")"
+jq -e --arg cursor "$REPLY_PATH" '
+  .spec.provider == "codex"
+  and (.spec.session_id | length) > 0
+  and .spec.cursor == $cursor
+  and .spec == .status.spec
+' <<<"$SESSION" >/dev/null
+for path in "$SESSION_PATH/links/thread" "$SESSION_PATH/links/agent"; do
+  wait_for_state "$path" available >/dev/null
+done
+jq -e --arg session "$SESSION_PATH" --arg thread "$THREAD_PATH" --arg agent "$AGENT_PATH" '
+  any(.[]; .spec.relation == "/manifests/session/relations/thread-session"
+    and .spec.source == $thread and .spec.target == $session)
+  and any(.[]; .spec.relation == "/manifests/session/relations/agent-session"
+    and .spec.source == $agent and .spec.target == $session)
+' <<<"$(
+  request --fail --silent --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -cn --arg path "$path" '{path: $path, state: "stopped"}')" \
-    "$API/drivers/control" >/dev/null
-  wait_for_state "$path" stopped >/dev/null
-}
-stop_driver "/manifests/message/driver"
-stop_driver "/manifests/agent/driver"
+    --data-urlencode "manifest=/builtin/link" \
+    "$API/resources"
+)" >/dev/null
 
-echo "KAS platform Thread/@mention end-to-end test passed"
+OBSERVER_SESSION="$THREAD_PATH/sessions/agents-observer"
+if get_resource "$OBSERVER_SESSION" >/dev/null 2>&1; then
+  echo "unmentioned observer Agent received a Session" >&2
+  false
+fi
+
+# A Driver restart must not lose the provider Session mapping.
+control_driver "/manifests/agent/driver" stopped
+control_driver "/manifests/agent/driver" running
+
+SECOND_MESSAGE_PATH="/messages/e2e-user-resume"
+post_resource "$(
+  jq -n \
+    --arg path "$SECOND_MESSAGE_PATH" '{
+      metadata: {
+        path: $path,
+        manifest: "/manifests/message",
+        name: "e2e-user-resume"
+      },
+      spec: {
+        role: "user",
+        body: ("@e2e Reply with exactly the secret I asked you to remember in the previous turn. The expected format starts with KAS_NETWORK_, but do not invent a new value.")
+      }
+    }'
+)" >/dev/null
+create_link "$SECOND_MESSAGE_PATH/links/authored-by" \
+  "/manifests/message/relations/authored-by" "$SECOND_MESSAGE_PATH" "/users/platform-admin"
+create_link "$SECOND_MESSAGE_PATH/links/replies-to" \
+  "/manifests/message/relations/replies-to" "$SECOND_MESSAGE_PATH" "$REPLY_PATH"
+create_link "$SECOND_MESSAGE_PATH/links/message-thread" \
+  "/manifests/message/relations/message-thread" "$SECOND_MESSAGE_PATH" "$THREAD_PATH"
+SECOND_MENTION_LINK="$SECOND_MESSAGE_PATH/links/mentioned/agents-e2e"
+create_link "$SECOND_MENTION_LINK" \
+  "/manifests/message/relations/mentioned" "$SECOND_MESSAGE_PATH" "$AGENT_PATH"
+
+SECOND_RUN="$(wait_for_run "$SECOND_MENTION_LINK/run")"
+if [[ "$(jq -r '.status.metadata.state' <<<"$SECOND_RUN")" != "succeeded" ]]; then
+  echo "resumed Agent Run failed: $(jq -c . <<<"$SECOND_RUN")" >&2
+  false
+fi
+SECOND_REPLY_PATH="$(jq -r '.spec.output.reply_message_path' <<<"$SECOND_RUN")"
+SECOND_REPLY="$(get_resource "$SECOND_REPLY_PATH")"
+jq -e --arg secret "$SESSION_SECRET" '
+  .spec == {role: "assistant", body: $secret}
+' <<<"$SECOND_REPLY" >/dev/null
+
+SESSION="$(wait_for_state "$SESSION_PATH" available)"
+jq -e --arg id "$SESSION_ID" --arg cursor "$SECOND_REPLY_PATH" '
+  .spec.provider == "codex"
+  and .spec.session_id == $id
+  and .spec.cursor == $cursor
+  and .spec == .status.spec
+' <<<"$SESSION" >/dev/null
+
+control_driver "/manifests/message/driver" stopped
+control_driver "/manifests/agent/driver" stopped
+
+echo "KAS platform persistent Session end-to-end test passed"

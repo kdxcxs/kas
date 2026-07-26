@@ -6,6 +6,7 @@
     AUTHORED_BY,
     MESSAGE_MANIFEST,
     PARTICIPANTS,
+    SESSION_MANIFEST,
     THREAD_MANIFEST,
     buildThread,
     buildUserMessage,
@@ -16,6 +17,7 @@
     participantAgentPaths,
     participantsForThread,
     relationTarget,
+    sessionForThreadAgent,
     slugify,
     threadParticipantLink,
     threadsForAgent
@@ -65,6 +67,7 @@
   let agents: Resource[] = [];
   let threads: Resource[] = [];
   let messages: Resource[] = [];
+  let sessions: Resource[] = [];
   let selectedAgentPath = '';
   let activeThreadPath: string | null = null;
   let driver: Driver | null = null;
@@ -83,6 +86,7 @@
   let editThreadTitle = '';
   let editThreadAgents: string[] = [];
   let savingThread = false;
+  let resettingSessionPath = '';
   let createName = '';
   let createPath = '';
   let createWorkingDirectory = '';
@@ -171,10 +175,11 @@
   async function loadData(api = client()): Promise<void> {
     loading = true;
     try {
-      const [agentResources, threadResources, messageResources] = await Promise.all([
+      const [agentResources, threadResources, messageResources, sessionResources] = await Promise.all([
         api.listResources(AGENT_MANIFEST),
         api.listResources(THREAD_MANIFEST),
-        api.listResources(MESSAGE_MANIFEST)
+        api.listResources(MESSAGE_MANIFEST),
+        api.listResources(SESSION_MANIFEST)
       ]);
       agents = agentResources
         .filter((resource) => resource.manifest === AGENT_MANIFEST)
@@ -189,6 +194,11 @@
       messages = await Promise.all(
         messageResources
           .filter((resource) => resource.manifest === MESSAGE_MANIFEST)
+          .map((resource) => api.getResource(resource.path, true))
+      );
+      sessions = await Promise.all(
+        sessionResources
+          .filter((resource) => resource.manifest === SESSION_MANIFEST)
           .map((resource) => api.getResource(resource.path, true))
       );
       driver = await api.getAgentDriver();
@@ -301,6 +311,29 @@
     view = 'chat';
     error = '';
     notice = '';
+  }
+
+  async function resetAgentSession(thread: Resource, agent: Resource): Promise<void> {
+    const session = sessionForThreadAgent(sessions, thread.path, agent.path);
+    if (!session || resettingSessionPath) return;
+    resettingSessionPath = session.path;
+    error = '';
+    try {
+      const api = client();
+      for (const link of session.links ?? []) {
+        await api.deleteResource(link.path, link.revision);
+        await waitForResourceDeletion(api, link.path, 'Session Link');
+      }
+      await api.deleteResource(session.path, session.revision);
+      await waitForResourceDeletion(api, session.path, 'Session');
+      await loadData(api);
+      selectManagedThread(thread.path);
+      notice = `${agent.name}'s Session was reset`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      resettingSessionPath = '';
+    }
   }
 
   async function openObjectExplorer(): Promise<void> {
@@ -530,7 +563,7 @@
       await api.deleteResource(agent.path, agent.revision);
       deleteTarget = null;
       notice = `Deleting ${agent.name}…`;
-      await waitForResourceDeletion(api, agent.path);
+      await waitForResourceDeletion(api, agent.path, 'Agent');
       await loadData(api);
       notice = `${agent.name} was deleted`;
     } catch (cause) {
@@ -541,7 +574,11 @@
     }
   }
 
-  async function waitForResourceDeletion(api: KasApi, path: string): Promise<void> {
+  async function waitForResourceDeletion(
+    api: KasApi,
+    path: string,
+    resourceKind: string
+  ): Promise<void> {
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       try {
@@ -552,7 +589,7 @@
       }
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
-    throw new Error('Agent deletion is still waiting for Driver reconciliation.');
+    throw new Error(`${resourceKind} deletion is still waiting for Driver reconciliation.`);
   }
 
   async function sendMessage(): Promise<void> {
@@ -972,6 +1009,41 @@
                     </label>
                   {/each}
                 </fieldset>
+
+                <section class="session-list" aria-label="Agent Sessions">
+                  <div class="session-list-title">
+                    <span>Codex Sessions</span>
+                    <small>One per Thread-Agent pair</small>
+                  </div>
+                  {#each agents.filter((agent) => editThreadAgents.includes(agent.path)) as agent}
+                    {@const session = sessionForThreadAgent(
+                      sessions,
+                      managedThread.path,
+                      agent.path
+                    )}
+                    <article>
+                      <div>
+                        <strong>{agent.name}</strong>
+                        {#if session}
+                          <code>{String(session.spec.session_id)}</code>
+                          <small>Cursor: {String(session.spec.cursor)}</small>
+                        {:else}
+                          <small>Starts when this Agent is first mentioned.</small>
+                        {/if}
+                      </div>
+                      {#if session}
+                        <button
+                          type="button"
+                          class="danger-button"
+                          disabled={resettingSessionPath === session.path}
+                          onclick={() => void resetAgentSession(managedThread, agent)}
+                        >
+                          {resettingSessionPath === session.path ? 'Resetting…' : 'Reset Session'}
+                        </button>
+                      {/if}
+                    </article>
+                  {/each}
+                </section>
 
                 <p class="thread-editor-note">
                   User participants are retained. Agent membership is represented by

@@ -12,7 +12,10 @@ async fn main() -> anyhow::Result<()> {
     let codex = env::var_os("KAS_CODEX_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"));
-    let driver = AgentDriver::new(&api, &token, codex);
+    let mut driver = AgentDriver::new(&api, &token, codex);
+    if let Some(codex_home) = env::var_os("KAS_CODEX_HOME") {
+        driver = driver.with_codex_home(PathBuf::from(codex_home));
+    }
     DriverRuntime::new(api, driver_path, generation, token, driver)
         .run()
         .await
