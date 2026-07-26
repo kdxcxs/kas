@@ -16,6 +16,9 @@ export type ObjectKind =
 export interface ObjectRef {
   kind: ObjectKind;
   path: string;
+  name?: string;
+  state?: string;
+  manifest?: string;
 }
 
 export interface DriverObservation {

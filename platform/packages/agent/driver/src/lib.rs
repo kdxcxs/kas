@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeSet,
+    fs,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -6,10 +8,13 @@ use std::{
 
 use async_trait::async_trait;
 use kas_core::{
-    DriverExecution, LinkSpec, Mutation, PlannedResource, PlannedResourceMetadata, Resource,
-    ResourceStatus, RoleBindingSpec, RunSpec, ServiceAccountSpec,
+    DriverExecution, LinkSpec, Mutation, PlannedResource, PlannedResourceMetadata, RbacRuleSpec,
+    Resource, ResourceStatus, RoleBindingSpec, RoleSpec, RunSpec, ServiceAccountSpec,
 };
 use kas_driver::{Driver, DriverError};
+use kas_skill_driver::{
+    extract_bundle, SkillSpec, BUNDLE_RELATION, KAS_SKILL_PATH, SKILL_MANIFEST, USES_RELATION,
+};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -21,6 +26,7 @@ const SESSION_MANIFEST: &str = "/manifests/session";
 const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const LINK_MANIFEST: &str = "/builtin/link";
 const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
+const ROLE_MANIFEST: &str = "/builtin/role";
 const ROLE_BINDING_MANIFEST: &str = "/builtin/role-binding";
 const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
 const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
@@ -37,12 +43,12 @@ pub struct AgentDriver {
     token: String,
     codex: PathBuf,
     codex_home: Option<PathBuf>,
+    file_api: String,
+    data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AgentSpec {
-    #[serde(default)]
-    instructions: String,
     working_directory: PathBuf,
 }
 
@@ -82,11 +88,23 @@ impl AgentDriver {
             token: token.into(),
             codex: codex.into(),
             codex_home: None,
+            file_api: "http://127.0.0.1:3001".into(),
+            data_dir: None,
         }
     }
 
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
         self.codex_home = Some(path.into());
+        self
+    }
+
+    pub fn with_file_api(mut self, api: impl Into<String>) -> Self {
+        self.file_api = api.into().trim_end_matches('/').to_owned();
+        self
+    }
+
+    pub fn with_data_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(path.into());
         self
     }
 
@@ -285,13 +303,130 @@ impl AgentDriver {
         Ok(transcript.trim_end().to_owned())
     }
 
+    fn prepare_skills(&self, agent_path: &str) -> Result<(PathBuf, Vec<String>), DriverError> {
+        let data_dir = self
+            .data_dir
+            .as_ref()
+            .ok_or_else(|| execution_error("KAS_DATA_DIR is required for Agent Skill isolation"))?;
+        let agent_key = agent_path.trim_matches('/').replace(['/', '\\'], "_");
+        let agent_home = data_dir
+            .join("agent-driver")
+            .join("agents")
+            .join(agent_key)
+            .join("codex-home");
+        fs::create_dir_all(&agent_home).map_err(|error| {
+            execution_error(format!(
+                "could not create Agent Codex home {}: {error}",
+                agent_home.display()
+            ))
+        })?;
+        if let Some(base_home) = &self.codex_home {
+            for name in ["auth.json", "config.toml"] {
+                let source = base_home.join(name);
+                if source.exists() {
+                    fs::copy(&source, agent_home.join(name)).map_err(|error| {
+                        execution_error(format!(
+                            "could not copy {} into Agent Codex home: {error}",
+                            source.display()
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        let links = self.list_resources(LINK_MANIFEST)?;
+        let mut assignments = links
+            .iter()
+            .filter_map(|resource| {
+                let link = serde_json::from_value::<LinkSpec>(resource.spec.clone()).ok()?;
+                (link.relation == USES_RELATION && link.source == agent_path)
+                    .then_some((link.target, link.metadata))
+            })
+            .collect::<Vec<_>>();
+        assignments.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let staging = tempfile::Builder::new()
+            .prefix(".skills-next-")
+            .tempdir_in(&agent_home)
+            .map_err(|error| execution_error(format!("could not stage Agent Skills: {error}")))?;
+        let mut names = BTreeSet::new();
+        let mut always = Vec::new();
+        for (skill_path, assignment_metadata) in assignments {
+            let skill = self
+                .fetch_resource(&skill_path)?
+                .ok_or_else(|| execution_error(format!("Skill {skill_path} does not exist")))?;
+            if skill.manifest != SKILL_MANIFEST
+                || skill.metadata.state == kas_core::STATE_DELETED
+                || skill.status.metadata.state != kas_core::STATE_AVAILABLE
+            {
+                return Err(execution_error(format!(
+                    "Skill {skill_path} is not available"
+                )));
+            }
+            let spec: SkillSpec = serde_json::from_value(skill.spec.clone())
+                .map_err(|error| execution_error(format!("invalid Skill {skill_path}: {error}")))?;
+            if !names.insert(spec.name.clone()) {
+                return Err(execution_error(format!(
+                    "Agent {agent_path} has more than one Skill named {:?}",
+                    spec.name
+                )));
+            }
+            let bundle_link = links
+                .iter()
+                .find_map(|resource| {
+                    let link = serde_json::from_value::<LinkSpec>(resource.spec.clone()).ok()?;
+                    (link.relation == BUNDLE_RELATION && link.source == skill_path).then_some(link)
+                })
+                .ok_or_else(|| execution_error(format!("Skill {skill_path} has no bundle Link")))?;
+            let bytes = reqwest::blocking::Client::new()
+                .get(format!("{}/files/content", self.file_api))
+                .bearer_auth(&self.token)
+                .query(&[("path", bundle_link.target.as_str())])
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .and_then(reqwest::blocking::Response::bytes)
+                .map_err(|error| {
+                    execution_error(format!(
+                        "could not download bundle for Skill {skill_path}: {error}"
+                    ))
+                })?;
+            let extracted = extract_bundle(&bytes, &staging.path().join(&spec.name))
+                .map_err(|error| execution_error(format!("invalid Skill {skill_path}: {error}")))?;
+            if extracted.spec != spec {
+                return Err(execution_error(format!(
+                    "Skill {skill_path} spec does not match its bundle"
+                )));
+            }
+            if assignment_metadata.get("mode").and_then(Value::as_str) == Some("always") {
+                always.push(spec.name);
+            }
+        }
+        let staged_path = staging.keep();
+        let skills_path = agent_home.join("skills");
+        if skills_path.exists() {
+            fs::remove_dir_all(&skills_path).map_err(|error| {
+                execution_error(format!(
+                    "could not replace Agent Skills {}: {error}",
+                    skills_path.display()
+                ))
+            })?;
+        }
+        fs::rename(&staged_path, &skills_path).map_err(|error| {
+            execution_error(format!(
+                "could not activate Agent Skills {}: {error}",
+                skills_path.display()
+            ))
+        })?;
+        Ok((agent_home, always))
+    }
+
     fn run_codex(
         &self,
         agent_path: &str,
         service_account_path: &str,
+        thread_path: &str,
         credential_token: &str,
         working_directory: &Path,
-        instructions: &str,
         thread_messages: &str,
         session_id: Option<&str>,
     ) -> Result<CodexRun, DriverError> {
@@ -303,41 +438,25 @@ impl AgentDriver {
         }
         let output_file = tempfile::NamedTempFile::new()
             .map_err(|error| execution_error(format!("could not create output file: {error}")))?;
-        let platform_context = format!(
-            r#"KAS platform context:
-- KAS is the Resource management and reconciliation platform hosting this Agent.
-- Every persistent object is a Resource selected by its metadata.manifest path.
-- Your Agent Resource path is {agent_path}.
-- Your ServiceAccount path is {service_account_path}.
-- Use the KAS REST API at $KAS_API with `Authorization: Bearer $KAS_TOKEN`.
-- File content is served separately at $KAS_FILE_API and uses the same Bearer token.
-- Upload a new File with:
-  curl -sS -H "Authorization: Bearer $KAS_TOKEN" \
-    -F "content=@<local-path>" \
-    "$KAS_FILE_API/files?path=/files/<new-unique-name>"
-- File upload is create-only. Always choose a new path; an existing File path cannot be overwritten.
-- Read your own Resource with:
-  curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "path=$KAS_AGENT_PATH" "$KAS_API/resources/by-path"
-- List Message Resources with:
-  curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "manifest=/manifests/message" "$KAS_API/resources"
-- List Thread Resources with:
-  curl -sS -G -H "Authorization: Bearer $KAS_TOKEN" --data-urlencode "manifest=/manifests/thread" "$KAS_API/resources"
-- Create a Message with:
-  curl -sS -H "Authorization: Bearer $KAS_TOKEN" -H "Content-Type: application/json" \
-    -d '{{"metadata":{{"path":"/messages/example","manifest":"/manifests/message","name":"example"}},"spec":{{"role":"system","body":"example"}}}}' \
-    "$KAS_API/resources"
-- Operations are restricted by the RBAC permissions of your ServiceAccount.
-- Never print, persist, or place $KAS_TOKEN in a Resource, Message, Link, or file."#
+        let (agent_codex_home, always_skills) = self.prepare_skills(agent_path)?;
+        let required_skills = always_skills
+            .iter()
+            .map(|name| format!("${name}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let kas_context = kas_bootstrap_context(
+            agent_path,
+            service_account_path,
+            thread_path,
+            &required_skills,
         );
         let prompt = if session_id.is_some() {
             format!(
-                "KAS Thread update.\n\nCurrent Agent instructions:\n{}\n\nNew messages since your previous turn:\n{thread_messages}\n\nRespond to the latest Message that mentioned you.",
-                instructions.trim()
+                "KAS Thread update.\n\n{kas_context}\n\nNew messages since your previous turn:\n{thread_messages}\n\nRespond to the latest Message that mentioned you."
             )
         } else {
             format!(
-                "{platform_context}\n\nAgent instructions:\n{}\n\nThread history through the Message that mentioned you:\n{thread_messages}\n\nRespond to the latest Message that mentioned you.",
-                instructions.trim()
+                "{kas_context}\n\nThread history through the Message that mentioned you:\n{thread_messages}\n\nRespond to the latest Message that mentioned you."
             )
         };
         let mut command = Command::new(&self.codex);
@@ -368,15 +487,15 @@ impl AgentDriver {
             .env_remove("KAS_PACKAGE_ROOT")
             .env_remove("KAS_DATA_DIR")
             .env("KAS_API", &self.api)
+            .env("KAS_FILE_API", &self.file_api)
             .env("KAS_TOKEN", credential_token)
             .env("KAS_AGENT_PATH", agent_path)
             .env("KAS_SERVICE_ACCOUNT_PATH", service_account_path)
+            .env("KAS_THREAD_PATH", thread_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(codex_home) = &self.codex_home {
-            command.env("CODEX_HOME", codex_home);
-        }
+        command.env("CODEX_HOME", agent_codex_home);
         let mut child = command.spawn().map_err(|error| {
             execution_error(format!(
                 "could not start Codex executable {}: {error}",
@@ -436,9 +555,19 @@ impl AgentDriver {
     fn identity_mutations(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
         let service_account_path = format!("{}/service-account", resource.path);
         let role_binding_path = format!("{}/role-binding", resource.path);
+        let skill_role_path = format!("{}/skill-role", resource.path);
+        let skill_role_binding_path = format!("{}/skill-role-binding", resource.path);
         let link_path = format!("{}/links/service-account", resource.path);
+        let kas_skill_link_path = format!("{}/links/skills/kas", resource.path);
         let mut mutations = Vec::new();
-        for path in [&link_path, &role_binding_path, &service_account_path] {
+        for path in [
+            &kas_skill_link_path,
+            &link_path,
+            &skill_role_binding_path,
+            &skill_role_path,
+            &role_binding_path,
+            &service_account_path,
+        ] {
             if let Some(child) = self.fetch_resource(path)? {
                 if child.metadata.state != kas_core::STATE_DELETED {
                     mutations.push(Mutation::DeleteResource {
@@ -477,6 +606,72 @@ impl AgentDriver {
                 ),
             });
         }
+        if self.fetch_resource(&skill_role_path)?.is_none() {
+            mutations.push(Mutation::CreateResource {
+                resource: planned(
+                    skill_role_path.clone(),
+                    ROLE_MANIFEST,
+                    format!("{}-agent-skills", resource_name(&resource.path)),
+                    serde_json::to_value(RoleSpec {
+                        description: format!(
+                            "Allow {} to manage its own Skills and assignments.",
+                            resource.path
+                        ),
+                        rules: vec![
+                            RbacRuleSpec {
+                                manifests: vec![SKILL_MANIFEST.into()],
+                                verbs: vec!["get".into(), "list".into()],
+                                paths: vec![
+                                    "/skills/**".into(),
+                                    "/users/**/skills/**".into(),
+                                    "/agents/**/skills/**".into(),
+                                ],
+                            },
+                            RbacRuleSpec {
+                                manifests: vec![SKILL_MANIFEST.into()],
+                                verbs: vec!["create".into(), "update".into(), "delete".into()],
+                                paths: vec![format!("{}/skills/**", resource.path)],
+                            },
+                            RbacRuleSpec {
+                                manifests: vec![FILE_MANIFEST.into()],
+                                verbs: vec!["upload".into(), "download".into()],
+                                paths: vec![format!("/files{}/skills/**", resource.path)],
+                            },
+                            RbacRuleSpec {
+                                manifests: vec![LINK_MANIFEST.into()],
+                                verbs: vec![
+                                    "get".into(),
+                                    "list".into(),
+                                    "create".into(),
+                                    "update".into(),
+                                    "delete".into(),
+                                ],
+                                paths: vec![
+                                    format!("{}/links/skills/**", resource.path),
+                                    format!("{}/skills/**", resource.path),
+                                ],
+                            },
+                        ],
+                        system_role: None,
+                    })
+                    .map_err(|error| execution_error(error.to_string()))?,
+                ),
+            });
+        }
+        if self.fetch_resource(&skill_role_binding_path)?.is_none() {
+            mutations.push(Mutation::CreateResource {
+                resource: planned(
+                    skill_role_binding_path,
+                    ROLE_BINDING_MANIFEST,
+                    format!("{}-agent-skills", resource_name(&resource.path)),
+                    serde_json::to_value(RoleBindingSpec {
+                        role: skill_role_path,
+                        subjects: vec![service_account_path.clone()],
+                    })
+                    .map_err(|error| execution_error(error.to_string()))?,
+                ),
+            });
+        }
         if self.fetch_resource(&link_path)?.is_none() {
             mutations.push(Mutation::CreateResource {
                 resource: link_resource(
@@ -484,6 +679,22 @@ impl AgentDriver {
                     SERVICE_ACCOUNT_RELATION,
                     resource.path.clone(),
                     service_account_path,
+                )?,
+            });
+        }
+        if self.fetch_resource(KAS_SKILL_PATH)?.is_none() {
+            return Err(execution_error(format!(
+                "required platform Skill {KAS_SKILL_PATH} is not installed"
+            )));
+        }
+        if self.fetch_resource(&kas_skill_link_path)?.is_none() {
+            mutations.push(Mutation::CreateResource {
+                resource: link_resource_with_metadata(
+                    kas_skill_link_path,
+                    USES_RELATION,
+                    resource.path.clone(),
+                    KAS_SKILL_PATH,
+                    json!({"mode": "always"}),
                 )?,
             });
         }
@@ -546,162 +757,171 @@ impl Driver for AgentDriver {
         action: &Resource,
         run: &Resource,
     ) -> Result<DriverExecution, DriverError> {
-        if action.path != MESSAGE_ACTION {
-            return Err(DriverError::UnsupportedAction(action.path.clone()));
-        }
-        let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
-            .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
-        let run_spec: RunSpec = serde_json::from_value(run.spec.clone())
-            .map_err(|error| execution_error(format!("invalid Run spec: {error}")))?;
-        let message_path = run_spec
-            .input
-            .get("message_path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| execution_error("message action requires input.message_path"))?;
-        let thread_path = run_spec
-            .input
-            .get("thread_path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| execution_error("message action requires input.thread_path"))?;
-        let message = self
-            .fetch_resource(message_path)?
-            .ok_or_else(|| execution_error(format!("Message {message_path} does not exist")))?;
-        if message.spec.get("body").and_then(Value::as_str).is_none() {
-            return Err(execution_error(format!(
-                "Message {message_path} has no spec.body"
-            )));
-        }
-        let belongs_to_thread = self.fetch_links(message_path)?.into_iter().any(|link| {
-            serde_json::from_value::<LinkSpec>(link.spec).is_ok_and(|spec| {
-                spec.relation == MESSAGE_THREAD
-                    && spec.source == message_path
-                    && spec.target == thread_path
-            })
-        });
-        if !belongs_to_thread {
-            return Err(execution_error(format!(
-                "Message {message_path} does not belong to Thread {thread_path}"
-            )));
-        }
-        let session_path = session_path(thread_path, &resource.path);
-        let session = self.fetch_resource(&session_path)?;
-        if session
-            .as_ref()
-            .is_some_and(|session| session.metadata.state == kas_core::STATE_DELETED)
-        {
-            return Err(execution_error(format!(
-                "Session {session_path} is still being reset"
-            )));
-        }
-        let session_spec = session
-            .as_ref()
-            .map(|session| {
-                serde_json::from_value::<SessionSpec>(session.spec.clone()).map_err(|error| {
-                    execution_error(format!("invalid Session spec at {session_path}: {error}"))
+        let driver = self.clone();
+        let resource = resource.clone();
+        let action = action.clone();
+        let run = run.clone();
+        tokio::task::spawn_blocking(move || {
+            let self_ = &driver;
+            if action.path != MESSAGE_ACTION {
+                return Err(DriverError::UnsupportedAction(action.path.clone()));
+            }
+            let spec: AgentSpec = serde_json::from_value(resource.spec.clone())
+                .map_err(|error| execution_error(format!("invalid Agent spec: {error}")))?;
+            let run_spec: RunSpec = serde_json::from_value(run.spec.clone())
+                .map_err(|error| execution_error(format!("invalid Run spec: {error}")))?;
+            let message_path = run_spec
+                .input
+                .get("message_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| execution_error("message action requires input.message_path"))?;
+            let thread_path = run_spec
+                .input
+                .get("thread_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| execution_error("message action requires input.thread_path"))?;
+            let message = self_
+                .fetch_resource(message_path)?
+                .ok_or_else(|| execution_error(format!("Message {message_path} does not exist")))?;
+            if message.spec.get("body").and_then(Value::as_str).is_none() {
+                return Err(execution_error(format!(
+                    "Message {message_path} has no spec.body"
+                )));
+            }
+            let belongs_to_thread = self_.fetch_links(message_path)?.into_iter().any(|link| {
+                serde_json::from_value::<LinkSpec>(link.spec).is_ok_and(|spec| {
+                    spec.relation == MESSAGE_THREAD
+                        && spec.source == message_path
+                        && spec.target == thread_path
                 })
-            })
-            .transpose()?;
-        if session_spec
-            .as_ref()
-            .is_some_and(|session| session.provider != "codex")
-        {
-            return Err(execution_error(format!(
-                "Session {session_path} is not a Codex Session"
-            )));
-        }
-        let thread_messages = self.thread_messages(
-            thread_path,
-            message_path,
-            session_spec.as_ref().map(|session| session.cursor.as_str()),
-        )?;
-        let service_account_path = format!("{}/service-account", resource.path);
-        let credential = self.issue_agent_credential(&service_account_path)?;
-        let codex_run = self.run_codex(
-            &resource.path,
-            &service_account_path,
-            &credential.token,
-            &spec.working_directory,
-            &spec.instructions,
-            &thread_messages,
-            session_spec
-                .as_ref()
-                .map(|session| session.session_id.as_str()),
-        )?;
-        let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
-        let next_session_spec = serde_json::to_value(SessionSpec {
-            provider: "codex".into(),
-            session_id: codex_run.session_id,
-            cursor: reply_path.clone(),
-        })
-        .map_err(|error| execution_error(error.to_string()))?;
-        let mut mutations = if let Some(session) = session {
-            vec![Mutation::UpdateResource {
-                resource_path: session.path.clone(),
-                expected_revision: session.revision,
-                metadata: None,
-                spec: next_session_spec,
-            }]
-        } else {
-            vec![
-                Mutation::CreateResource {
-                    resource: planned(
-                        session_path.clone(),
-                        SESSION_MANIFEST,
-                        format!(
-                            "{}-{}",
-                            resource_name(thread_path),
-                            resource_name(&resource.path)
-                        ),
-                        next_session_spec,
-                    ),
-                },
-                Mutation::CreateResource {
-                    resource: link_resource(
-                        format!("{session_path}/links/thread"),
-                        THREAD_SESSION,
-                        thread_path,
-                        session_path.clone(),
-                    )?,
-                },
-                Mutation::CreateResource {
-                    resource: link_resource(
-                        format!("{session_path}/links/agent"),
-                        AGENT_SESSION,
-                        resource.path.clone(),
-                        session_path.clone(),
-                    )?,
-                },
-            ]
-        };
-        mutations.push(Mutation::CreateResource {
-            resource: planned(
-                reply_path.clone(),
-                MESSAGE_MANIFEST,
-                "assistant-reply",
-                json!({
-                    "role": "assistant",
-                    "body": codex_run.reply
-                }),
-            ),
-        });
-        for (suffix, relation, target) in [
-            ("authored-by", AUTHORED_BY, resource.path.as_str()),
-            ("replies-to", REPLIES_TO, message_path),
-            ("message-thread", MESSAGE_THREAD, thread_path),
-        ] {
-            mutations.push(Mutation::CreateResource {
-                resource: link_resource(
-                    format!("{reply_path}/links/{suffix}"),
-                    relation,
-                    reply_path.clone(),
-                    target.to_owned(),
-                )?,
             });
-        }
-        Ok(DriverExecution {
-            output: json!({ "reply_message_path": reply_path }),
-            mutations,
+            if !belongs_to_thread {
+                return Err(execution_error(format!(
+                    "Message {message_path} does not belong to Thread {thread_path}"
+                )));
+            }
+            let session_path = session_path(thread_path, &resource.path);
+            let session = self_.fetch_resource(&session_path)?;
+            if session
+                .as_ref()
+                .is_some_and(|session| session.metadata.state == kas_core::STATE_DELETED)
+            {
+                return Err(execution_error(format!(
+                    "Session {session_path} is still being reset"
+                )));
+            }
+            let session_spec = session
+                .as_ref()
+                .map(|session| {
+                    serde_json::from_value::<SessionSpec>(session.spec.clone()).map_err(|error| {
+                        execution_error(format!("invalid Session spec at {session_path}: {error}"))
+                    })
+                })
+                .transpose()?;
+            if session_spec
+                .as_ref()
+                .is_some_and(|session| session.provider != "codex")
+            {
+                return Err(execution_error(format!(
+                    "Session {session_path} is not a Codex Session"
+                )));
+            }
+            let thread_messages = self_.thread_messages(
+                thread_path,
+                message_path,
+                session_spec.as_ref().map(|session| session.cursor.as_str()),
+            )?;
+            let service_account_path = format!("{}/service-account", resource.path);
+            let credential = self_.issue_agent_credential(&service_account_path)?;
+            let codex_run = self_.run_codex(
+                &resource.path,
+                &service_account_path,
+                thread_path,
+                &credential.token,
+                &spec.working_directory,
+                &thread_messages,
+                session_spec
+                    .as_ref()
+                    .map(|session| session.session_id.as_str()),
+            )?;
+            let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
+            let next_session_spec = serde_json::to_value(SessionSpec {
+                provider: "codex".into(),
+                session_id: codex_run.session_id,
+                cursor: reply_path.clone(),
+            })
+            .map_err(|error| execution_error(error.to_string()))?;
+            let mut mutations = if let Some(session) = session {
+                vec![Mutation::UpdateResource {
+                    resource_path: session.path.clone(),
+                    expected_revision: session.revision,
+                    metadata: None,
+                    spec: next_session_spec,
+                }]
+            } else {
+                vec![
+                    Mutation::CreateResource {
+                        resource: planned(
+                            session_path.clone(),
+                            SESSION_MANIFEST,
+                            format!(
+                                "{}-{}",
+                                resource_name(thread_path),
+                                resource_name(&resource.path)
+                            ),
+                            next_session_spec,
+                        ),
+                    },
+                    Mutation::CreateResource {
+                        resource: link_resource(
+                            format!("{session_path}/links/thread"),
+                            THREAD_SESSION,
+                            thread_path,
+                            session_path.clone(),
+                        )?,
+                    },
+                    Mutation::CreateResource {
+                        resource: link_resource(
+                            format!("{session_path}/links/agent"),
+                            AGENT_SESSION,
+                            resource.path.clone(),
+                            session_path.clone(),
+                        )?,
+                    },
+                ]
+            };
+            mutations.push(Mutation::CreateResource {
+                resource: planned(
+                    reply_path.clone(),
+                    MESSAGE_MANIFEST,
+                    "assistant-reply",
+                    json!({
+                        "role": "assistant",
+                        "body": codex_run.reply
+                    }),
+                ),
+            });
+            for (suffix, relation, target) in [
+                ("authored-by", AUTHORED_BY, resource.path.as_str()),
+                ("replies-to", REPLIES_TO, message_path),
+                ("message-thread", MESSAGE_THREAD, thread_path),
+            ] {
+                mutations.push(Mutation::CreateResource {
+                    resource: link_resource(
+                        format!("{reply_path}/links/{suffix}"),
+                        relation,
+                        reply_path.clone(),
+                        target.to_owned(),
+                    )?,
+                });
+            }
+            Ok(DriverExecution {
+                output: json!({ "reply_message_path": reply_path }),
+                mutations,
+            })
         })
+        .await
+        .map_err(|error| execution_error(format!("Agent execution worker failed: {error}")))?
     }
 }
 
@@ -729,6 +949,16 @@ fn link_resource(
     source: impl Into<String>,
     target: impl Into<String>,
 ) -> Result<PlannedResource, DriverError> {
+    link_resource_with_metadata(path, relation, source, target, json!({}))
+}
+
+fn link_resource_with_metadata(
+    path: impl Into<String>,
+    relation: impl Into<String>,
+    source: impl Into<String>,
+    target: impl Into<String>,
+    metadata: Value,
+) -> Result<PlannedResource, DriverError> {
     let path = path.into();
     Ok(planned(
         path.clone(),
@@ -738,7 +968,7 @@ fn link_resource(
             relation: relation.into(),
             source: source.into(),
             target: target.into(),
-            metadata: json!({}),
+            metadata,
         })
         .map_err(|error| execution_error(error.to_string()))?,
     ))
@@ -772,6 +1002,24 @@ fn path_slug(path: &str) -> String {
     slug
 }
 
+fn kas_bootstrap_context(
+    agent_path: &str,
+    service_account_path: &str,
+    thread_path: &str,
+    required_skills: &str,
+) -> String {
+    format!(
+        "You are running as KAS Agent {agent_path}. KAS is a resource-oriented collaboration \
+platform; platform objects and their relationships are represented by Resources and Links. \
+Your KAS identity is ServiceAccount {service_account_path}. The current KAS Thread is \
+{thread_path}. KAS_API, KAS_FILE_API, KAS_TOKEN, KAS_AGENT_PATH, KAS_SERVICE_ACCOUNT_PATH, and \
+KAS_THREAD_PATH are available in the environment. KAS_TOKEN is your scoped credential and must \
+not be disclosed. Required Skills for this run: \
+{required_skills}. Read and follow each required Skill before acting; use $kas for the full KAS \
+protocol and operating instructions."
+    )
+}
+
 fn emitted_session_id(stdout: &[u8]) -> Option<String> {
     String::from_utf8_lossy(stdout)
         .lines()
@@ -794,7 +1042,7 @@ fn execution_error(message: impl Into<String>) -> DriverError {
 
 #[cfg(test)]
 mod tests {
-    use super::{emitted_session_id, session_path};
+    use super::{emitted_session_id, kas_bootstrap_context, session_path};
 
     #[test]
     fn session_path_is_stable_for_a_thread_agent_pair() {
@@ -813,5 +1061,20 @@ mod tests {
             emitted_session_id(output).as_deref(),
             Some("0199a213-81c0-7800-8aa1-bbab2a035a53")
         );
+    }
+
+    #[test]
+    fn bootstrap_context_identifies_the_kas_environment_before_skill_instructions() {
+        let context = kas_bootstrap_context(
+            "/agents/reviewer",
+            "/agents/reviewer/service-account",
+            "/threads/review",
+            "$kas",
+        );
+        assert!(context.contains("running as KAS Agent /agents/reviewer"));
+        assert!(context.contains("ServiceAccount /agents/reviewer/service-account"));
+        assert!(context.contains("current KAS Thread is /threads/review"));
+        assert!(context.contains("KAS_THREAD_PATH"));
+        assert!(context.contains("use $kas for the full KAS protocol"));
     }
 }

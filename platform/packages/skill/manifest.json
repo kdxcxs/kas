@@ -1,0 +1,35 @@
+{
+  "path": "/manifests/skill",
+  "manifest": "/builtin/manifest",
+  "name": "skill",
+  "version": 1,
+  "description": "A stable Skill identity whose immutable ZIP bundle is stored as a File Resource.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "name",
+      "description",
+      "allow_implicit_invocation"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "maxLength": 64
+      },
+      "description": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "allow_implicit_invocation": {
+        "type": "boolean"
+      }
+    },
+    "additionalProperties": false
+  }
+}

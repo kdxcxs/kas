@@ -61,6 +61,20 @@
       },
       {
         "manifests": [
+          "/manifests/skill"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/skills/**",
+          "/users/**/skills/**",
+          "/agents/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/link"
         ],
         "verbs": [

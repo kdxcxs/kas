@@ -1,0 +1,40 @@
+{
+  "metadata": {
+    "path": "./relations/uses",
+    "manifest": "/builtin/relation",
+    "name": "uses"
+  },
+  "spec": {
+    "inverse_name": "agents",
+    "sources": [
+      {
+        "manifest": "/manifests/agent",
+        "paths": [
+          "/agents/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "available",
+            "always"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

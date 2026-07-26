@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const kasTarget = env.KAS_API_URL || 'http://127.0.0.1:3000';
   const fileTarget = env.KAS_FILE_API_URL || 'http://127.0.0.1:3001';
+  const skillTarget = env.KAS_SKILL_API_URL || 'http://127.0.0.1:3002';
 
   return {
     plugins: [svelte()],
@@ -23,6 +24,11 @@ export default defineConfig(({ mode }) => {
           target: fileTarget,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/files-api/, '')
+        },
+        '/skills-api': {
+          target: skillTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/skills-api/, '')
         }
       }
     },

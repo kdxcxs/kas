@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FileApi, KasApi, KasApiError } from './api';
+import { FileApi, KasApi, KasApiError, SkillApi } from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -42,6 +42,40 @@ describe('FileApi', () => {
     expect(request).toHaveBeenCalledWith('/files-api/files/content?path=%2Ffiles%2Fone', {
       headers: { Authorization: 'Bearer secret' }
     });
+  });
+});
+
+describe('SkillApi', () => {
+  it('creates and replaces immutable Skill bundles with Bearer authentication', async () => {
+    const request = vi.fn().mockImplementation(async () =>
+      new Response(
+        JSON.stringify(resourceDocument('/skills/demo', '/manifests/skill', 'demo')),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', request);
+    const bundle = new File(['zip'], 'demo.skill', {
+      type: 'application/vnd.kas.skill+zip'
+    });
+    const api = new SkillApi('/skills-api/', 'secret');
+
+    await api.create('/skills/demo', bundle);
+    await api.update('/skills/demo', 7, bundle);
+
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      '/skills-api/skills?path=%2Fskills%2Fdemo',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { Authorization: 'Bearer secret' },
+        body: expect.any(FormData)
+      })
+    );
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      '/skills-api/skills?path=%2Fskills%2Fdemo&expected_revision=7',
+      expect.objectContaining({ method: 'PATCH' })
+    );
   });
 });
 

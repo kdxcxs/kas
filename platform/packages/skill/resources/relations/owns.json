@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "path": "./relations/owns",
+    "manifest": "/builtin/relation",
+    "name": "owns"
+  },
+  "spec": {
+    "inverse_name": "owner",
+    "sources": [
+      {
+        "manifest": [
+          "/builtin/user",
+          "/manifests/agent"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

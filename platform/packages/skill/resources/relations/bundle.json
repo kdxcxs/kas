@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "path": "./relations/bundle",
+    "manifest": "/builtin/relation",
+    "name": "bundle"
+  },
+  "spec": {
+    "inverse_name": "skill",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/manifests/file"
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

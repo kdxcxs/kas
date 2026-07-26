@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "path": "./roles/driver",
+    "manifest": "/builtin/role",
+    "name": "skill-driver"
+  },
+  "spec": {
+    "description": "Validate Skill bundles and manage their stable Resource, File, and Link lifecycle.",
+    "rules": [
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/skills/**",
+          "/users/**/skills/**",
+          "/agents/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/file"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "upload",
+          "download",
+          "delete"
+        ],
+        "paths": [
+          "/files/skills/**",
+          "/files/users/**/skills/**",
+          "/files/agents/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/skills/**",
+          "/users/**/skills/**",
+          "/agents/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/user",
+          "/builtin/service-account",
+          "/manifests/agent"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/users/**",
+          "/agents/**"
+        ]
+      }
+    ]
+  }
+}

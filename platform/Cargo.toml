@@ -3,6 +3,7 @@ members = [
     "packages/agent/driver",
     "packages/file/driver",
     "packages/message/driver",
+    "packages/skill/driver",
 ]
 resolver = "2"
 
@@ -17,12 +18,14 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
 kas-core = { path = "../crates/kas-core" }
 kas-driver = { path = "../crates/kas-driver" }
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "query", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "multipart", "query", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }

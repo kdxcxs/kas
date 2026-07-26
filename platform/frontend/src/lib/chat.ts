@@ -5,12 +5,14 @@ export const THREAD_MANIFEST = '/manifests/thread';
 export const MESSAGE_MANIFEST = '/manifests/message';
 export const FILE_MANIFEST = '/manifests/file';
 export const SESSION_MANIFEST = '/manifests/session';
+export const SKILL_MANIFEST = '/manifests/skill';
 export const PARTICIPANTS = '/manifests/thread/relations/participants';
 export const AUTHORED_BY = '/manifests/message/relations/authored-by';
 export const MESSAGE_THREAD = '/manifests/message/relations/message-thread';
 export const MENTIONED = '/manifests/message/relations/mentioned';
 export const REPLIES_TO = '/manifests/message/relations/replies-to';
 export const ATTACHED_TO = '/manifests/file/relations/attached-to';
+export const USES_SKILL = '/manifests/skill/relations/uses';
 
 export interface ComposerKeyEvent {
   key: string;

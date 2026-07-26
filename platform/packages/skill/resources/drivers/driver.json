@@ -1,0 +1,34 @@
+{
+  "metadata": {
+    "path": "./driver",
+    "manifest": "/builtin/driver",
+    "name": "skill-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-skill-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      "."
+    ],
+    "args": [],
+    "watches": [
+      {
+        "manifest": "/builtin/link",
+        "paths": [
+          "/skills/**/links/bundle",
+          "/users/**/skills/**/links/bundle",
+          "/agents/**/skills/**/links/bundle"
+        ]
+      }
+    ],
+    "restart": "on_failure"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}

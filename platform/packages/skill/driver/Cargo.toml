@@ -1,5 +1,5 @@
 [package]
-name = "kas-agent-driver"
+name = "kas-skill-driver"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,11 +7,15 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 kas-core.workspace = true
 kas-driver.workspace = true
-kas-skill-driver = { path = "../../skill/driver" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tower-http.workspace = true
+uuid.workspace = true
+zip.workspace = true

@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "path": "/skills/kas",
+    "manifest": ".",
+    "name": "KAS",
+    "state": "pending"
+  },
+  "spec": {
+    "name": "kas",
+    "description": "Use KAS Resources, Links, authentication, Messages, Threads, and Files.",
+    "allow_implicit_invocation": false
+  }
+}

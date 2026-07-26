@@ -14,10 +14,6 @@
       "working_directory"
     ],
     "properties": {
-      "instructions": {
-        "type": "string",
-        "default": ""
-      },
       "working_directory": {
         "type": "string",
         "minLength": 1

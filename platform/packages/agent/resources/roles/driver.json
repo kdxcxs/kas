@@ -55,10 +55,25 @@
         ],
         "verbs": [
           "get",
-          "list"
+          "list",
+          "download"
         ],
         "paths": [
           "/files/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/skill"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/skills/**",
+          "/users/**/skills/**",
+          "/agents/**/skills/**"
         ]
       },
       {
@@ -74,7 +89,9 @@
         "paths": [
           "/agents/**",
           "/threads/**",
-          "/messages/**"
+          "/messages/**",
+          "/skills/**",
+          "/users/**/skills/**"
         ]
       },
       {
@@ -94,6 +111,20 @@
       },
       {
         "manifests": [
+          "/builtin/role"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/agents/**/skill-role"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/role-binding"
         ],
         "verbs": [
@@ -103,7 +134,8 @@
           "delete"
         ],
         "paths": [
-          "/agents/**/role-binding"
+          "/agents/**/role-binding",
+          "/agents/**/skill-role-binding"
         ]
       }
     ]

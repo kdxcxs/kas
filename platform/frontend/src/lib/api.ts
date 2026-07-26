@@ -123,7 +123,10 @@ export class KasApi {
     return (await this.listResources())
       .map((resource) => ({
         kind: kindForManifest(resource.manifest),
-        path: resource.path
+        path: resource.path,
+        name: resource.name,
+        state: resource.status_state || resource.state,
+        manifest: resource.manifest
       }))
       .filter((object) => !kind || object.kind === kind);
   }
@@ -209,6 +212,45 @@ export class FileApi {
     );
     await requireResponse(response);
     return response.blob();
+  }
+}
+
+export class SkillApi {
+  constructor(
+    readonly baseUrl: string,
+    readonly token: string
+  ) {}
+
+  async create(path: string, bundle: File): Promise<Resource> {
+    return this.upload('POST', path, bundle);
+  }
+
+  async update(path: string, expectedRevision: number, bundle: File): Promise<Resource> {
+    return this.upload('PATCH', path, bundle, expectedRevision);
+  }
+
+  private async upload(
+    method: 'POST' | 'PATCH',
+    path: string,
+    bundle: File,
+    expectedRevision?: number
+  ): Promise<Resource> {
+    const form = new FormData();
+    form.append('bundle', bundle, bundle.name);
+    const query = new URLSearchParams({ path });
+    if (expectedRevision !== undefined) {
+      query.set('expected_revision', String(expectedRevision));
+    }
+    const response = await fetch(
+      `${this.baseUrl.replace(/\/$/, '')}/skills?${query}`,
+      {
+        method,
+        headers: { Authorization: `Bearer ${this.token}` },
+        body: form
+      }
+    );
+    await requireResponse(response);
+    return resourceFromDocument((await response.json()) as ResourceDocument);
   }
 }
 

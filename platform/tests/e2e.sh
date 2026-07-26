@@ -39,7 +39,7 @@ failed() {
 trap 'failed "$LINENO"' ERR
 trap cleanup EXIT
 
-for command in cargo curl jq tar uuidgen python3; do
+for command in cargo curl jq tar uuidgen python3 zip; do
   command -v "$command" >/dev/null || {
     echo "missing required command: $command" >&2
     exit 1
@@ -159,14 +159,18 @@ CARGO_TARGET_DIR="$PLATFORM_TARGET" "$PLATFORM_ROOT/scripts/build-packages.sh" "
 
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 FILE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+SKILL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
 FILE_API="http://127.0.0.1:$FILE_PORT"
+SKILL_API="http://127.0.0.1:$SKILL_PORT"
 export KAS_DATA_DIR="$E2E_DIR/data"
 export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
 export KAS_FILE_ADDRESS="127.0.0.1:$FILE_PORT"
 export KAS_FILE_API="$FILE_API"
+export KAS_SKILL_ADDRESS="127.0.0.1:$SKILL_PORT"
+export KAS_SKILL_API="$SKILL_API"
 export KAS_CODEX_BIN="$CODEX_BIN"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 export KAS_CODEX_HOME="$E2E_DIR/codex-home"
@@ -203,9 +207,10 @@ install_package() {
 THREAD_PACKAGE="$(install_package "$E2E_DIR/packages/thread.kas")"
 SESSION_PACKAGE="$(install_package "$E2E_DIR/packages/session.kas")"
 FILE_PACKAGE="$(install_package "$E2E_DIR/packages/file.kas")"
+SKILL_PACKAGE="$(install_package "$E2E_DIR/packages/skill.kas")"
 AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
-for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE"; do
+for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE"; do
   jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
 
@@ -220,6 +225,11 @@ for path in \
   /manifests/file \
   /manifests/file/relations/attached-to \
   /manifests/file/relations/uploaded-by \
+  /manifests/skill \
+  /manifests/skill/relations/bundle \
+  /manifests/skill/relations/owns \
+  /manifests/skill/relations/uses \
+  /skills/kas \
   /manifests/message \
   /manifests/message/relations/authored-by \
   /manifests/message/relations/message-thread \
@@ -234,9 +244,11 @@ fi
 
 AGENT_DRIVER="$(wait_for_state "/manifests/agent/driver" running)"
 FILE_DRIVER="$(wait_for_state "/manifests/file/driver" running)"
+SKILL_DRIVER="$(wait_for_state "/manifests/skill/driver" running)"
 MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
 jq -e '.spec == .status.spec' <<<"$AGENT_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FILE_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$SKILL_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$MESSAGE_DRIVER" >/dev/null
 for _ in $(seq 1 200); do
   if command curl --fail --silent "$FILE_API/health" >/dev/null 2>&1; then
@@ -245,11 +257,20 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 command curl --fail --silent "$FILE_API/health" | jq -e '.ok == true' >/dev/null
+for _ in $(seq 1 200); do
+  if command curl --fail --silent "$SKILL_API/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+command curl --fail --silent "$SKILL_API/health" | jq -e '.ok == true' >/dev/null
+wait_for_state "/skills/kas" available >/dev/null
 
 mkdir -p "$E2E_DIR/workspace"
 AGENT_PATH="/agents/e2e"
 OBSERVER_PATH="/agents/observer"
 PROOF_PATH="/messages/e2e-agent-network-proof"
+SKILL_PROOF_PATH="/messages/e2e-agent-skill-proof"
 FILE_PROOF="KAS_FILE_$(uuidgen | tr '[:lower:]' '[:upper:]')"
 SESSION_SECRET="KAS_SESSION_$(uuidgen | tr '[:lower:]' '[:upper:]')"
 printf '%s' "$FILE_PROOF" >"$E2E_DIR/attachment.bin"
@@ -299,42 +320,103 @@ create_link "$FILE_ONLY_MESSAGE/links/attachments/e2e-input" \
   "/manifests/file/relations/attached-to" "$FILE_PATH" "$FILE_ONLY_MESSAGE"
 wait_for_state "$FILE_ONLY_MESSAGE" available >/dev/null
 
+SKILL_V1_BUNDLE="$E2E_DIR/e2e-v1.skill"
+SKILL_V2_BUNDLE="$E2E_DIR/e2e-v2.skill"
+(cd "$PLATFORM_ROOT/tests/fixtures/skills/e2e-v1" && zip -qr "$SKILL_V1_BUNDLE" .)
+(cd "$PLATFORM_ROOT/tests/fixtures/skills/e2e-v2" && zip -qr "$SKILL_V2_BUNDLE" .)
+
+INVALID_SKILL_DIR="$E2E_DIR/invalid-skill"
+cp -R "$PLATFORM_ROOT/tests/fixtures/skills/e2e-v1" "$INVALID_SKILL_DIR"
+ln -s ../../outside "$INVALID_SKILL_DIR/scripts-link"
+INVALID_SKILL_BUNDLE="$E2E_DIR/invalid.skill"
+(cd "$INVALID_SKILL_DIR" && zip -qry "$INVALID_SKILL_BUNDLE" .)
+INVALID_SKILL_STATUS="$(
+  command curl --silent --output "$E2E_DIR/invalid-skill.json" --write-out "%{http_code}" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -F "bundle=@$INVALID_SKILL_BUNDLE;type=application/zip" \
+    "$SKILL_API/skills?path=/skills/invalid"
+)"
+[[ "$INVALID_SKILL_STATUS" == "400" ]]
+if get_resource "/skills/invalid" >/dev/null 2>&1; then
+  echo "invalid symlink Skill Bundle created a Skill Resource" >&2
+  false
+fi
+
+SKILL_PATH="/skills/e2e-bundle"
+SKILL="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -F "bundle=@$SKILL_V1_BUNDLE;type=application/zip" \
+    "$SKILL_API/skills?path=$SKILL_PATH"
+)"
+jq -e --arg path "$SKILL_PATH" '
+  .metadata.path == $path
+  and .metadata.manifest == "/manifests/skill"
+  and .spec.name == "e2e-bundle"
+' <<<"$SKILL" >/dev/null
+wait_for_state "$SKILL_PATH" available >/dev/null
+INITIAL_SKILL_LINK="$(get_resource "$SKILL_PATH/links/bundle")"
+INITIAL_SKILL_FILE="$(jq -r '.spec.target' <<<"$INITIAL_SKILL_LINK")"
+get_resource "$INITIAL_SKILL_FILE" >/dev/null
+get_resource "$SKILL_PATH/links/owner" >/dev/null
+
 create_agent() {
-  local path="$1" name="$2" instructions="$3"
+  local path="$1" name="$2"
   post_resource "$(
     jq -n \
       --arg path "$path" \
       --arg name "$name" \
-      --arg cwd "$E2E_DIR/workspace" \
-      --arg instructions "$instructions" '{
+      --arg cwd "$E2E_DIR/workspace" '{
         metadata: {
           path: $path,
           manifest: "/manifests/agent",
           name: $name
         },
         spec: {
-          instructions: $instructions,
           working_directory: $cwd
         }
       }'
   )" >/dev/null
 }
 
-create_agent "$AGENT_PATH" "e2e-agent" \
-  "Follow the latest user Message exactly. Preserve facts the user asks you to remember in this Codex Session."
-create_agent "$OBSERVER_PATH" "observer" "Reply with exactly OBSERVER."
+create_agent "$AGENT_PATH" "e2e-agent"
+create_agent "$OBSERVER_PATH" "observer"
 wait_for_state "$AGENT_PATH" available >/dev/null
 wait_for_state "$OBSERVER_PATH" available >/dev/null
 
 for path in \
   "$AGENT_PATH/service-account" \
   "$AGENT_PATH/role-binding" \
+  "$AGENT_PATH/skill-role" \
+  "$AGENT_PATH/skill-role-binding" \
   "$AGENT_PATH/links/service-account" \
+  "$AGENT_PATH/links/skills/kas" \
   "$OBSERVER_PATH/service-account" \
   "$OBSERVER_PATH/role-binding" \
+  "$OBSERVER_PATH/skill-role" \
+  "$OBSERVER_PATH/skill-role-binding" \
+  "$OBSERVER_PATH/links/skills/kas" \
   "$OBSERVER_PATH/links/service-account"; do
   get_resource "$path" >/dev/null
 done
+post_resource "$(
+  jq -n \
+    --arg path "$AGENT_PATH/links/skills/e2e-bundle" \
+    --arg source "$AGENT_PATH" \
+    --arg target "$SKILL_PATH" '{
+      metadata: {
+        path: $path,
+        manifest: "/builtin/link",
+        name: "e2e-bundle"
+      },
+      spec: {
+        relation: "/manifests/skill/relations/uses",
+        source: $source,
+        target: $target,
+        metadata: {mode: "available"}
+      }
+    }'
+)" >/dev/null
 OBSERVER_TOKEN="$(
   request --fail --silent \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -343,6 +425,26 @@ OBSERVER_TOKEN="$(
     "$API/credentials/issue" |
     jq -r '.token'
 )"
+OBSERVER_SKILL_PATH="$OBSERVER_PATH/skills/self-created"
+OBSERVER_SKILL="$(
+  request --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -F "bundle=@$SKILL_V1_BUNDLE;type=application/zip" \
+    "$SKILL_API/skills?path=$OBSERVER_SKILL_PATH"
+)"
+jq -e --arg path "$OBSERVER_SKILL_PATH" '
+  .metadata.path == $path and .metadata.manifest == "/manifests/skill"
+' <<<"$OBSERVER_SKILL" >/dev/null
+wait_for_state "$OBSERVER_SKILL_PATH" available >/dev/null
+jq -e --arg owner "$OBSERVER_PATH" '.spec.source == $owner' \
+  <<<"$(get_resource "$OBSERVER_SKILL_PATH/links/owner")" >/dev/null
+CROSS_AGENT_SKILL_STATUS="$(
+  command curl --silent --output "$E2E_DIR/cross-agent-skill.json" --write-out "%{http_code}" \
+    -H "Authorization: Bearer $OBSERVER_TOKEN" \
+    -F "bundle=@$SKILL_V1_BUNDLE;type=application/zip" \
+    "$SKILL_API/skills?path=$AGENT_PATH/skills/forbidden"
+)"
+[[ "$CROSS_AGENT_SKILL_STATUS" == "403" ]]
 command curl --fail --silent --get \
   -H "Authorization: Bearer $OBSERVER_TOKEN" \
   --data-urlencode "path=$FILE_PATH" \
@@ -391,7 +493,7 @@ MESSAGE_PATH="/messages/e2e-user"
 post_resource "$(
   jq -n \
     --arg path "$MESSAGE_PATH" \
-    --arg body "@e2e Remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file; do not use a placeholder or angle brackets. After the POST succeeds, read the created Resource back and verify spec.body still equals the downloaded text, then reply with exactly CREATED and no other text." '{
+    --arg body "@e2e Use \$e2e-bundle and remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file. Also POST a Message Resource at $SKILL_PROOF_PATH with name e2e-agent-skill-proof, spec.role system, and spec.body set to the exact Skill bundle marker supplied by \$e2e-bundle. After both POST requests succeed, read both Resources back and verify their bodies, then reply with exactly CREATED and no other text." '{
     metadata: {
       path: $path,
       manifest: "/manifests/message",
@@ -442,6 +544,11 @@ jq -e --arg proof "$FILE_PROOF" '
   .metadata.manifest == "/manifests/message"
   and .spec == {role: "system", body: $proof}
 ' <<<"$PROOF" >/dev/null
+SKILL_PROOF="$(get_resource "$SKILL_PROOF_PATH")"
+jq -e '
+  .metadata.manifest == "/manifests/message"
+  and .spec == {role: "system", body: "KAS_SKILL_BUNDLE_V1"}
+' <<<"$SKILL_PROOF" >/dev/null
 
 REPLY_PATH="$(jq -r '.spec.output.reply_message_path' <<<"$RUN")"
 REPLY="$(get_resource "$REPLY_PATH")"
@@ -496,10 +603,30 @@ fi
 control_driver "/manifests/agent/driver" stopped
 control_driver "/manifests/agent/driver" running
 
+SKILL_BEFORE_UPDATE="$(get_resource "$SKILL_PATH")"
+SKILL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$SKILL_BEFORE_UPDATE")"
+UPDATED_SKILL="$(
+  request --fail-with-body --silent --show-error --request PATCH \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -F "bundle=@$SKILL_V2_BUNDLE;type=application/zip" \
+    "$SKILL_API/skills?path=$SKILL_PATH&expected_revision=$SKILL_REVISION"
+)"
+jq -e --arg path "$SKILL_PATH" '
+  .metadata.path == $path and .spec.name == "e2e-bundle"
+' <<<"$UPDATED_SKILL" >/dev/null
+wait_for_state "$SKILL_PATH" available >/dev/null
+UPDATED_SKILL_LINK="$(get_resource "$SKILL_PATH/links/bundle")"
+UPDATED_SKILL_FILE="$(jq -r '.spec.target' <<<"$UPDATED_SKILL_LINK")"
+[[ "$UPDATED_SKILL_FILE" != "$INITIAL_SKILL_FILE" ]]
+[[ "$(jq -r '.metadata.path' <<<"$UPDATED_SKILL_LINK")" == "$SKILL_PATH/links/bundle" ]]
+get_resource "$UPDATED_SKILL_FILE" >/dev/null
+
 SECOND_MESSAGE_PATH="/messages/e2e-user-resume"
+UPDATED_SKILL_PROOF_PATH="/messages/e2e-agent-skill-update-proof"
 post_resource "$(
   jq -n \
-    --arg path "$SECOND_MESSAGE_PATH" '{
+    --arg path "$SECOND_MESSAGE_PATH" \
+    --arg body "@e2e Use \$e2e-bundle and POST a Message Resource at $UPDATED_SKILL_PROOF_PATH with name e2e-agent-skill-update-proof, spec.role system, and spec.body set to its exact current Skill bundle marker. Then reply with exactly the secret I asked you to remember in the previous turn; do not add the marker to your reply." '{
       metadata: {
         path: $path,
         manifest: "/manifests/message",
@@ -507,7 +634,7 @@ post_resource "$(
       },
       spec: {
         role: "user",
-        body: ("@e2e Reply with exactly the secret I asked you to remember in the previous turn. The expected format starts with KAS_NETWORK_, but do not invent a new value.")
+        body: $body
       }
     }'
 )" >/dev/null
@@ -531,6 +658,11 @@ SECOND_REPLY="$(get_resource "$SECOND_REPLY_PATH")"
 jq -e --arg secret "$SESSION_SECRET" '
   .spec == {role: "assistant", body: $secret}
 ' <<<"$SECOND_REPLY" >/dev/null
+UPDATED_SKILL_PROOF="$(get_resource "$UPDATED_SKILL_PROOF_PATH")"
+jq -e '
+  .metadata.manifest == "/manifests/message"
+  and .spec == {role: "system", body: "KAS_SKILL_BUNDLE_V2"}
+' <<<"$UPDATED_SKILL_PROOF" >/dev/null
 
 SESSION="$(wait_for_state "$SESSION_PATH" available)"
 jq -e --arg id "$SESSION_ID" --arg cursor "$SECOND_REPLY_PATH" '
@@ -568,6 +700,7 @@ DELETED_DOWNLOAD_STATUS="$(
 
 control_driver "/manifests/message/driver" stopped
 control_driver "/manifests/agent/driver" stopped
+control_driver "/manifests/skill/driver" stopped
 control_driver "/manifests/file/driver" stopped
 
-echo "KAS platform File and persistent Session end-to-end test passed"
+echo "KAS platform Skill, File, and persistent Session end-to-end test passed"

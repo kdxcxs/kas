@@ -75,7 +75,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0 6px 36px;
+  margin: 0 6px 24px;
 }
 
 .brand-mark {
@@ -116,6 +116,146 @@ textarea:focus-visible {
   font-weight: 700;
   letter-spacing: 0.13em;
   text-transform: uppercase;
+}
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.platform-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.platform-nav button,
+.current-thread-card {
+  width: 100%;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.platform-nav button {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 7px 10px;
+  color: #cfd4c7;
+  background: transparent;
+  border-radius: 11px;
+  transition:
+    color 140ms ease,
+    background 140ms ease;
+}
+
+.platform-nav button:hover:not(:disabled),
+.platform-nav button.active {
+  color: var(--warm);
+  background: #252b20;
+}
+
+.platform-nav button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.platform-nav button > span:last-child,
+.platform-nav strong,
+.platform-nav small {
+  display: block;
+  min-width: 0;
+}
+
+.platform-nav strong {
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.platform-nav small {
+  margin-top: 2px;
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.nav-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+  background: #292f25;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.platform-nav button.active .nav-icon {
+  color: #11140e;
+  background: var(--lime);
+}
+
+.resource-title {
+  margin-top: 18px;
+}
+
+.resource-nav {
+  display: grid;
+  gap: 2px;
+}
+
+.resource-nav button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 10px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.resource-nav button:hover,
+.resource-nav button.active {
+  color: var(--warm);
+  background: #20251c;
+}
+
+.resource-nav button.active {
+  box-shadow: inset 2px 0 var(--lime);
+}
+
+.resource-nav small {
+  color: var(--quiet);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.context-title {
+  margin-top: 18px;
+}
+
+.current-thread-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 10px;
+  background: #1d211a;
+  border: 1px solid #2c3327;
+  border-radius: 12px;
+}
+
+.current-thread-card:hover {
+  background: #252b20;
 }
 
 .sidebar-title-actions {
@@ -428,11 +568,146 @@ button:disabled {
 }
 
 .agent-management,
+.skill-management,
 .thread-management {
   grid-row: 4;
   min-height: 0;
   padding: 8px 34px 36px;
   overflow-y: auto;
+}
+
+.skill-manager-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(420px, 1.2fr);
+  gap: 16px;
+  min-height: 500px;
+}
+
+.skill-index,
+.skill-editor {
+  min-width: 0;
+  padding: 16px;
+  background: #151912;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+}
+
+.skill-create {
+  display: grid;
+  gap: 9px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.skill-create input,
+.skill-replacement input {
+  width: 100%;
+  padding: 10px 11px;
+  color: var(--warm);
+  background: #10130f;
+  border: 1px solid #30372a;
+  border-radius: 9px;
+}
+
+.skill-index nav {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.skill-index nav button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px;
+  color: var(--muted);
+  background: #191d16;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.skill-index nav button.active {
+  color: var(--warm);
+  background: #20261b;
+  border-color: #3d4834;
+}
+
+.skill-index nav strong,
+.skill-index nav code,
+.skill-index nav small {
+  display: block;
+}
+
+.skill-index nav code {
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 9px;
+}
+
+.skill-index nav small {
+  color: var(--lime-deep);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.skill-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.skill-editor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.skill-editor h2 {
+  margin: 3px 0 5px;
+  color: var(--warm);
+}
+
+.skill-editor code,
+.skill-description {
+  overflow-wrap: anywhere;
+}
+
+.skill-description {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.skill-replacement {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 13px;
+  background: #11140f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.skill-replacement label {
+  flex: 1;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.skill-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 34px;
+}
+
+.skill-actions small {
+  color: var(--quiet);
 }
 
 .thread-manager-layout {
@@ -781,6 +1056,20 @@ button:disabled {
   font-weight: 650;
 }
 
+.object-list-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.object-list-title small {
+  flex: 0 0 auto;
+  color: var(--lime-deep);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
 .object-list code,
 .object-detail code {
   color: var(--quiet);
@@ -844,6 +1133,310 @@ button:disabled {
   font-weight: 800;
   letter-spacing: 0.09em;
   text-transform: uppercase;
+}
+
+.resource-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.resource-overview article,
+.property-grid article {
+  min-width: 0;
+  padding: 13px;
+  background: #121510;
+  border: 1px solid #292f25;
+  border-radius: 10px;
+}
+
+.resource-overview small,
+.resource-overview strong,
+.resource-overview span,
+.resource-overview code {
+  display: block;
+}
+
+.resource-overview small,
+.property-grid article > small,
+.rule-card small,
+.binding-layout > div > small,
+.driver-scope small,
+.link-route-large small {
+  color: var(--quiet);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.resource-overview strong {
+  margin: 7px 0 4px;
+  overflow: hidden;
+  color: var(--warm);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.resource-overview span {
+  color: var(--quiet);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.resource-overview code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-configuration {
+  margin-top: 22px;
+}
+
+.resource-description {
+  margin: 0 0 10px;
+  padding: 13px 15px;
+  color: #bcc4b4;
+  background: #121510;
+  border: 1px solid #292f25;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.property-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.property-grid article > strong {
+  display: block;
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+  color: var(--warm);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.value-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.value-chips span {
+  padding: 4px 7px;
+  color: #dce7cf;
+  background: #252c20;
+  border: 1px solid #333d2c;
+  border-radius: 999px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+}
+
+.nested-fields {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.nested-fields div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 6px;
+  border-top: 1px solid #272d23;
+}
+
+.nested-fields dt,
+.nested-fields dd {
+  margin: 0;
+  font-size: 9px;
+}
+
+.nested-fields dt {
+  color: var(--quiet);
+}
+
+.nested-fields dd {
+  color: #d6dccf;
+  text-align: right;
+}
+
+.rule-list {
+  display: grid;
+  gap: 9px;
+}
+
+.rule-card {
+  display: grid;
+  grid-template-columns: 100px minmax(120px, 0.7fr) minmax(160px, 1fr) minmax(180px, 1.3fr);
+  gap: 14px;
+  padding: 13px;
+  background: #121510;
+  border: 1px solid #292f25;
+  border-radius: 11px;
+}
+
+.rule-card header {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.rule-card header strong {
+  color: var(--warm);
+  font-size: 11px;
+}
+
+.rule-card header span {
+  color: var(--quiet);
+  font-size: 9px;
+}
+
+.path-stack {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.path-stack code {
+  display: block;
+  padding: 5px 7px;
+  overflow: hidden;
+  color: #bac5af;
+  background: #1a1f17;
+  border-radius: 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.binding-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.binding-layout > div {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  padding: 14px;
+  background: #121510;
+  border: 1px solid #292f25;
+  border-radius: 11px;
+}
+
+.binding-layout button,
+.link-route-large button {
+  min-width: 0;
+  padding: 10px;
+  color: inherit;
+  background: #1b2018;
+  border: 1px solid #2b3326;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.binding-layout button:hover,
+.link-route-large button:hover {
+  border-color: #60724c;
+}
+
+.binding-layout button .object-kind-pill {
+  margin-right: 7px;
+}
+
+.link-route-large {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.75fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.link-route-large button {
+  display: grid;
+  align-content: center;
+  gap: 7px;
+}
+
+.link-route-large .link-relation {
+  color: var(--lime);
+  text-align: center;
+}
+
+.link-route-large code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schema-table {
+  margin-top: 10px;
+  background: #121510;
+  border: 1px solid #292f25;
+  border-radius: 11px;
+  overflow: hidden;
+}
+
+.schema-table header,
+.schema-table article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 100px 80px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 13px;
+}
+
+.schema-table header {
+  color: var(--muted);
+  background: #191d16;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.schema-table article + article {
+  border-top: 1px solid #282e24;
+}
+
+.schema-table article strong {
+  color: var(--warm);
+  font-size: 10px;
+}
+
+.schema-table article span,
+.schema-table article small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.driver-scope {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.driver-scope > div {
+  padding: 13px;
+  background: #121510;
+  border: 1px solid #292f25;
+  border-radius: 10px;
+}
+
+.configuration-empty {
+  padding: 24px;
+  color: var(--quiet);
+  background: #121510;
+  border: 1px dashed #32392d;
+  border-radius: 10px;
+  font-size: 11px;
+  text-align: center;
 }
 
 .object-relations,
@@ -1696,18 +2289,38 @@ button:disabled {
     display: none;
   }
 
-  .thread-list {
+  .sidebar-scroll {
+    overflow: visible;
+    padding: 0;
+  }
+
+  .platform-nav {
     flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
     padding-bottom: 3px;
   }
 
-  .thread-item {
+  .platform-nav button {
     width: auto;
-    min-width: 150px;
+    min-width: max-content;
+    padding: 7px 10px;
   }
 
-  .empty-thread {
-    width: auto;
+  .platform-nav small {
+    display: none;
+  }
+
+  .nav-icon {
+    flex-basis: 25px;
+    width: 25px;
+    height: 25px;
+  }
+
+  .resource-nav,
+  .current-thread-card,
+  .sidebar-scroll > .empty-thread {
+    display: none;
   }
 
   .sidebar-footer {
@@ -1752,12 +2365,17 @@ button:disabled {
   }
 
   .agent-management,
+  .skill-management,
   .thread-management {
     padding: 4px 18px 24px;
     overflow-y: visible;
   }
 
   .thread-manager-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .skill-manager-layout {
     grid-template-columns: 1fr;
   }
 
@@ -1785,6 +2403,20 @@ button:disabled {
 
   .object-detail {
     overflow-y: visible;
+  }
+
+  .resource-overview,
+  .property-grid,
+  .binding-layout,
+  .driver-scope,
+  .link-route-large,
+  .rule-card {
+    grid-template-columns: 1fr;
+  }
+
+  .schema-table header,
+  .schema-table article {
+    grid-template-columns: minmax(0, 1fr) 70px 65px;
   }
 
   .relation-route {
