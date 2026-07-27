@@ -412,8 +412,8 @@ Resource 会呈现为：
 
 ```json
 {
+  "path": "/agents/reviewer",
   "metadata": {
-    "path": "/agents/reviewer",
     "manifest": "/manifests/agent",
     "name": "reviewer",
     "state": "available",
@@ -436,7 +436,6 @@ Resource 会呈现为：
   "spec": {"model": "gpt-5"},
   "status": {
     "metadata": {
-      "path": "/agents/reviewer",
       "manifest": "/manifests/agent",
       "name": "reviewer",
       "state": "available",

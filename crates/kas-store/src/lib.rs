@@ -2140,17 +2140,62 @@ fn next_reconciliation_in(
     tx: &Transaction<'_>,
     driver_path: &str,
 ) -> Result<Option<(String, u64)>, StoreError> {
-    for resource in all_resources_in(tx)? {
-        let Some(expected) = resource.metadata.kas.observed.get(driver_path) else {
-            continue;
-        };
-        let owner = driver_for_resource(tx, &resource)?;
-        let status_drifted =
-            owner.as_deref() == Some(driver_path) && !desired_document_matches_status(&resource);
-        if resource.status.metadata.kas.observed.get(driver_path) != Some(expected)
-            || status_drifted
-        {
-            return Ok(Some((resource.path.clone(), expected.driver_revision)));
+    let pending = tx
+        .query_row(
+            "SELECT resources.path,
+                    json_extract(expected.value,'$.driver_revision')
+             FROM resources
+             JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
+             LEFT JOIN json_each(resources.status,'$.metadata.\"[kas]\".observed') AS actual
+               ON actual.key=expected.key
+             WHERE expected.key=?
+               AND (
+                 actual.key IS NULL
+                 OR json_extract(actual.value,'$.driver_revision')
+                    != json_extract(expected.value,'$.driver_revision')
+                 OR json_extract(actual.value,'$.resource_revision')
+                    != json_extract(expected.value,'$.resource_revision')
+               )
+             ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
+                      resources.path
+             LIMIT 1",
+            [driver_path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+        )
+        .optional()?;
+    if pending.is_some() {
+        return Ok(pending);
+    }
+
+    let driver = resource_in(tx, driver_path)?;
+    let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
+    for manifest in spec.manages {
+        let drifted = tx
+            .query_row(
+                "SELECT resources.path,
+                        json_extract(expected.value,'$.driver_revision')
+                 FROM resources
+                 JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
+                 WHERE expected.key=?
+                   AND json_extract(resources.metadata,'$.manifest')=?
+                   AND (
+                     json_remove(resources.metadata,'$.\"[kas]\".observed')
+                       IS NOT json_remove(
+                         json_extract(resources.status,'$.metadata'),
+                         '$.\"[kas]\".observed'
+                       )
+                     OR json(resources.spec)
+                       IS NOT json_quote(json_extract(resources.status,'$.spec'))
+                   )
+                 ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
+                          resources.path
+                 LIMIT 1",
+                params![driver_path, manifest],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+            )
+            .optional()?;
+        if drifted.is_some() {
+            return Ok(drifted);
         }
     }
     Ok(None)
@@ -2361,19 +2406,6 @@ fn maybe_finish_deleted_resource(
         hard_delete_resource(tx, path, now)?;
     }
     Ok(())
-}
-
-fn desired_document_matches_status(resource: &Resource) -> bool {
-    resource.metadata.manifest == resource.status.metadata.manifest
-        && resource.metadata.name == resource.status.metadata.name
-        && resource.metadata.state == resource.status.metadata.state
-        && resource.metadata.kas.revision == resource.status.metadata.kas.revision
-        && resource.metadata.kas.generation == resource.status.metadata.kas.generation
-        && resource.metadata.kas.protected == resource.status.metadata.kas.protected
-        && resource.metadata.kas.managed_by == resource.status.metadata.kas.managed_by
-        && resource.metadata.kas.created_at == resource.status.metadata.kas.created_at
-        && resource.metadata.kas.updated_at == resource.status.metadata.kas.updated_at
-        && resource.spec == resource.status.spec
 }
 
 fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) {
