@@ -45,6 +45,10 @@ pub struct ResourceMetadata {
 pub struct KasMetadata {
     #[serde(default)]
     pub revision: u64,
+    /// Runtime generation for singleton Driver Resources. Zero for other
+    /// Resource types.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub generation: u64,
     #[serde(default)]
     pub observed: BTreeMap<String, DriverObservation>,
     #[serde(default)]
@@ -395,6 +399,12 @@ pub struct RunSpec {
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
     pub input: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
@@ -450,6 +460,11 @@ pub struct RoleSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CredentialSpec {
     pub subject: String,
+    /// SHA-256 hash of the bearer token. The plaintext is returned only when
+    /// the Credential is issued.
+    pub token_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,6 +486,10 @@ pub struct ResourceDefinition {
 
 fn default_document() -> Value {
     Value::Object(serde_json::Map::new())
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Deref for ResourceDefinition {
@@ -1025,6 +1044,7 @@ mod tests {
             state: STATE_AVAILABLE.into(),
             kas: KasMetadata {
                 revision: 1,
+                generation: 0,
                 observed: BTreeMap::new(),
                 created_at: now,
                 updated_at: now,

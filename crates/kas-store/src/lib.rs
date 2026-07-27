@@ -1,5 +1,6 @@
 //! SQLite persistence for KAS's single-Resource model.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
@@ -22,7 +23,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 12;
+pub const LATEST_SCHEMA_VERSION: u32 = 13;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -71,11 +72,15 @@ const MIGRATIONS: &[(u32, &str)] = &[
         12,
         include_str!("../migrations/0012_role_binding_links.sql"),
     ),
+    (
+        13,
+        include_str!("../migrations/0013_resources_and_events_only.sql"),
+    ),
 ];
 
 const RESOURCE_SELECT: &str =
     "SELECT path,manifest_path,name,spec_json,status_json,revision,state,observed_json,
-            created_at,updated_at
+            created_at,updated_at,generation
      FROM resources";
 
 #[derive(Debug, Error)]
@@ -118,6 +123,7 @@ pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
 
 pub struct Store {
     connection: Connection,
+    deliveries: HashMap<Uuid, DriverDelivery>,
 }
 
 impl Store {
@@ -125,7 +131,10 @@ impl Store {
         let connection = Connection::open(path)?;
         configure(&connection)?;
         require_current_schema(&connection)?;
-        let mut store = Self { connection };
+        let mut store = Self {
+            connection,
+            deliveries: HashMap::new(),
+        };
         store.ensure_builtins()?;
         reconcile_platform_state(&mut store)?;
         Ok(store)
@@ -134,7 +143,10 @@ impl Store {
     pub fn memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
         configure(&connection)?;
-        let mut store = Self { connection };
+        let mut store = Self {
+            connection,
+            deliveries: HashMap::new(),
+        };
         migrate_connection(&mut store.connection)?;
         store.ensure_builtins()?;
         reconcile_platform_state(&mut store)?;
@@ -321,10 +333,6 @@ impl Store {
             project_resource(&tx, &package, &root.path, now)?;
             let package_resource = resource_in(&tx, &package.path)?;
             append_event(&tx, EventType::Created, &package_resource, now)?;
-            tx.execute(
-                "INSERT INTO manifest_packages(manifest_path,package_path) VALUES (?,?)",
-                params![root.path, package_resource.path],
-            )?;
             package_resources.push(package_resource);
         }
 
@@ -382,6 +390,11 @@ impl Store {
         if input.manifest == PACKAGE_MANIFEST {
             return Err(StoreError::Invalid(
                 "Package Resources can only be created by POST /packages".into(),
+            ));
+        }
+        if input.manifest == CREDENTIAL_MANIFEST {
+            return Err(StoreError::Invalid(
+                "Credential Resources can only be created by POST /credentials".into(),
             ));
         }
         let tx = self.connection.transaction()?;
@@ -444,6 +457,11 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let current = resource_in(&tx, path)?;
+        if current.manifest == CREDENTIAL_MANIFEST {
+            return Err(StoreError::Invalid(
+                "Credential Resources can only be changed through credential endpoints".into(),
+            ));
+        }
         let state = input
             .metadata
             .as_ref()
@@ -583,6 +601,16 @@ impl Store {
             .collect())
     }
 
+    fn relation_path(&self, role: RelationRole) -> Result<Option<String>, StoreError> {
+        for relation in self.list_resources(Some(RELATION_MANIFEST))? {
+            let spec: RelationSpec = decode(&relation.spec, "Relation spec")?;
+            if spec.role == Some(role) {
+                return Ok(Some(relation.path.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn get_link(&self, path: &str) -> Result<Resource, StoreError> {
         let resource = self.get_resource(path)?;
         require_manifest(&resource, LINK_MANIFEST)?;
@@ -628,15 +656,13 @@ impl Store {
 
 impl Store {
     pub fn driver_for_manifest(&self, manifest_path: &str) -> Result<Option<Resource>, StoreError> {
-        let path: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT driver_path FROM driver_manifests WHERE manifest_path=?",
-                [manifest_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        path.map(|path| self.get_resource(&path)).transpose()
+        for driver in self.list_drivers()? {
+            let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
+            if spec.manages.iter().any(|managed| managed == manifest_path) {
+                return Ok(Some(driver));
+            }
+        }
+        Ok(None)
     }
 
     pub fn driver_launch_config(
@@ -684,16 +710,17 @@ impl Store {
             driver = resource_in(&tx, path)?;
             reconcile_all_resources(&tx, "driver_started", now)?;
         }
-        let generation = driver_runtime_generation_in(&tx, path)? + 1;
-        update_status_document(&tx, path, DriverState::Starting, &driver.status.spec, now)?;
+        let generation = driver.metadata.kas.generation + 1;
         tx.execute(
-            "UPDATE driver_runtime SET generation=?,process_id=NULL,started_at=?,
-             heartbeat_at=NULL,stopped_at=NULL,error=NULL WHERE driver_path=?",
-            params![generation, stamp(now), path],
+            "UPDATE resources SET generation=? WHERE path=?",
+            params![generation, path],
         )?;
+        update_status_document(&tx, path, DriverState::Starting, &driver.status.spec, now)?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
+        self.deliveries
+            .retain(|_, delivery| delivery.driver_path != path);
         Ok(driver)
     }
 
@@ -704,17 +731,13 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        if driver_runtime_generation_in(&tx, path)? != ready.generation
+        if driver.metadata.kas.generation != ready.generation
             || driver_state(&driver)? != DriverState::Starting
         {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
         let now = Utc::now();
         update_status_document(&tx, path, DriverState::Running, &driver.spec, now)?;
-        tx.execute(
-            "UPDATE driver_runtime SET process_id=?,heartbeat_at=? WHERE driver_path=?",
-            params![ready.process_id, stamp(now), path],
-        )?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
@@ -732,10 +755,6 @@ impl Store {
         {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
-        self.connection.execute(
-            "UPDATE driver_runtime SET heartbeat_at=? WHERE driver_path=?",
-            params![stamp(Utc::now()), path],
-        )?;
         Ok(driver)
     }
 
@@ -773,16 +792,13 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        if driver_runtime_generation_in(&tx, path)? != generation {
+        if driver.metadata.kas.generation != generation {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
         let error = error.into();
         let now = Utc::now();
         update_status_document(&tx, path, DriverState::Failed, &driver.status.spec, now)?;
-        tx.execute(
-            "UPDATE driver_runtime SET process_id=NULL,error=?,stopped_at=? WHERE driver_path=?",
-            params![error, stamp(now), path],
-        )?;
+        eprintln!("Driver {path} failed: {error}");
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
@@ -796,15 +812,11 @@ impl Store {
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
-        if driver_runtime_generation_in(&tx, path)? != generation {
+        if driver.metadata.kas.generation != generation {
             return Err(StoreError::Conflict("Driver generation is stale".into()));
         }
         let now = Utc::now();
         update_status_document(&tx, path, DriverState::Stopped, &driver.spec, now)?;
-        tx.execute(
-            "UPDATE driver_runtime SET process_id=NULL,stopped_at=?,error=NULL WHERE driver_path=?",
-            params![stamp(now), path],
-        )?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
@@ -812,14 +824,7 @@ impl Store {
     }
 
     pub fn driver_generation(&self, path: &str) -> Result<u64, StoreError> {
-        self.connection
-            .query_row(
-                "SELECT generation FROM driver_runtime WHERE driver_path=?",
-                [path],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::NotFound(format!("Driver {path}")))
+        Ok(self.get_driver(path)?.metadata.kas.generation)
     }
 
     pub fn enqueue_run(&mut self, input: CreateRun) -> Result<Resource, StoreError> {
@@ -836,6 +841,9 @@ impl Store {
             resource: input.resource,
             action: input.action,
             driver: Some(driver.path.clone()),
+            driver_generation: None,
+            started_at: None,
+            finished_at: None,
             input: input.input,
             output: None,
             error: None,
@@ -869,27 +877,16 @@ impl Store {
         let tx = self.connection.transaction()?;
         let mut run = resource_in(&tx, run_path)?;
         require_manifest(&run, RUN_MANIFEST)?;
-        let active_generation: Option<u64> = tx
-            .query_row(
-                "SELECT driver_generation FROM run_runtime WHERE run_path=?",
-                [run_path],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-        if active_generation != Some(input.driver_generation)
+        let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
+        if spec.driver_generation != Some(input.driver_generation)
             || run_state(&run)? != RunState::Running
         {
             return Err(StoreError::Conflict("Run generation is stale".into()));
         }
-        let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
         let state = apply_run_result(&mut spec, input.result);
         let now = Utc::now();
+        spec.finished_at = Some(now);
         update_platform_resource(&tx, run_path, state, &spec, now)?;
-        tx.execute(
-            "UPDATE run_runtime SET finished_at=? WHERE run_path=?",
-            params![stamp(now), run_path],
-        )?;
         run = resource_in(&tx, run_path)?;
         append_event(&tx, EventType::Updated, &run, now)?;
         tx.commit()?;
@@ -924,8 +921,12 @@ impl Store {
         operations: Vec<Mutation>,
         _run_delivery: bool,
     ) -> Result<Vec<Value>, StoreError> {
+        let delivery = self
+            .deliveries
+            .get(&delivery_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Driver delivery {delivery_id}")))?;
         let tx = self.connection.transaction()?;
-        let delivery = delivery_in(&tx, delivery_id)?;
         if delivery.driver_path != driver_path || delivery.generation != generation {
             return Err(StoreError::Conflict("Delivery is stale".into()));
         }
@@ -961,17 +962,6 @@ impl Store {
                         params![serde_json::to_string(&current.status)?, resource.path],
                     )?;
                 }
-                tx.execute(
-                    "DELETE FROM reconcile_queue
-                     WHERE driver_path=? AND resource_path=?
-                       AND target_driver_revision<=? AND target_resource_revision<=?",
-                    params![
-                        driver_path,
-                        resource.path,
-                        driver_revision,
-                        resource.revision
-                    ],
-                )?;
                 if let Ok(current) = resource_in(&tx, &resource.path) {
                     enqueue_if_drifted(&tx, &current, "delivery_completed", now)?;
                     maybe_finish_deleted_resource(&tx, &resource.path, now)?;
@@ -979,11 +969,8 @@ impl Store {
             }
             DriverWork::Run { .. } => {}
         }
-        tx.execute(
-            "DELETE FROM driver_deliveries WHERE id=?",
-            [delivery_id.to_string()],
-        )?;
         tx.commit()?;
+        self.deliveries.remove(&delivery_id);
         Ok(results)
     }
 }
@@ -997,31 +984,20 @@ impl Store {
         let tx = self.connection.transaction()?;
         assert_driver_generation(&tx, driver_path, generation)?;
 
-        if let Some(delivery) = tx
-            .query_row(
-                &format!(
-                    "{DELIVERY_SELECT} WHERE driver_path=? AND generation=?
-                     AND status IN ('pending','acked') ORDER BY created_at,id LIMIT 1"
-                ),
-                params![driver_path, generation],
-                delivery_from_row,
-            )
-            .optional()?
+        if let Some(delivery) = self
+            .deliveries
+            .values()
+            .find(|delivery| {
+                delivery.driver_path == driver_path && delivery.generation == generation
+            })
+            .cloned()
         {
             tx.commit()?;
             return Ok(Some(delivery));
         }
 
         let now = Utc::now();
-        let reconcile: Option<(String, u64)> = tx
-            .query_row(
-                "SELECT resource_path,target_driver_revision FROM reconcile_queue
-                 WHERE driver_path=? AND available_at<=?
-                 ORDER BY available_at,updated_at,resource_path LIMIT 1",
-                params![driver_path, stamp(now)],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+        let reconcile = next_reconciliation_in(&tx, driver_path)?;
         let work = if let Some((path, driver_revision)) = reconcile {
             Some(DriverWork::Reconcile {
                 driver_revision,
@@ -1030,22 +1006,25 @@ impl Store {
         } else {
             let run_path: Option<String> = tx
                 .query_row(
-                    "SELECT rr.run_path FROM run_runtime rr
-                     JOIN resources r ON r.path=rr.run_path
-                     WHERE rr.driver_path=? AND json_extract(r.status_json,'$.metadata.state')='queued'
-                     ORDER BY r.created_at,r.path LIMIT 1",
+                    "SELECT path FROM resources
+                     WHERE manifest_path='/builtin/run'
+                       AND json_extract(spec_json,'$.driver')=?
+                       AND json_extract(status_json,'$.metadata.state') IN ('queued','running')
+                     ORDER BY created_at,path LIMIT 1",
                     [driver_path],
                     |row| row.get(0),
                 )
                 .optional()?;
             if let Some(path) = run_path {
                 let mut run = resource_in(&tx, &path)?;
-                let spec: RunSpec = decode(&run.spec, "Run spec")?;
-                update_platform_resource(&tx, &path, RunState::Running, &spec, now)?;
-                tx.execute(
-                    "UPDATE run_runtime SET driver_generation=?,started_at=? WHERE run_path=?",
-                    params![generation, stamp(now), path],
-                )?;
+                let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
+                if spec.driver_generation != Some(generation) || spec.started_at.is_none() {
+                    spec.driver_generation = Some(generation);
+                    spec.started_at = Some(now);
+                    spec.finished_at = None;
+                    update_platform_resource(&tx, &path, RunState::Running, &spec, now)?;
+                    append_event(&tx, EventType::Updated, &resource_in(&tx, &path)?, now)?;
+                }
                 run = resource_in(&tx, &path)?;
                 Some(DriverWork::Run {
                     run,
@@ -1070,18 +1049,8 @@ impl Store {
             acked_at: None,
             completed_at: None,
         };
-        tx.execute(
-            "INSERT INTO driver_deliveries(id,driver_path,generation,work_json,status,created_at)
-             VALUES (?,?,?,?,'pending',?)",
-            params![
-                delivery.id.to_string(),
-                driver_path,
-                generation,
-                serde_json::to_string(&delivery.work)?,
-                stamp(now)
-            ],
-        )?;
         tx.commit()?;
+        self.deliveries.insert(delivery.id, delivery.clone());
         Ok(Some(delivery))
     }
 
@@ -1091,16 +1060,16 @@ impl Store {
         driver_path: &str,
         generation: u64,
     ) -> Result<DriverDelivery, StoreError> {
-        let now = Utc::now();
-        let changed = self.connection.execute(
-            "UPDATE driver_deliveries SET status='acked',acked_at=COALESCE(acked_at,?)
-             WHERE id=? AND driver_path=? AND generation=? AND status IN ('pending','acked')",
-            params![stamp(now), id.to_string(), driver_path, generation],
-        )?;
-        if changed != 1 {
+        let delivery = self
+            .deliveries
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::Conflict("Driver delivery is stale".into()))?;
+        if delivery.driver_path != driver_path || delivery.generation != generation {
             return Err(StoreError::Conflict("Driver delivery is stale".into()));
         }
-        self.get_driver_delivery(id)
+        delivery.status = DeliveryStatus::Acked;
+        delivery.acked_at.get_or_insert_with(Utc::now);
+        Ok(delivery.clone())
     }
 
     pub fn complete_driver_delivery(
@@ -1109,31 +1078,28 @@ impl Store {
         driver_path: &str,
         generation: u64,
     ) -> Result<DriverDelivery, StoreError> {
-        let now = Utc::now();
-        let mut delivery = self.get_driver_delivery(id)?;
-        let changed = self.connection.execute(
-            "DELETE FROM driver_deliveries
-             WHERE id=? AND driver_path=? AND generation=? AND status='acked'",
-            params![id.to_string(), driver_path, generation],
-        )?;
-        if changed != 1 {
+        let mut delivery = self
+            .deliveries
+            .remove(&id)
+            .ok_or_else(|| StoreError::Conflict("Driver delivery is not acknowledged".into()))?;
+        if delivery.driver_path != driver_path
+            || delivery.generation != generation
+            || delivery.status != DeliveryStatus::Acked
+        {
+            self.deliveries.insert(id, delivery);
             return Err(StoreError::Conflict(
                 "Driver delivery is not acknowledged".into(),
             ));
         }
         delivery.status = DeliveryStatus::Completed;
-        delivery.completed_at = Some(now);
+        delivery.completed_at = Some(Utc::now());
         Ok(delivery)
     }
 
     pub fn get_driver_delivery(&self, id: Uuid) -> Result<DriverDelivery, StoreError> {
-        self.connection
-            .query_row(
-                &format!("{DELIVERY_SELECT} WHERE id=?"),
-                [id.to_string()],
-                delivery_from_row,
-            )
-            .optional()?
+        self.deliveries
+            .get(&id)
+            .cloned()
             .ok_or_else(|| StoreError::NotFound(format!("Driver delivery {id}")))
     }
 
@@ -1142,42 +1108,38 @@ impl Store {
         driver_path: &str,
         generation: u64,
     ) -> Result<Vec<DriverDelivery>, StoreError> {
-        let mut statement = self.connection.prepare(&format!(
-            "{DELIVERY_SELECT} WHERE driver_path=? AND generation=?
-             AND status IN ('pending','acked') ORDER BY created_at,id"
-        ))?;
-        let rows = statement.query_map(params![driver_path, generation], delivery_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let mut deliveries = self
+            .deliveries
+            .values()
+            .filter(|delivery| {
+                delivery.driver_path == driver_path && delivery.generation == generation
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        deliveries.sort_by_key(|delivery| (delivery.created_at, delivery.id));
+        Ok(deliveries)
     }
 
     pub fn manifest_for_driver(&self, driver_path: &str) -> Result<Resource, StoreError> {
-        let manifest_path: String = self
-            .connection
-            .query_row(
-                "SELECT owner_manifest_path FROM driver_runtime WHERE driver_path=?",
-                [driver_path],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::NotFound(format!("Driver {driver_path}")))?;
-        self.get_resource(&manifest_path)
+        let relation = self.relation_path(RelationRole::ManifestResource)?;
+        let link = self
+            .list_links(None, relation.as_deref(), Some(driver_path), false)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::NotFound(format!("Manifest for Driver {driver_path}")))?;
+        let spec: LinkSpec = decode(&link.spec, "ManifestResource Link spec")?;
+        self.get_resource(&spec.source)
     }
 
     pub fn package_for_manifest(&self, manifest_path: &str) -> Result<Resource, StoreError> {
-        self.connection
-            .query_row(
-                &format!(
-                    "{RESOURCE_SELECT}
-                     WHERE path=(
-                         SELECT package_path FROM manifest_packages WHERE manifest_path=?
-                     )"
-                ),
-                [manifest_path],
-                resource_from_row,
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::NotFound(format!("Package for Manifest {manifest_path}")))
+        let relation = self.relation_path(RelationRole::PackageManifest)?;
+        let link = self
+            .list_links(None, relation.as_deref(), Some(manifest_path), false)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::NotFound(format!("Package for Manifest {manifest_path}")))?;
+        let spec: LinkSpec = decode(&link.spec, "PackageManifest Link spec")?;
+        self.get_resource(&spec.source)
     }
 
     pub fn package_for_driver(&self, driver_path: &str) -> Result<Resource, StoreError> {
@@ -1274,6 +1236,8 @@ impl Store {
         let token = issue_token();
         let spec = CredentialSpec {
             subject: subject_path.into(),
+            token_hash: token_hash(&token),
+            driver_generation,
             expires_at,
             revoked_at: None,
         };
@@ -1294,11 +1258,6 @@ impl Store {
         };
         let planned = normalized_initial_documents(&tx, &planned)?;
         insert_resource_row(&tx, &planned, false, "system", now)?;
-        tx.execute(
-            "INSERT INTO credential_material(credential_path,token_hash,driver_generation)
-             VALUES (?,?,?)",
-            params![credential_path, token_hash(&token), driver_generation],
-        )?;
         let resource = resource_in(&tx, &credential_path)?;
         append_event(&tx, EventType::Created, &resource, now)?;
         tx.commit()?;
@@ -1311,17 +1270,17 @@ impl Store {
 
     pub fn authenticate(&self, token: &str) -> Result<AuthContext, StoreError> {
         let hash = token_hash(token);
-        let (credential_path, driver_generation): (String, Option<u64>) = self
+        let credential = self
             .connection
             .query_row(
-                "SELECT credential_path,driver_generation FROM credential_material
-                 WHERE token_hash=?",
-                [&hash],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                &format!(
+                    "{RESOURCE_SELECT} WHERE manifest_path=? AND json_extract(spec_json,'$.token_hash')=?"
+                ),
+                params![CREDENTIAL_MANIFEST, hash],
+                resource_from_row,
             )
             .optional()?
             .ok_or_else(|| StoreError::NotFound("Credential".into()))?;
-        let credential = self.get_resource(&credential_path)?;
         let spec: CredentialSpec = decode(&credential.spec, "Credential spec")?;
         if spec.expires_at.is_some_and(|expiry| expiry <= Utc::now()) || spec.revoked_at.is_some() {
             return Err(StoreError::NotFound("Credential".into()));
@@ -1357,26 +1316,24 @@ impl Store {
             }));
         }
         let driver_path = if subject_resource.manifest == SERVICE_ACCOUNT_MANIFEST {
-            self.connection
-                .query_row(
-                    "SELECT driver_path FROM driver_service_accounts
-                     WHERE service_account_path=?",
-                    [&spec.subject],
-                    |row| row.get(0),
-                )
-                .optional()?
+            self.list_drivers()?.into_iter().find_map(|driver| {
+                decode::<DriverSpec>(&driver.spec, "Driver spec")
+                    .ok()
+                    .filter(|driver_spec| driver_spec.service_account == spec.subject)
+                    .map(|_| driver.path.clone())
+            })
         } else {
             None
         };
         Ok(AuthContext {
-            credential_path,
+            credential_path: credential.path.clone(),
             subject: Subject {
                 path: subject_resource.path.clone(),
                 manifest: subject_resource.manifest.clone(),
             },
             rules,
             driver_path,
-            driver_generation,
+            driver_generation: spec.driver_generation,
         })
     }
 
@@ -1394,10 +1351,6 @@ impl Store {
         Ok(resource)
     }
 }
-
-const DELIVERY_SELECT: &str =
-    "SELECT id,driver_path,generation,work_json,status,created_at,acked_at
-     FROM driver_deliveries";
 
 struct BuiltinDocuments {
     manifest: &'static str,
@@ -1546,6 +1499,7 @@ fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
             state: row.get(6)?,
             kas: KasMetadata {
                 revision: row.get(5)?,
+                generation: row.get(10)?,
                 observed: json_from_row(row, 7)?,
                 created_at: time_from_row(row, 8)?,
                 updated_at: time_from_row(row, 9)?,
@@ -1576,39 +1530,6 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
         value: json_from_row(row, 4)?,
         created_at: time_from_row(row, 5)?,
     })
-}
-
-fn delivery_from_row(row: &Row<'_>) -> rusqlite::Result<DriverDelivery> {
-    let status: String = row.get(4)?;
-    Ok(DriverDelivery {
-        id: uuid_from_row(row, 0)?,
-        driver_path: row.get(1)?,
-        generation: row.get(2)?,
-        work: json_from_row(row, 3)?,
-        status: match status.as_str() {
-            "pending" => DeliveryStatus::Pending,
-            "acked" => DeliveryStatus::Acked,
-            other => {
-                return Err(from_sql(
-                    4,
-                    std::io::Error::other(format!("invalid delivery status {other}")),
-                ))
-            }
-        },
-        created_at: time_from_row(row, 5)?,
-        acked_at: optional_time_from_row(row, 6)?,
-        completed_at: None,
-    })
-}
-
-fn delivery_in(tx: &Transaction<'_>, id: Uuid) -> Result<DriverDelivery, StoreError> {
-    tx.query_row(
-        &format!("{DELIVERY_SELECT} WHERE id=?"),
-        [id.to_string()],
-        delivery_from_row,
-    )
-    .optional()?
-    .ok_or_else(|| StoreError::NotFound(format!("Driver delivery {id}")))
 }
 
 fn resource_in(tx: &Transaction<'_>, path: &str) -> Result<Resource, StoreError> {
@@ -1779,6 +1700,7 @@ fn insert_resource_row(
     status.metadata.name = planned.name.clone();
     status.metadata.kas = KasMetadata {
         revision: 0,
+        generation: 0,
         observed: Default::default(),
         created_at: now,
         updated_at: now,
@@ -1815,7 +1737,7 @@ fn insert_resource_row(
 fn project_resource(
     tx: &Transaction<'_>,
     planned: &PlannedResource,
-    owner_manifest: &str,
+    _owner_manifest: &str,
     _now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     match planned.manifest.as_str() {
@@ -1829,18 +1751,7 @@ fn project_resource(
         }
         DRIVER_MANIFEST => {
             let spec: DriverSpec = decode(&planned.spec, "Driver spec")?;
-            tx.execute(
-                "INSERT INTO driver_runtime(
-                    driver_path,owner_manifest_path,generation
-                 ) VALUES (?,?,?)",
-                params![planned.path, owner_manifest, 0],
-            )?;
             project_driver_manifests(tx, &planned.path, &spec)?;
-            tx.execute(
-                "INSERT INTO driver_service_accounts(driver_path,service_account_path)
-                 VALUES (?,?)",
-                params![planned.path, spec.service_account],
-            )?;
         }
         LINK_MANIFEST => {}
         RUN_MANIFEST => {
@@ -1904,6 +1815,20 @@ fn project_driver_manifests(
             "Driver must manage at least one Manifest".into(),
         ));
     }
+    let existing_drivers = resources_for_manifest_in(tx, DRIVER_MANIFEST)?;
+    for existing in &existing_drivers {
+        if existing.path == driver_path {
+            continue;
+        }
+        let existing_spec: DriverSpec = decode(&existing.spec, "Driver spec")?;
+        if existing_spec.service_account == spec.service_account {
+            return Err(StoreError::Conflict(format!(
+                "ServiceAccount {} already belongs to Driver {}",
+                spec.service_account, existing.path
+            )));
+        }
+    }
+
     let mut unique = std::collections::BTreeSet::new();
     for manifest_path in &spec.manages {
         if !unique.insert(manifest_path) {
@@ -1913,16 +1838,21 @@ fn project_driver_manifests(
         }
         let manifest = resource_in(tx, manifest_path)?;
         require_manifest(&manifest, MANIFEST_MANIFEST)?;
-        tx.execute(
-            "INSERT INTO driver_manifests(driver_path,manifest_path) VALUES (?,?)",
-            params![driver_path, manifest_path],
-        )
-        .map_err(|error| {
-            constraint(
-                error,
-                &format!("Manifest {manifest_path} already has a managing Driver"),
-            )
-        })?;
+        for existing in &existing_drivers {
+            if existing.path == driver_path {
+                continue;
+            }
+            let existing_spec: DriverSpec = decode(&existing.spec, "Driver spec")?;
+            if existing_spec
+                .manages
+                .iter()
+                .any(|managed| managed == manifest_path)
+            {
+                return Err(StoreError::Conflict(format!(
+                    "Manifest {manifest_path} already has a managing Driver"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1970,21 +1900,19 @@ fn project_run(tx: &Transaction<'_>, planned: &PlannedResource) -> Result<(), St
         .as_object_mut()
         .ok_or_else(|| StoreError::Invalid("Run spec must be an object".into()))?
         .insert("driver".into(), Value::String(driver_path.clone()));
+    stored_spec
+        .as_object_mut()
+        .expect("Run spec was checked as an object")
+        .entry("driver_generation")
+        .or_insert(Value::Null);
     tx.execute(
-        "UPDATE resources SET spec_json=? WHERE path=?",
-        params![serde_json::to_string(&stored_spec)?, planned.path],
-    )?;
-    tx.execute(
-        "INSERT INTO run_runtime(
-            run_path,request_id,resource_path,action_path,driver_path,driver_generation
-         ) VALUES (?,?,?,?,?,?)",
+        "UPDATE resources
+         SET spec_json=?,status_json=json_set(status_json,'$.spec',json(?))
+         WHERE path=?",
         params![
-            planned.path,
-            spec.request_id.to_string(),
-            spec.resource,
-            spec.action,
-            driver_path,
-            Option::<u64>::None
+            serde_json::to_string(&stored_spec)?,
+            serde_json::to_string(&stored_spec)?,
+            planned.path
         ],
     )?;
     Ok(())
@@ -2102,6 +2030,22 @@ fn relation_path_for_role(
     Ok(None)
 }
 
+fn owner_manifest_for_driver_in(
+    tx: &Transaction<'_>,
+    driver_path: &str,
+) -> Result<Option<String>, StoreError> {
+    let Some(relation) = relation_path_for_role(tx, RelationRole::ManifestResource)? else {
+        return Ok(None);
+    };
+    for link in resources_for_manifest_in(tx, LINK_MANIFEST)? {
+        let spec: LinkSpec = decode(&link.spec, "Link spec")?;
+        if spec.relation == relation && spec.target == driver_path {
+            return Ok(Some(spec.source));
+        }
+    }
+    Ok(None)
+}
+
 fn refresh_projection(
     tx: &Transaction<'_>,
     resource: &Resource,
@@ -2110,15 +2054,7 @@ fn refresh_projection(
     match resource.manifest.as_str() {
         DRIVER_MANIFEST => {
             let spec: DriverSpec = decode(&resource.spec, "Driver spec")?;
-            tx.execute(
-                "DELETE FROM driver_manifests WHERE driver_path=?",
-                [&resource.path],
-            )?;
             project_driver_manifests(tx, &resource.path, &spec)?;
-            tx.execute(
-                "UPDATE driver_service_accounts SET service_account_path=? WHERE driver_path=?",
-                params![spec.service_account, resource.path],
-            )?;
             reconcile_all_resources(tx, "driver_management_updated", now)?;
         }
         _ => {}
@@ -2130,13 +2066,13 @@ fn driver_path_for_manifest(
     tx: &Transaction<'_>,
     manifest_path: &str,
 ) -> Result<Option<String>, StoreError> {
-    tx.query_row(
-        "SELECT driver_path FROM driver_manifests WHERE manifest_path=?",
-        [manifest_path],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(StoreError::from)
+    for driver in resources_for_manifest_in(tx, DRIVER_MANIFEST)? {
+        let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
+        if spec.manages.iter().any(|managed| managed == manifest_path) {
+            return Ok(Some(driver.path.clone()));
+        }
+    }
+    Ok(None)
 }
 
 fn driver_for_resource(
@@ -2157,16 +2093,7 @@ fn matching_drivers(
             matched.insert(owner, driver.revision);
         }
     }
-    let drivers = {
-        let mut statement = tx.prepare(&format!(
-            "{RESOURCE_SELECT} r JOIN driver_runtime d ON d.driver_path=r.path
-             ORDER BY r.path"
-        ))?;
-        let rows = statement
-            .query_map([], resource_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
+    let drivers = resources_for_manifest_in(tx, DRIVER_MANIFEST)?;
     for driver in drivers {
         if driver.metadata.state != "running" {
             continue;
@@ -2182,8 +2109,8 @@ fn matching_drivers(
 fn enqueue_if_drifted(
     tx: &Transaction<'_>,
     resource: &Resource,
-    reason: &str,
-    now: DateTime<Utc>,
+    _reason: &str,
+    _now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let drivers = matching_drivers(tx, resource)?;
     let expected = drivers
@@ -2214,49 +2141,27 @@ fn enqueue_if_drifted(
             params![serde_json::to_string(&status)?, resource.path],
         )?;
     }
-    tx.execute(
-        "DELETE FROM reconcile_queue
-         WHERE resource_path=?
-           AND driver_path NOT IN (
-             SELECT key FROM json_each(?)
-           )",
-        params![resource.path, serde_json::to_string(&drivers)?],
-    )?;
-    let owner = driver_for_resource(tx, resource)?;
-    for (driver, target) in expected {
-        let current = actual.get(&driver);
-        let status_drifted =
-            owner.as_deref() == Some(driver.as_str()) && !desired_document_matches_status(resource);
-        if current == Some(&target) && !status_drifted {
-            tx.execute(
-                "DELETE FROM reconcile_queue WHERE driver_path=? AND resource_path=?",
-                params![driver, resource.path],
-            )?;
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO reconcile_queue(
-                driver_path,resource_path,target_driver_revision,target_resource_revision,
-                reason,available_at,updated_at
-             ) VALUES (?,?,?,?,?,?,?)
-             ON CONFLICT(driver_path,resource_path) DO UPDATE SET
-                target_driver_revision=excluded.target_driver_revision,
-                target_resource_revision=excluded.target_resource_revision,
-                reason=excluded.reason,
-                available_at=excluded.available_at,
-                updated_at=excluded.updated_at",
-            params![
-                driver,
-                resource.path,
-                target.driver_revision,
-                target.resource_revision,
-                reason,
-                stamp(now),
-                stamp(now)
-            ],
-        )?;
-    }
     Ok(())
+}
+
+fn next_reconciliation_in(
+    tx: &Transaction<'_>,
+    driver_path: &str,
+) -> Result<Option<(String, u64)>, StoreError> {
+    for resource in all_resources_in(tx)? {
+        let Some(expected) = resource.metadata.kas.observed.get(driver_path) else {
+            continue;
+        };
+        let owner = driver_for_resource(tx, &resource)?;
+        let status_drifted =
+            owner.as_deref() == Some(driver_path) && !desired_document_matches_status(&resource);
+        if resource.status.metadata.kas.observed.get(driver_path) != Some(expected)
+            || status_drifted
+        {
+            return Ok(Some((resource.path.clone(), expected.driver_revision)));
+        }
+    }
+    Ok(None)
 }
 
 fn reconcile_all_resources(
@@ -2293,6 +2198,11 @@ fn apply_mutation(
                     "Package Resources can only be created by POST /packages".into(),
                 ));
             }
+            if resource.manifest == CREDENTIAL_MANIFEST {
+                return Err(StoreError::Invalid(
+                    "Credential Resources can only be created by POST /credentials".into(),
+                ));
+            }
             let resource = normalized_initial_documents(tx, &resource)?;
             validate_against_manifest(
                 tx,
@@ -2302,13 +2212,7 @@ fn apply_mutation(
                 &resource.status,
             )?;
             insert_resource_row(tx, &resource, false, "driver", now)?;
-            let owner_manifest = tx
-                .query_row(
-                    "SELECT owner_manifest_path FROM driver_runtime WHERE driver_path=?",
-                    [driver_path],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap_or_default();
+            let owner_manifest = owner_manifest_for_driver_in(tx, driver_path)?.unwrap_or_default();
             project_resource(tx, &resource, &owner_manifest, now)?;
             let created = resource_in(tx, &resource.path)?;
             project_declared_relationships(tx, &planned_from_resource(created.clone()), now)?;
@@ -2323,6 +2227,11 @@ fn apply_mutation(
             spec,
         } => {
             let current = resource_in(tx, &resource_path)?;
+            if current.manifest == CREDENTIAL_MANIFEST {
+                return Err(StoreError::Invalid(
+                    "Credential Resources can only be changed through credential endpoints".into(),
+                ));
+            }
             let state = metadata
                 .as_ref()
                 .map(|metadata| metadata.state.as_str())
@@ -2413,24 +2322,15 @@ fn apply_mutation(
         Mutation::CompleteRun { run_path, result } => {
             let mut run = resource_in(tx, &run_path)?;
             require_manifest(&run, RUN_MANIFEST)?;
-            let active_generation: Option<u64> = tx
-                .query_row(
-                    "SELECT driver_generation FROM run_runtime WHERE run_path=?",
-                    [&run_path],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            if active_generation != Some(generation) {
+            let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
+            if spec.driver_generation != Some(generation)
+                || spec.driver.as_deref() != Some(driver_path)
+            {
                 return Err(StoreError::Conflict("Run generation is stale".into()));
             }
-            let mut spec: RunSpec = decode(&run.spec, "Run spec")?;
             let state = apply_run_result(&mut spec, result);
+            spec.finished_at = Some(now);
             update_platform_resource(tx, &run_path, state, &spec, now)?;
-            tx.execute(
-                "UPDATE run_runtime SET finished_at=? WHERE run_path=? AND driver_path=?",
-                params![stamp(now), run_path, driver_path],
-            )?;
             run = resource_in(tx, &run_path)?;
             append_event(tx, EventType::Updated, &run, now)?;
             Ok(serde_json::to_value(run)?)
@@ -2445,7 +2345,11 @@ fn hard_delete_resource(
 ) -> Result<(), StoreError> {
     let resource = resource_in(tx, path)?;
     let run_paths = {
-        let mut statement = tx.prepare("SELECT run_path FROM run_runtime WHERE resource_path=?")?;
+        let mut statement = tx.prepare(
+            "SELECT path FROM resources
+             WHERE manifest_path='/builtin/run'
+               AND json_extract(spec_json,'$.resource')=?",
+        )?;
         let rows = statement
             .query_map([path], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2488,6 +2392,7 @@ fn desired_document_matches_status(resource: &Resource) -> bool {
         && resource.metadata.name == resource.status.metadata.name
         && resource.metadata.state == resource.status.metadata.state
         && resource.metadata.kas.revision == resource.status.metadata.kas.revision
+        && resource.metadata.kas.generation == resource.status.metadata.kas.generation
         && resource.metadata.kas.created_at == resource.status.metadata.kas.created_at
         && resource.metadata.kas.updated_at == resource.status.metadata.kas.updated_at
         && resource.spec == resource.status.spec
@@ -2498,6 +2403,7 @@ fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) 
     status.metadata.manifest = resource.metadata.manifest.clone();
     status.metadata.name = resource.metadata.name.clone();
     status.metadata.kas.revision = resource.metadata.kas.revision;
+    status.metadata.kas.generation = resource.metadata.kas.generation;
     status.metadata.kas.created_at = resource.metadata.kas.created_at;
     status.metadata.kas.updated_at = resource.metadata.kas.updated_at;
     status.metadata.kas.observed = resource.status.metadata.kas.observed.clone();
@@ -2525,25 +2431,12 @@ fn assert_driver_generation(
 ) -> Result<(), StoreError> {
     let driver = resource_in(tx, driver_path)?;
     require_manifest(&driver, DRIVER_MANIFEST)?;
-    if driver_runtime_generation_in(tx, driver_path)? != generation
+    if driver.metadata.kas.generation != generation
         || driver_state(&driver)? != DriverState::Running
     {
         return Err(StoreError::Conflict("Driver generation is stale".into()));
     }
     Ok(())
-}
-
-fn driver_runtime_generation_in(
-    tx: &Transaction<'_>,
-    driver_path: &str,
-) -> Result<u64, StoreError> {
-    tx.query_row(
-        "SELECT generation FROM driver_runtime WHERE driver_path=?",
-        [driver_path],
-        |row| row.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| StoreError::NotFound(format!("Driver {driver_path}")))
 }
 
 fn update_status_document<S: Serialize, T: Serialize>(
@@ -2751,21 +2644,6 @@ fn time_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<DateTime<Utc>>
     DateTime::parse_from_rfc3339(&raw)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|error| from_sql(index, error))
-}
-
-fn optional_time_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<DateTime<Utc>>> {
-    let raw: Option<String> = row.get(index)?;
-    raw.map(|value| {
-        DateTime::parse_from_rfc3339(&value)
-            .map(|value| value.with_timezone(&Utc))
-            .map_err(|error| from_sql(index, error))
-    })
-    .transpose()
-}
-
-fn uuid_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<Uuid> {
-    let raw: String = row.get(index)?;
-    Uuid::parse_str(&raw).map_err(|error| from_sql(index, error))
 }
 
 fn stamp(value: DateTime<Utc>) -> String {
@@ -3101,18 +2979,58 @@ mod tests {
     }
 
     #[test]
-    fn redundant_manifest_and_action_projections_are_absent() {
-        let store = Store::memory().unwrap();
-        for table in ["manifest_index", "action_index"] {
-            let present: bool = store
-                .connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
-                    [table],
-                    |row| row.get(0),
+    fn unfinished_work_is_rederived_after_store_restart() {
+        let database = std::env::temp_dir().join(format!("kas-store-{}.db", Uuid::new_v4()));
+        migrate(&database).unwrap();
+        let driver_path = "/builtin/link/driver";
+        let first_delivery_id;
+        let generation;
+        {
+            let mut store = Store::open(&database).unwrap();
+            store.start_driver(driver_path).unwrap();
+            generation = store.driver_generation(driver_path).unwrap();
+            store
+                .mark_driver_ready(
+                    driver_path,
+                    DriverReady {
+                        generation,
+                        process_id: 1,
+                        metadata: json!({}),
+                    },
                 )
                 .unwrap();
-            assert!(!present, "{table} should be represented by Resources");
+            first_delivery_id = store
+                .claim_driver_delivery(driver_path, generation)
+                .unwrap()
+                .expect("running Driver has reconciliation work")
+                .id;
         }
+
+        let mut reopened = Store::open(&database).unwrap();
+        let rederived = reopened
+            .claim_driver_delivery(driver_path, generation)
+            .unwrap()
+            .expect("unfinished work is derived from Resource observations");
+        assert_ne!(rederived.id, first_delivery_id);
+        std::fs::remove_file(database).unwrap();
+    }
+
+    #[test]
+    fn resources_and_events_are_the_only_persistent_tables() {
+        let store = Store::memory().unwrap();
+        let mut statement = store
+            .connection
+            .prepare(
+                "SELECT name FROM sqlite_schema
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .unwrap();
+        let tables = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(tables, vec!["events", "resources"]);
     }
 }

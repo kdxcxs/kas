@@ -9,16 +9,18 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
     "path": "/agents/planner",
     "manifest": "/manifests/agent",
     "name": "Planner",
-    "revision": 1,
     "state": "available",
-    "observed": {
-      "/manifests/agent/driver": {
-        "driver_revision": 2,
-        "resource_revision": 1
-      }
-    },
-    "created_at": "...",
-    "updated_at": "..."
+    "[kas]": {
+      "revision": 1,
+      "observed": {
+        "/manifests/agent/driver": {
+          "driver_revision": 2,
+          "resource_revision": 1
+        }
+      },
+      "created_at": "...",
+      "updated_at": "..."
+    }
   },
   "spec": {},
   "status": {
@@ -98,8 +100,9 @@ Action、Relation、Link、Driver、Run、User、ServiceAccount、Role 和 Crede
 
 具体 Relation、Link、Role 或 Run 并不是 built-in；built-in 的是定义它们结构
 和平台语义的 Manifest。Relation 和 Link 都按普通 Resource 持久化，不在
-Store 中维护专用关系投影；Driver、Run、RBAC、Package ownership 和
-Credential material 可以拥有不对外暴露的运行投影，事实来源始终是 Resource。
+Store 中维护专用关系投影。SQLite 只保留 `resources` 和 `events` 两张表；
+Driver、Run、RBAC、Package ownership 与 Credential 哈希均直接由 Resource
+表达。
 
 ## 平台语义
 
@@ -127,8 +130,8 @@ Agent 是 target，`mentioned` Relation 负责约束两端的 Manifest。
 
 平台在 Resource 创建、更新或删除的同一事务中写入 `created`、`updated`
 或 `deleted` Event。Event 使用全局递增 sequence，用于内部审计和可靠投递；
-业务代码不能主动创建自定义 Event。Event 和 Driver Delivery 是平台运行记录，
-不是第二套公开领域对象。Package 的可查询元数据是 Resource；tar、binary
+业务代码不能主动创建自定义 Event。Event 是平台运行记录，不是第二套公开
+领域对象。Package 的可查询元数据是 Resource；tar、binary
 等 artifact bytes 仍是外部内容存储。
 
 ## Link
@@ -492,13 +495,16 @@ Driver/Resource 组合独立投递；完成后把消费版本写入
 `status.metadata["[kas]"].observed[driver_path]`。Driver 定义 revision 或
 Resource revision 任一变化都会重新投递。新 Driver 会回扫已有 Resource；
 新 Manifest 注册后，已有通配符 watch 会立即覆盖包内初始化 Resource。
-消费进度是事实来源，内部 reconcile queue 只是可重建的调度投影。
+消费进度是唯一事实来源；KAS 直接扫描 observation 差异生成工作，不维护
+持久化 reconcile queue。
 
 Driver 和 Run 也是 Resource，但它们由 KAS 的 built-in Manifest 赋予控制面
 状态机。Driver 的根级 `metadata.state` 表示期望启动或停止，
-`status.metadata.state` 表示当前进程状态；PID、generation 和错误只保存在
-内部运行投影，不污染公共 Resource。Run 的执行结果写回根级 spec，并同步到
-status.spec。它们不会错误地交给“Driver Manifest 的 Driver”做自我协调。
+`status.metadata.state` 表示当前进程状态；generation 保存在
+`metadata["[kas]"].generation`，PID 和 heartbeat 只属于 Supervisor 的进程
+内状态。Run 的 Driver generation、开始时间、结束时间和结果均写入 Run
+Resource，并同步到 status.spec。它们不会错误地交给“Driver Manifest 的
+Driver”做自我协调。
 
 Resource spec 可以通过 `PATCH /resources/by-path?path=...` 更新，请求必须携带
 `expected_revision`，并可同时提交新的 `metadata.state`。更新成功后
@@ -521,8 +527,8 @@ envelope 中不可变的 `manifest` path 表达，不再重复创建类型 Link�
 
 系统初始化逻辑按 Relation 的语义 role 创建普通 Link Resource，不把具体
 Relation path 写死在业务逻辑中。Driver 凭据、RBAC、Run 和 Package 启动所需
-的内部运行映射直接从各自 Resource spec 或 Package 安装事务建立，不依赖
-Relationship Driver 启动完成，从而避免 bootstrap 循环。
+的映射直接从 Resource spec 与 Link 推导，不依赖 Relationship Driver
+启动完成，从而避免 bootstrap 循环。
 
 Relation 只声明允许的端点、metadata schema 和删除策略，不声明数量约束，
 也不承担 Driver 触发语义。`/builtin/link` 包提供一个 singleton
@@ -545,9 +551,9 @@ Event 是平台维护的内部持久化审计日志，只能随业务对象事�
 Driver 使用 `/drivers/connect?path=...&generation=N` 建立带 Bearer Token 的
 WebSocket，不再依赖 claim 轮询。控制面主动推送 reconcile、Run 和 stop，
 Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一条 `mutation`
-消息。每次投递都持久化；
-同 generation 断线会重放，generation 更新会完成旧投递并把未完成 Run
-重新排队。
+消息。in-flight delivery 仅存在于当前 API 进程内；断线或服务重启后，KAS
+重新扫描尚未收敛的 observation 与 queued/running Run 并生成新 delivery，
+因此不需要持久化投递副本。
 
 `hello.driver`、`reconcile.resource` 以及 Run 投递中的 `run`、`resource`、
 `action` 都使用同一个 Resource envelope。Driver 的异步
@@ -575,9 +581,9 @@ Driver ServiceAccount 绑定目标 Manifest、verb 和 path 对应的 Role。
 WebSocket 协议中，不提供对应的 HTTP endpoint。
 
 Driver 不订阅 Event。需要 Driver 处理的业务变化必须显式表示为 Resource
-revision，并由所属 Manifest 或 Driver `watches` 选中。这样工作项由持久化
-reconcile queue 投递，消费进度由 Resource metadata 保存，不依赖临时订阅、
-连接状态或 Event sequence。
+revision，并由所属 Manifest 或 Driver `watches` 选中。工作项直接由 Resource
+metadata 中的期望/实际 observation 差异生成，不依赖 Event sequence 或
+额外队列表。
 
 ## 测试
 
