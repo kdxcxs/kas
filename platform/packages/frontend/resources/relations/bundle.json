@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "path": "./relations/bundle",
+    "manifest": "/builtin/relation",
+    "name": "bundle"
+  },
+  "spec": {
+    "inverse_name": "frontend-plugin",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/manifests/file"
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

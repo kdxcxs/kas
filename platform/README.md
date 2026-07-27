@@ -166,7 +166,8 @@ platform/tests/e2e.sh -v
 The E2E test requires an authenticated `codex` executable on `PATH`. Set
 `KAS_CODEX_BIN` to select another real Codex executable. It starts KAS with a
 temporary database, installs all eight packages, uploads binary content,
-verifies full and ranged downloads, creates a multi-Agent Thread with an
+installs the FrontendPlugin package and Registry plugin, verifies full and
+ranged downloads, creates a multi-Agent Thread with an
 attached File, and verifies that only the mentioned Agent receives a Run. The
 real Codex Agent loads an assigned Skill, downloads the attachment with its
 own ServiceAccount, and produces KAS Resources from both inputs. The test then
@@ -183,26 +184,28 @@ Link-based discovery, and requester namespace isolation.
 
 ## Frontend
 
-`frontend/` is a standalone Svelte project with its own package manifest and
-lockfile. It is deliberately not part of the Rust workspace.
-
-Start KAS, then run the frontend development server:
+`packages/frontend/` is a normal KAS Package with a singleton Rust Driver.
+The Package contains the built Svelte host, the FrontendPlugin Manifest,
+Driver RBAC, the HTTP Gateway, and the plugin runtime. Build all Platform
+packages with:
 
 ```bash
-cd platform/frontend
-npm install
-KAS_API_URL=http://127.0.0.1:3000 npm run dev
+platform/scripts/build-packages.sh
 ```
 
-The development server proxies `/api` to `KAS_API_URL`, so KAS does not need
-cross-origin configuration. It also proxies `/files-api` to
-`KAS_FILE_API_URL` (default `http://127.0.0.1:3001`) and `/skills-api` to
-`KAS_SKILL_API_URL` (default `http://127.0.0.1:3002`), and `/approvals-api` to
-`KAS_APPROVAL_API_URL` (default `http://127.0.0.1:3003`). A production
-deployment should route all four paths to their corresponding services.
-`VITE_KAS_API_URL`, `VITE_KAS_FILE_API_URL`, `VITE_KAS_SKILL_API_URL`, and
-`VITE_KAS_APPROVAL_API_URL` can select direct API bases at build time when
-those endpoints permit browser cross-origin access.
+The Driver serves the host and acts as a small same-origin reverse proxy.
+`/api/*` is an intrinsic route to the same KAS control plane used by the
+Driver protocol. Every independently served HTTP API is configured as a
+`/manifests/proxy` Resource in KAS. The Frontend Driver reconciles those
+Resources into its live longest-prefix route table, so route changes require
+neither environment configuration nor a process restart. File is the
+foundational external route; Skill and Approval remain compatibility Proxy
+Resources while those Drivers still expose specialized HTTP operations.
+
+The connection form exchanges a KAS Credential for an opaque in-memory
+Gateway Session. Only an `HttpOnly`, `SameSite=Strict` session cookie remains
+in the browser; the Gateway forwards each operation with the current User's
+Credential rather than its Driver ServiceAccount.
 
 The UI stores its KAS Bearer token and User path in browser-local settings. It
 can create Agents and independent Threads, add multiple Agent participants,
@@ -215,3 +218,37 @@ through authenticated download. The Skill page imports or replaces Skill ZIP
 bundles and manages Agent assignments. The Approval page presents the exact
 requested operation and its reason, lets a User approve or reject it, and
 shows the resulting decision audit record.
+
+### Frontend plugins
+
+Platform extensions can contribute entries to the Workspace or Resources
+sidebar without changing Core or rebuilding the host UI. A FrontendPlugin is
+an ordinary Resource whose ZIP bundle is an immutable File connected by the
+package-defined `./relations/bundle` Link. Build and install one with:
+
+```bash
+platform/scripts/build-frontend-plugin.sh \
+  platform/plugins/registry \
+  /tmp/registry.zip
+
+platform/scripts/install-frontend-plugin.sh \
+  /tmp/registry.zip \
+  /frontend-plugins/registry \
+  registry \
+  index.html \
+  Objects \
+  '◇' \
+  50 \
+  /objects
+```
+
+The Frontend Driver watches the plugin, bundle Link, and File; validates and
+extracts the ZIP into a digest-addressed cache; and serves the entrypoint and
+relative assets below `/plugins/{slug}/`. The host loads that URL in a
+sandboxed iframe without exposing the User Credential. A `postMessage` bridge
+provides plugin context plus Resource, Link, authorization, raw API, and
+navigation operations; every operation is executed by the host with the
+current User's normal KAS permissions. `platform/plugins/registry/` is the
+first real plugin and implements the generic Objects registry page. The
+Threads, Agents, Skills, and Approvals management pages can migrate to the
+same mechanism incrementally, while Chat remains part of the host shell.

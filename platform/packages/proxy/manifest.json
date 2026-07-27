@@ -1,0 +1,34 @@
+{
+  "path": "/manifests/proxy",
+  "manifest": "/builtin/manifest",
+  "name": "proxy",
+  "version": 1,
+  "description": "A dynamic Frontend Gateway route to an independently served HTTP API.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["prefix", "upstream", "strip_prefix", "authorization"],
+    "properties": {
+      "prefix": {
+        "type": "string",
+        "pattern": "^/[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "maxLength": 64
+      },
+      "upstream": {
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https?://"
+      },
+      "strip_prefix": {
+        "type": "boolean"
+      },
+      "authorization": {
+        "enum": ["session", "passthrough", "none"]
+      }
+    },
+    "additionalProperties": false
+  }
+}

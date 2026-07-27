@@ -49,10 +49,15 @@ export class KasApi {
     return response.ok;
   }
 
-  async listResources(manifest?: string): Promise<Resource[]> {
+  async listResources(manifest?: string, includeRelations = false): Promise<Resource[]> {
     const query = manifest ? `?${new URLSearchParams({ manifest })}` : '';
     const documents = await this.request<ResourceDocument[]>(`/resources${query}`);
-    return documents.map(resourceFromDocument);
+    const resources = documents.map(resourceFromDocument);
+    if (includeRelations) {
+      const all = manifest ? await this.listResources() : resources;
+      for (const resource of resources) resource.links = linksFor(resource.path, all);
+    }
+    return resources;
   }
 
   async getResource(path: string, includeRelations = false): Promise<Resource> {
@@ -159,11 +164,32 @@ export class KasApi {
     });
   }
 
+  async authContext(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>('/auth');
+  }
+
+  async checkAuthorization(input: {
+    manifest: string;
+    verb: string;
+    path: string;
+  }): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>('/auth/check', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    });
+  }
+
+  async rawRequest<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+    if (!path.startsWith('/')) throw new KasApiError('API path must be absolute', 400);
+    return this.request<T>(path, init);
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(this.url(path), {
       ...init,
+      credentials: 'same-origin',
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         ...(init.body ? { 'Content-Type': 'application/json' } : {}),
         ...init.headers
       }
@@ -198,7 +224,8 @@ export class FileApi {
     const query = path ? `?${new URLSearchParams({ path })}` : '';
     const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/files${query}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${this.token}` },
+      credentials: 'same-origin',
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
       body: form
     });
     await requireResponse(response);
@@ -208,7 +235,10 @@ export class FileApi {
   async download(path: string): Promise<Blob> {
     const response = await fetch(
       `${this.baseUrl.replace(/\/$/, '')}/files/content?${new URLSearchParams({ path })}`,
-      { headers: { Authorization: `Bearer ${this.token}` } }
+      {
+        credentials: 'same-origin',
+        headers: this.token ? { Authorization: `Bearer ${this.token}` } : {}
+      }
     );
     await requireResponse(response);
     return response.blob();
@@ -245,7 +275,8 @@ export class SkillApi {
       `${this.baseUrl.replace(/\/$/, '')}/skills?${query}`,
       {
         method,
-        headers: { Authorization: `Bearer ${this.token}` },
+        credentials: 'same-origin',
+        headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
         body: form
       }
     );
@@ -273,8 +304,9 @@ export class ApprovalApi {
       `${this.baseUrl.replace(/\/$/, '')}/approvals/decide?${query}`,
       {
         method: 'POST',
+        credentials: 'same-origin',
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ decision })

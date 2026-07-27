@@ -14,6 +14,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ ! -d "$PLATFORM_ROOT/frontend/node_modules" ]]; then
+  npm --prefix "$PLATFORM_ROOT/frontend" ci
+fi
+npm --prefix "$PLATFORM_ROOT/frontend" run build
+
 case "$PROFILE" in
   debug)
     cargo build \
@@ -21,6 +26,7 @@ case "$PROFILE" in
       -p kas-agent-driver \
       -p kas-approval-driver \
       -p kas-file-driver \
+      -p kas-frontend-driver \
       -p kas-message-driver \
       -p kas-skill-driver
     ;;
@@ -30,6 +36,7 @@ case "$PROFILE" in
       -p kas-agent-driver \
       -p kas-approval-driver \
       -p kas-file-driver \
+      -p kas-frontend-driver \
       -p kas-message-driver \
       -p kas-skill-driver \
       --release
@@ -46,7 +53,10 @@ mkdir -p \
   "$STAGING_ROOT/approval/driver/bin" \
   "$STAGING_ROOT/approval-result" \
   "$STAGING_ROOT/file/driver/bin" \
+  "$STAGING_ROOT/frontend/driver/bin" \
+  "$STAGING_ROOT/frontend/driver/web" \
   "$STAGING_ROOT/message/driver/bin" \
+  "$STAGING_ROOT/proxy" \
   "$STAGING_ROOT/skill/driver/bin" \
   "$STAGING_ROOT/thread" \
   "$STAGING_ROOT/session"
@@ -69,12 +79,20 @@ cp \
   "$TARGET_DIR/$PROFILE/kas-file-driver" \
   "$STAGING_ROOT/file/driver/bin/kas-file-driver"
 chmod 755 "$STAGING_ROOT/file/driver/bin/kas-file-driver"
+cp "$PLATFORM_ROOT/packages/frontend/manifest.json" "$STAGING_ROOT/frontend/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/frontend/resources" "$STAGING_ROOT/frontend/resources"
+cp \
+  "$TARGET_DIR/$PROFILE/kas-frontend-driver" \
+  "$STAGING_ROOT/frontend/driver/bin/kas-frontend-driver"
+chmod 755 "$STAGING_ROOT/frontend/driver/bin/kas-frontend-driver"
+cp -R "$PLATFORM_ROOT/frontend/dist/." "$STAGING_ROOT/frontend/driver/web/"
 cp "$PLATFORM_ROOT/packages/message/manifest.json" "$STAGING_ROOT/message/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/message/resources" "$STAGING_ROOT/message/resources"
 cp \
   "$TARGET_DIR/$PROFILE/kas-message-driver" \
   "$STAGING_ROOT/message/driver/bin/kas-message-driver"
 chmod 755 "$STAGING_ROOT/message/driver/bin/kas-message-driver"
+cp "$PLATFORM_ROOT/packages/proxy/manifest.json" "$STAGING_ROOT/proxy/manifest.json"
 cp "$PLATFORM_ROOT/packages/skill/manifest.json" "$STAGING_ROOT/skill/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/skill/resources" "$STAGING_ROOT/skill/resources"
 cp \
@@ -90,7 +108,9 @@ COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/agent" -cf "$OUTPUT_DIR/agent.kas" mani
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/approval" -cf "$OUTPUT_DIR/approval.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/approval-result" -cf "$OUTPUT_DIR/approval-result.kas" manifest.json
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/file" -cf "$OUTPUT_DIR/file.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/frontend" -cf "$OUTPUT_DIR/frontend.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" manifest.json resources driver
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/proxy" -cf "$OUTPUT_DIR/proxy.kas" manifest.json
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/skill" -cf "$OUTPUT_DIR/skill.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/thread" -cf "$OUTPUT_DIR/thread.kas" manifest.json resources
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/session" -cf "$OUTPUT_DIR/session.kas" manifest.json resources
@@ -98,8 +118,10 @@ COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/session" -cf "$OUTPUT_DIR/session.kas" 
 echo "$OUTPUT_DIR/thread.kas"
 echo "$OUTPUT_DIR/session.kas"
 echo "$OUTPUT_DIR/file.kas"
+echo "$OUTPUT_DIR/frontend.kas"
 echo "$OUTPUT_DIR/skill.kas"
 echo "$OUTPUT_DIR/message.kas"
+echo "$OUTPUT_DIR/proxy.kas"
 echo "$OUTPUT_DIR/agent.kas"
 echo "$OUTPUT_DIR/approval.kas"
 echo "$OUTPUT_DIR/approval-result.kas"

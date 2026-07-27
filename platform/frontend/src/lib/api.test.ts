@@ -21,6 +21,7 @@ describe('FileApi', () => {
     expect(uploaded.path).toBe('/files/one');
     expect(request).toHaveBeenCalledWith('/files-api/files', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { Authorization: 'Bearer secret' },
       body: expect.any(FormData)
     });
@@ -40,6 +41,7 @@ describe('FileApi', () => {
 
     expect(await blob.text()).toBe('hello');
     expect(request).toHaveBeenCalledWith('/files-api/files/content?path=%2Ffiles%2Fone', {
+      credentials: 'same-origin',
       headers: { Authorization: 'Bearer secret' }
     });
   });
@@ -105,6 +107,7 @@ describe('ApprovalApi', () => {
       '/approvals-api/approvals/decide?path=%2Fapprovals%2Fagents%2Fdemo%2Frequests%2Frequest-id&expected_revision=4',
       {
         method: 'POST',
+        credentials: 'same-origin',
         headers: {
           Authorization: 'Bearer secret',
           'Content-Type': 'application/json'
@@ -129,6 +132,7 @@ describe('KasApi', () => {
 
     expect(resources).toEqual([]);
     expect(request).toHaveBeenCalledWith('/api/resources', {
+      credentials: 'same-origin',
       headers: {
         Authorization: 'Bearer secret'
       }

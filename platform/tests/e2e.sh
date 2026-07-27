@@ -161,10 +161,12 @@ PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); 
 FILE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 SKILL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 APPROVAL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+FRONTEND_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
 FILE_API="http://127.0.0.1:$FILE_PORT"
 SKILL_API="http://127.0.0.1:$SKILL_PORT"
 APPROVAL_API="http://127.0.0.1:$APPROVAL_PORT"
+FRONTEND="http://127.0.0.1:$FRONTEND_PORT"
 export KAS_DATA_DIR="$E2E_DIR/data"
 export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
@@ -176,6 +178,7 @@ export KAS_SKILL_API="$SKILL_API"
 export KAS_APPROVAL_ADDRESS="127.0.0.1:$APPROVAL_PORT"
 export KAS_APPROVAL_API="$APPROVAL_API"
 export KAS_APPROVAL_API_URL="$APPROVAL_API"
+export KAS_FRONTEND_ADDRESS="127.0.0.1:$FRONTEND_PORT"
 export KAS_CODEX_BIN="$CODEX_BIN"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 export KAS_CODEX_HOME="$E2E_DIR/codex-home"
@@ -212,14 +215,42 @@ install_package() {
 THREAD_PACKAGE="$(install_package "$E2E_DIR/packages/thread.kas")"
 SESSION_PACKAGE="$(install_package "$E2E_DIR/packages/session.kas")"
 FILE_PACKAGE="$(install_package "$E2E_DIR/packages/file.kas")"
+PROXY_PACKAGE="$(install_package "$E2E_DIR/packages/proxy.kas")"
+FRONTEND_PACKAGE="$(install_package "$E2E_DIR/packages/frontend.kas")"
 SKILL_PACKAGE="$(install_package "$E2E_DIR/packages/skill.kas")"
 AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
 APPROVAL_RESULT_PACKAGE="$(install_package "$E2E_DIR/packages/approval-result.kas")"
 APPROVAL_PACKAGE="$(install_package "$E2E_DIR/packages/approval.kas")"
-for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE" "$APPROVAL_RESULT_PACKAGE" "$APPROVAL_PACKAGE"; do
+for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$PROXY_PACKAGE" "$FRONTEND_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE" "$APPROVAL_RESULT_PACKAGE" "$APPROVAL_PACKAGE"; do
   jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
+
+create_proxy() {
+  local path="$1" name="$2" prefix="$3" upstream="$4"
+  post_resource "$(
+    jq -cn \
+      --arg path "$path" \
+      --arg name "$name" \
+      --arg prefix "$prefix" \
+      --arg upstream "$upstream" '{
+        metadata: {
+          path: $path,
+          manifest: "/manifests/proxy",
+          name: $name
+        },
+        spec: {
+          prefix: $prefix,
+          upstream: $upstream,
+          strip_prefix: true,
+          authorization: "session"
+        }
+      }'
+  )" >/dev/null
+}
+create_proxy "/proxies/file" "File API" "/files-api" "$FILE_API"
+create_proxy "/proxies/skill" "Skill API" "/skills-api" "$SKILL_API"
+create_proxy "/proxies/approval" "Approval API" "/approvals-api" "$APPROVAL_API"
 
 for path in \
   /manifests/agent \
@@ -232,6 +263,12 @@ for path in \
   /manifests/file \
   /manifests/file/relations/attached-to \
   /manifests/file/relations/uploaded-by \
+  /manifests/proxy \
+  /proxies/file \
+  /proxies/skill \
+  /proxies/approval \
+  /manifests/frontend-plugin \
+  /manifests/frontend-plugin/relations/bundle \
   /manifests/skill \
   /manifests/skill/relations/bundle \
   /manifests/skill/relations/owns \
@@ -258,14 +295,22 @@ fi
 
 AGENT_DRIVER="$(wait_for_state "/manifests/agent/driver" running)"
 FILE_DRIVER="$(wait_for_state "/manifests/file/driver" running)"
+FRONTEND_DRIVER="$(wait_for_state "/manifests/frontend-plugin/driver" running)"
 SKILL_DRIVER="$(wait_for_state "/manifests/skill/driver" running)"
 MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
 APPROVAL_DRIVER="$(wait_for_state "/manifests/approval/driver" running)"
+FILE_PROXY="$(wait_for_state "/proxies/file" available)"
+SKILL_PROXY="$(wait_for_state "/proxies/skill" available)"
+APPROVAL_PROXY="$(wait_for_state "/proxies/approval" available)"
 jq -e '.spec == .status.spec' <<<"$AGENT_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FILE_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$FRONTEND_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$SKILL_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$MESSAGE_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$APPROVAL_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$FILE_PROXY" >/dev/null
+jq -e '.spec == .status.spec' <<<"$SKILL_PROXY" >/dev/null
+jq -e '.spec == .status.spec' <<<"$APPROVAL_PROXY" >/dev/null
 for _ in $(seq 1 200); do
   if command curl --fail --silent "$FILE_API/health" >/dev/null 2>&1; then
     break
@@ -273,6 +318,50 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 command curl --fail --silent "$FILE_API/health" | jq -e '.ok == true' >/dev/null
+"$PLATFORM_ROOT/scripts/build-frontend-plugin.sh" \
+  "$PLATFORM_ROOT/plugins/registry" \
+  "$E2E_DIR/registry.zip"
+KAS_API_URL="$API" \
+KAS_FILE_API_URL="$FILE_API" \
+KAS_TOKEN="$ADMIN_TOKEN" \
+  "$PLATFORM_ROOT/scripts/install-frontend-plugin.sh" \
+    "$E2E_DIR/registry.zip" \
+    "/frontend-plugins/e2e-registry" \
+    "e2e-registry" \
+    "index.html" \
+    "E2E Registry" \
+    "◇" \
+    "50" \
+    "/e2e-registry" >/dev/null
+FRONTEND_PLUGIN="$(wait_for_state "/frontend-plugins/e2e-registry" available)"
+jq -e '
+  .metadata.manifest == "/manifests/frontend-plugin"
+  and .metadata.state == "available"
+  and .status.metadata.state == "available"
+  and .spec.api_version == 1
+' <<<"$FRONTEND_PLUGIN" >/dev/null
+FRONTEND_PLUGIN_LINK="$(get_resource "/frontend-plugins/e2e-registry/links/bundle")"
+FRONTEND_PLUGIN_FILE="$(jq -r '.spec.target' <<<"$FRONTEND_PLUGIN_LINK")"
+get_resource "$FRONTEND_PLUGIN_FILE" >/dev/null
+for _ in $(seq 1 200); do
+  if command curl --fail --silent "$FRONTEND/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+command curl --fail --silent "$FRONTEND/health" | jq -e '.ok == true' >/dev/null
+COOKIE_JAR="$E2E_DIR/frontend.cookies"
+command curl --fail --silent \
+  -c "$COOKIE_JAR" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -cn --arg token "$ADMIN_TOKEN" '{token:$token}')" \
+  "$FRONTEND/gateway/session" | jq -e '.subject != null' >/dev/null
+command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/api/health" | jq -e '.ok == true' >/dev/null
+command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/files-api/health" | jq -e '.ok == true' >/dev/null
+command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/skills-api/health" | jq -e '.ok == true' >/dev/null
+command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/approvals-api/health" | jq -e '.ok == true' >/dev/null
+command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/plugins/e2e-registry/index.html" |
+  grep -q "Object Registry"
 for _ in $(seq 1 200); do
   if command curl --fail --silent "$SKILL_API/health" >/dev/null 2>&1; then
     break

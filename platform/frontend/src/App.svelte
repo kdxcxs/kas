@@ -34,13 +34,21 @@
     threadParticipantLink,
     threadsForAgent
   } from './lib/chat';
+  import {
+    FRONTEND_PLUGIN_MANIFEST,
+    frontendPluginEntries,
+    isPluginRequest
+  } from './lib/plugins';
+  import type { FrontendPluginEntry } from './lib/plugins';
   import type {
+    CreateResource,
     Driver,
     ObjectDetail,
     ObjectKind,
     ObjectRef,
     Resource,
-    Run
+    Run,
+    UpdateResource
   } from './lib/types';
 
   const SETTINGS_KEY = 'kas-platform-settings';
@@ -56,7 +64,7 @@
     userPath: string;
   }
 
-  type View = 'chat' | 'agents' | 'skills' | 'approvals' | 'threads' | 'objects';
+  type View = 'chat' | 'agents' | 'skills' | 'approvals' | 'threads' | 'objects' | 'plugin';
 
   const OBJECT_KINDS: ObjectKind[] = [
     'resource',
@@ -88,6 +96,10 @@
   let skills: Resource[] = [];
   let approvals: Resource[] = [];
   let approvalResults: Resource[] = [];
+  let frontendPlugins: Resource[] = [];
+  let selectedPlugin: FrontendPluginEntry | null = null;
+  let pluginUrl = '';
+  let pluginFrame: HTMLIFrameElement;
   let selectedApprovalPath = '';
   let savingApproval = false;
   let selectedAgentPath = '';
@@ -171,6 +183,7 @@
   $: pendingApprovalCount = approvalRequests.filter(
     (approval) => approval.state === 'pending'
   ).length;
+  $: pluginEntries = frontendPluginEntries(frontendPlugins);
   $: filteredObjects = objects.filter(
     (object) =>
       object.kind === objectKind &&
@@ -193,11 +206,14 @@
             ? 'Thread management'
             : view === 'objects'
               ? 'Resource management'
+              : view === 'plugin'
+                ? selectedPlugin?.label ?? 'Frontend Plugin'
               : activeThread
                 ? titleOf(activeThread)
                 : 'Choose a Thread';
 
   onMount(() => {
+    window.addEventListener('message', handlePluginMessage);
     const saved = localStorage.getItem(SETTINGS_KEY);
     if (saved) {
       try {
@@ -207,11 +223,12 @@
         localStorage.removeItem(SETTINGS_KEY);
       }
     }
-    showSettings = !settings.token;
-    if (settings.token) void connect();
+    showSettings = true;
+    void restoreConnection();
   });
 
   onDestroy(() => {
+    window.removeEventListener('message', handlePluginMessage);
     Object.values(previewUrls).forEach((url) => URL.revokeObjectURL(url));
   });
 
@@ -231,10 +248,173 @@
     return new ApprovalApi(DEFAULT_APPROVAL_API_BASE, settings.token);
   }
 
+  async function openFrontendPlugin(entry: FrontendPluginEntry): Promise<void> {
+    error = '';
+    notice = '';
+    pluginUrl = `/plugins/${encodeURIComponent(entry.slug)}/${entry.entrypoint
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`;
+    selectedPlugin = entry;
+    view = 'plugin';
+  }
+
+  function handlePluginMessage(event: MessageEvent<unknown>): void {
+    if (!pluginFrame?.contentWindow || event.source !== pluginFrame.contentWindow) return;
+    if (!isRecord(event.data) || event.data.source !== 'kas-frontend-plugin') return;
+    if (event.data.type === 'ready') {
+      postPluginContext();
+      return;
+    }
+    if (!isPluginRequest(event.data)) return;
+    void dispatchPluginRequest(event.data.id, event.data.method, event.data.params ?? {});
+  }
+
+  function postPluginContext(): void {
+    pluginFrame?.contentWindow?.postMessage(
+      {
+        source: 'kas-frontend-host',
+        type: 'context',
+        context: {
+          apiVersion: 1,
+          plugin: selectedPlugin,
+          subject: { path: settings.userPath, manifest: '/builtin/user' },
+          workspace: {
+            activeThread: activeThreadPath,
+            selectedResource: selectedObjectPath || undefined,
+            theme: 'dark',
+            locale: navigator.language
+          }
+        }
+      },
+      '*'
+    );
+  }
+
+  async function dispatchPluginRequest(
+    id: string,
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<void> {
+    try {
+      const api = client();
+      let result: unknown;
+      switch (method) {
+        case 'resources.list':
+          result = await api.listResources(stringParam(params.manifest) || undefined, true);
+          break;
+        case 'resources.get':
+          result = await api.getResource(requiredStringParam(params, 'path'), true);
+          break;
+        case 'resources.create':
+          result = await api.createResource(requiredRecordParam(params, 'resource') as unknown as CreateResource);
+          break;
+        case 'resources.update':
+          result = await api.updateResource(
+            requiredStringParam(params, 'path'),
+            requiredRecordParam(params, 'update') as unknown as UpdateResource
+          );
+          break;
+        case 'resources.delete':
+          result = await api.deleteResource(
+            requiredStringParam(params, 'path'),
+            requiredNumberParam(params, 'expectedRevision')
+          );
+          break;
+        case 'links.list':
+          result = (await api.getResource(requiredStringParam(params, 'path'), true)).links ?? [];
+          break;
+        case 'auth.context':
+          result = await api.authContext();
+          break;
+        case 'auth.check':
+          result = await api.checkAuthorization({
+            manifest: requiredStringParam(params, 'manifest'),
+            verb: requiredStringParam(params, 'verb'),
+            path: requiredStringParam(params, 'path')
+          });
+          break;
+        case 'api.request': {
+          const body = params.body;
+          result = await api.rawRequest(requiredStringParam(params, 'path'), {
+            method: stringParam(params.method) || 'GET',
+            body: body === undefined ? undefined : JSON.stringify(body)
+          });
+          break;
+        }
+        case 'navigation.openThread':
+          chooseThread(requiredStringParam(params, 'path'));
+          result = null;
+          break;
+        case 'navigation.openResource':
+          await openObjectExplorer();
+          await selectObject(objectRefForPath(requiredStringParam(params, 'path')));
+          result = null;
+          break;
+        default:
+          throw new Error(`Unsupported Frontend Plugin method: ${method}`);
+      }
+      postPluginResponse(id, result);
+    } catch (cause) {
+      postPluginResponse(id, undefined, messageOf(cause));
+    }
+  }
+
+  function postPluginResponse(id: string, result?: unknown, responseError?: string): void {
+    pluginFrame?.contentWindow?.postMessage(
+      {
+        source: 'kas-frontend-host',
+        type: 'response',
+        id,
+        result,
+        error: responseError
+      },
+      '*'
+    );
+  }
+
+  function requiredStringParam(params: Record<string, unknown>, key: string): string {
+    const value = params[key];
+    if (typeof value !== 'string' || !value) throw new Error(`${key} must be a string`);
+    return value;
+  }
+
+  function stringParam(value: unknown): string {
+    return typeof value === 'string' ? value : '';
+  }
+
+  function requiredNumberParam(params: Record<string, unknown>, key: string): number {
+    const value = params[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`${key} must be a number`);
+    }
+    return value;
+  }
+
+  function requiredRecordParam(
+    params: Record<string, unknown>,
+    key: string
+  ): Record<string, unknown> {
+    const value = params[key];
+    if (!isRecord(value)) throw new Error(`${key} must be an object`);
+    return value;
+  }
+
   async function connect(): Promise<void> {
     connecting = true;
     error = '';
     try {
+      if (settings.token) {
+        const response = await fetch('/gateway/session', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: settings.token })
+        });
+        if (!response.ok) throw new Error('KAS credential was rejected.');
+        settings = { ...settings, token: '' };
+        draftSettings = { ...settings };
+      }
       const api = client();
       if (!(await api.health())) throw new Error('KAS health check failed.');
       await loadData(api);
@@ -245,6 +425,16 @@
       showSettings = true;
     } finally {
       connecting = false;
+    }
+  }
+
+  async function restoreConnection(): Promise<void> {
+    try {
+      const response = await fetch('/gateway/session', { credentials: 'same-origin' });
+      if (!response.ok) return;
+      await connect();
+    } finally {
+      if (showSettings && !connecting) showSettings = true;
     }
   }
 
@@ -259,7 +449,8 @@
         fileResources,
         skillResources,
         approvalResources,
-        approvalResultResources
+        approvalResultResources,
+        frontendPluginResources
       ] =
         await Promise.all([
           api.listResources(AGENT_MANIFEST),
@@ -269,7 +460,8 @@
           api.listResources(FILE_MANIFEST),
           api.listResources(SKILL_MANIFEST),
           api.listResources(APPROVAL_MANIFEST),
-          api.listResources(APPROVAL_RESULT_MANIFEST)
+          api.listResources(APPROVAL_RESULT_MANIFEST),
+          api.listResources(FRONTEND_PLUGIN_MANIFEST)
         ]);
       agents = agentResources
         .filter((resource) => resource.manifest === AGENT_MANIFEST)
@@ -317,6 +509,11 @@
             .map((resource) => api.getResource(resource.path, true))
         )
       ).sort((left, right) => right.created_at.localeCompare(left.created_at));
+      frontendPlugins = await Promise.all(
+        frontendPluginResources
+          .filter((resource) => resource.manifest === FRONTEND_PLUGIN_MANIFEST)
+          .map((resource) => api.getResource(resource.path, true))
+      );
       if (!skills.some((skill) => skill.path === selectedSkillPath)) {
         selectedSkillPath = skills[0]?.path ?? '';
       }
@@ -701,6 +898,15 @@
       await loadObjects();
     } else {
       await loadData();
+      if (view === 'plugin' && selectedPlugin) {
+        selectedPlugin =
+          pluginEntries.find(
+            (entry) =>
+              entry.pluginPath === selectedPlugin?.pluginPath &&
+              entry.id === selectedPlugin?.id
+          ) ?? null;
+        postPluginContext();
+      }
       if (view === 'threads') {
         selectManagedThread(selectedManagedThreadPath || threads[0]?.path || '');
       }
@@ -760,7 +966,10 @@
       token: draftSettings.token.trim(),
       userPath: draftSettings.userPath.trim()
     };
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({ apiBase: settings.apiBase, userPath: settings.userPath })
+    );
     await connect();
   }
 
@@ -1302,33 +1511,34 @@
             <small>{pendingApprovalCount} pending · {approvalRequests.length} total</small>
           </span>
         </button>
-        <button class:active={view === 'objects'} onclick={() => void openObjectExplorer()}>
-          <span class="nav-icon">◇</span>
-          <span><strong>Objects</strong><small>Complete registry</small></span>
-        </button>
+        {#each pluginEntries.filter((entry) => entry.section === 'workspace') as entry}
+          <button
+            class:active={view === 'plugin' &&
+              selectedPlugin?.pluginPath === entry.pluginPath &&
+              selectedPlugin?.id === entry.id}
+            onclick={() => void openFrontendPlugin(entry)}
+          >
+            <span class="nav-icon">{entry.icon}</span>
+            <span><strong>{entry.label}</strong><small>{entry.description}</small></span>
+          </button>
+        {/each}
       </nav>
 
-      <div class="sidebar-section-title resource-title">Resources</div>
-      <nav class="resource-nav" aria-label="Resource shortcuts">
-        <button class:active={view === 'objects' && objectKind === 'resource'} onclick={() => void openObjectKind('resource')}>
-          <span>Resources</span><small>All</small>
-        </button>
-        <button class:active={view === 'objects' && objectKind === 'link'} onclick={() => void openObjectKind('link')}>
-          <span>Links</span><small>Relations</small>
-        </button>
-        <button class:active={view === 'objects' && objectKind === 'manifest'} onclick={() => void openObjectKind('manifest')}>
-          <span>Manifests</span><small>Types</small>
-        </button>
-        <button class:active={view === 'objects' && objectKind === 'service_account'} onclick={() => void openObjectKind('service_account')}>
-          <span>Service Accounts</span><small>Identity</small>
-        </button>
-        <button class:active={view === 'objects' && objectKind === 'role'} onclick={() => void openObjectKind('role')}>
-          <span>Roles</span><small>RBAC</small>
-        </button>
-        <button class:active={view === 'objects' && objectKind === 'package'} onclick={() => void openObjectKind('package')}>
-          <span>Packages</span><small>Installed</small>
-        </button>
-      </nav>
+      {#if pluginEntries.some((entry) => entry.section === 'resources')}
+        <div class="sidebar-section-title resource-title">Resources</div>
+        <nav class="resource-nav" aria-label="Resource plugins">
+          {#each pluginEntries.filter((entry) => entry.section === 'resources') as entry}
+            <button
+              class:active={view === 'plugin' &&
+                selectedPlugin?.pluginPath === entry.pluginPath &&
+                selectedPlugin?.id === entry.id}
+              onclick={() => void openFrontendPlugin(entry)}
+            >
+              <span>{entry.label}</span><small>{entry.description}</small>
+            </button>
+          {/each}
+        </nav>
+      {/if}
 
       <div class="sidebar-section-title context-title">Current Thread</div>
       {#if activeThread}
@@ -1376,8 +1586,10 @@
                 ? 'Delegated authority'
                 : view === 'threads'
                   ? 'Conversations'
-                  : view === 'objects'
+                : view === 'objects'
                     ? 'KAS Registry'
+                    : view === 'plugin'
+                      ? 'Frontend Plugin'
                     : 'Current Thread'}
         </p>
         <h1>{pageTitle}</h1>
@@ -2043,6 +2255,19 @@
               </form>
             {/if}
           </div>
+        {/if}
+      </section>
+    {:else if view === 'plugin'}
+      <section class="frontend-plugin-host" aria-label={selectedPlugin?.label ?? 'Frontend Plugin'}>
+        {#if loading || !pluginUrl}
+          <div class="plugin-loading">Loading Frontend Plugin…</div>
+        {:else}
+          <iframe
+            bind:this={pluginFrame}
+            src={pluginUrl}
+            title={selectedPlugin?.label ?? 'Frontend Plugin'}
+            sandbox="allow-scripts"
+          ></iframe>
         {/if}
       </section>
     {:else if view === 'objects'}

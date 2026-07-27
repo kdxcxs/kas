@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PLATFORM_ROOT="$ROOT/platform"
-FRONTEND_ROOT="$PLATFORM_ROOT/frontend"
 API_PORT="${KAS_PREVIEW_API_PORT:-3000}"
 FILE_PORT="${KAS_PREVIEW_FILE_PORT:-3001}"
 SKILL_PORT="${KAS_PREVIEW_SKILL_PORT:-3002}"
@@ -12,18 +11,12 @@ FRONTEND_PORT="${KAS_PREVIEW_FRONTEND_PORT:-5173}"
 PREVIEW_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-platform-preview.XXXXXX")"
 PACKAGES_DIR="$PREVIEW_DIR/packages"
 API_LOG="$PREVIEW_DIR/kas-api.log"
-FRONTEND_LOG="$PREVIEW_DIR/frontend.log"
 API_PID=""
-FRONTEND_PID=""
 
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
 
-  if [[ -n "$FRONTEND_PID" ]] && kill -0 "$FRONTEND_PID" 2>/dev/null; then
-    kill "$FRONTEND_PID" 2>/dev/null || true
-    wait "$FRONTEND_PID" 2>/dev/null || true
-  fi
   if [[ -n "$API_PID" ]] && kill -0 "$API_PID" 2>/dev/null; then
     kill "$API_PID" 2>/dev/null || true
     wait "$API_PID" 2>/dev/null || true
@@ -38,10 +31,6 @@ cleanup() {
     if [[ -s "$API_LOG" ]]; then
       echo "--- API log ---" >&2
       tail -n 120 "$API_LOG" >&2
-    fi
-    if [[ -s "$FRONTEND_LOG" ]]; then
-      echo "--- frontend log ---" >&2
-      tail -n 120 "$FRONTEND_LOG" >&2
     fi
   fi
 
@@ -87,11 +76,6 @@ echo "Building KAS and platform packages..."
 cargo build --workspace
 "$PLATFORM_ROOT/scripts/build-packages.sh" "$PACKAGES_DIR"
 
-if [[ ! -d "$FRONTEND_ROOT/node_modules" ]]; then
-  echo "Installing frontend dependencies..."
-  npm --prefix "$FRONTEND_ROOT" ci
-fi
-
 API="http://127.0.0.1:$API_PORT"
 FILE_API="http://127.0.0.1:$FILE_PORT"
 SKILL_API="http://127.0.0.1:$SKILL_PORT"
@@ -110,6 +94,7 @@ export KAS_SKILL_API_URL="$SKILL_API"
 export KAS_APPROVAL_ADDRESS="127.0.0.1:$APPROVAL_PORT"
 export KAS_APPROVAL_API="$APPROVAL_API"
 export KAS_APPROVAL_API_URL="$APPROVAL_API"
+export KAS_FRONTEND_ADDRESS="127.0.0.1:$FRONTEND_PORT"
 export KAS_CODEX_BIN="$CODEX_BIN"
 
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
@@ -147,22 +132,54 @@ if [[ "$api_ready" != true ]]; then
 fi
 
 install_package() {
-  curl --fail --silent \
+  curl --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/vnd.kas.manifest+tar" \
     --data-binary "@$1" \
     "$API/packages"
 }
 
-echo "Installing Thread, Session, File, Skill, Approval Result, Approval, Agent, and Message packages..."
+echo "Installing Platform packages..."
 install_package "$PACKAGES_DIR/thread.kas" >/dev/null
 install_package "$PACKAGES_DIR/session.kas" >/dev/null
 install_package "$PACKAGES_DIR/file.kas" >/dev/null
+install_package "$PACKAGES_DIR/proxy.kas" >/dev/null
+install_package "$PACKAGES_DIR/frontend.kas" >/dev/null
 install_package "$PACKAGES_DIR/skill.kas" >/dev/null
 install_package "$PACKAGES_DIR/approval-result.kas" >/dev/null
 install_package "$PACKAGES_DIR/approval.kas" >/dev/null
 install_package "$PACKAGES_DIR/agent.kas" >/dev/null
 install_package "$PACKAGES_DIR/message.kas" >/dev/null
+
+create_proxy() {
+  local path="$1" name="$2" prefix="$3" upstream="$4"
+  curl --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(
+      jq -cn \
+        --arg path "$path" \
+        --arg name "$name" \
+        --arg prefix "$prefix" \
+        --arg upstream "$upstream" '{
+          metadata: {
+            path: $path,
+            manifest: "/manifests/proxy",
+            name: $name
+          },
+          spec: {
+            prefix: $prefix,
+            upstream: $upstream,
+            strip_prefix: true,
+            authorization: "session"
+          }
+        }'
+    )" \
+    "$API/resources" >/dev/null
+}
+create_proxy "/proxies/file" "File API" "/files-api" "$FILE_API"
+create_proxy "/proxies/skill" "Skill API" "/skills-api" "$SKILL_API"
+create_proxy "/proxies/approval" "Approval API" "/approvals-api" "$APPROVAL_API"
 
 wait_for_driver() {
   local path="$1" driver
@@ -184,9 +201,25 @@ wait_for_driver() {
 
 wait_for_driver "/manifests/agent/driver"
 wait_for_driver "/manifests/file/driver"
+wait_for_driver "/manifests/frontend-plugin/driver"
 wait_for_driver "/manifests/skill/driver"
 wait_for_driver "/manifests/approval/driver"
 wait_for_driver "/manifests/message/driver"
+for proxy_path in /proxies/file /proxies/skill /proxies/approval; do
+  for _ in $(seq 1 200); do
+    proxy="$(
+      curl --fail --silent --get \
+        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        --data-urlencode "path=$proxy_path" \
+        "$API/resources/by-path"
+    )"
+    if [[ "$(jq -r '.status.metadata.state' <<<"$proxy")" == "available" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  jq -e '.status.metadata.state == "available"' <<<"$proxy" >/dev/null
+done
 
 file_ready=false
 for _ in $(seq 1 100); do
@@ -200,6 +233,39 @@ if [[ "$file_ready" != true ]]; then
   echo "File Driver API did not become ready" >&2
   exit 1
 fi
+
+KAS_API_URL="$API" \
+KAS_FILE_API_URL="$FILE_API" \
+KAS_TOKEN="$ADMIN_TOKEN" \
+  "$PLATFORM_ROOT/scripts/build-frontend-plugin.sh" \
+    "$PLATFORM_ROOT/plugins/registry" \
+    "$PREVIEW_DIR/registry.zip"
+
+KAS_API_URL="$API" \
+KAS_FILE_API_URL="$FILE_API" \
+KAS_TOKEN="$ADMIN_TOKEN" \
+  "$PLATFORM_ROOT/scripts/install-frontend-plugin.sh" \
+    "$PREVIEW_DIR/registry.zip" \
+    "/frontend-plugins/registry" \
+    "registry" \
+    "index.html" \
+    "Objects" \
+    "◇" \
+    "50" \
+    "/objects" >/dev/null
+for _ in $(seq 1 200); do
+  PLUGIN="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=/frontend-plugins/registry" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(jq -r '.status.metadata.state' <<<"$PLUGIN")" == "available" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e '.status.metadata.state == "available"' <<<"$PLUGIN" >/dev/null
 
 skill_ready=false
 for _ in $(seq 1 100); do
@@ -336,22 +402,14 @@ for _ in $(seq 1 200); do
 done
 jq -e '.status.metadata.state == "available"' <<<"$PARTICIPANT_LINK" >/dev/null
 
-(
-  cd "$FRONTEND_ROOT"
-  exec node_modules/.bin/vite \
-    --host 127.0.0.1 \
-    --port "$FRONTEND_PORT"
-) >"$FRONTEND_LOG" 2>&1 &
-FRONTEND_PID="$!"
-
 frontend_ready=false
 for _ in $(seq 1 100); do
   if curl --fail --silent "$FRONTEND/" >/dev/null; then
     frontend_ready=true
     break
   fi
-  if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
-    echo "frontend exited during startup" >&2
+  if ! kill -0 "$API_PID" 2>/dev/null; then
+    echo "kas-api exited while Frontend Driver was starting" >&2
     exit 1
   fi
   sleep 0.05
@@ -379,10 +437,6 @@ echo "Press Ctrl-C to stop the preview."
 while true; do
   if ! kill -0 "$API_PID" 2>/dev/null; then
     echo "kas-api stopped unexpectedly" >&2
-    exit 1
-  fi
-  if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
-    echo "frontend stopped unexpectedly" >&2
     exit 1
   fi
   sleep 1

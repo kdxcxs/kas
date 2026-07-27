@@ -1,0 +1,79 @@
+{
+  "path": "/manifests/frontend-plugin",
+  "manifest": "/builtin/manifest",
+  "name": "frontend-plugin",
+  "version": 1,
+  "description": "A ZIP-backed workspace UI contribution maintained by the KAS web gateway.",
+  "states": ["invalid"],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["api_version", "slug", "entrypoint", "contributes"],
+    "properties": {
+      "api_version": {
+        "const": 1
+      },
+      "slug": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "maxLength": 64
+      },
+      "entrypoint": {
+        "type": "string",
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.html$",
+        "maxLength": 256
+      },
+      "contributes": {
+        "type": "object",
+        "required": ["sidebar"],
+        "properties": {
+          "sidebar": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["id", "label", "icon", "section", "order", "route"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "icon": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8
+                },
+                "section": {
+                  "enum": ["workspace", "resources"]
+                },
+                "order": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "route": {
+                  "type": "string",
+                  "pattern": "^/[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)*$"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}

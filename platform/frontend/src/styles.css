@@ -2330,6 +2330,30 @@ button:disabled {
   font-size: 15px;
 }
 
+.frontend-plugin-host {
+  grid-row: 4;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0c100c;
+}
+
+.frontend-plugin-host iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: #0c100c;
+}
+
+.plugin-loading {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--muted);
+}
+
 .composer textarea {
   display: block;
   width: 100%;
