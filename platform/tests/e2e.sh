@@ -1354,14 +1354,9 @@ DELETED_DOWNLOAD_STATUS="$(
 )"
 [[ "$DELETED_DOWNLOAD_STATUS" == "404" ]]
 
-for _ in $(seq 1 200); do
-  ACTIVE_DELIVERIES="$(sqlite3 "$KAS_DATABASE" 'SELECT count(*) FROM driver_deliveries')"
-  if [[ "$ACTIVE_DELIVERIES" == "0" ]]; then
-    break
-  fi
-  sleep 0.05
-done
-[[ "$ACTIVE_DELIVERIES" == "0" ]]
+TABLES="$(sqlite3 "$KAS_DATABASE" \
+  "SELECT group_concat(name, ',') FROM (SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name)")"
+[[ "$TABLES" == "events,resources" ]]
 SKILL_EVENT_COUNT="$(
   sqlite3 "$KAS_DATABASE" \
     "SELECT count(*) FROM events WHERE resource_path IN ('$SKILL_PATH','/skills/kas')"
