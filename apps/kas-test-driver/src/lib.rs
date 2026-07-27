@@ -49,8 +49,8 @@ mod tests {
     #[tokio::test]
     async fn echo_uses_hydrated_action() {
         let resource: Resource = serde_json::from_value(json!({
+            "path": "/resources/source",
             "metadata": {
-                "path": "/resources/source",
                 "manifest": "/manifests/echo",
                 "name": "source",
                 "state": "available",
@@ -66,8 +66,8 @@ mod tests {
         }))
         .unwrap();
         let run: Resource = serde_json::from_value(json!({
+            "path": "/runs/echo-1",
             "metadata": {
-                "path": "/runs/echo-1",
                 "manifest": "/builtin/run",
                 "name": "echo-1",
                 "state": "queued",
@@ -98,8 +98,8 @@ mod tests {
         }))
         .unwrap();
         let action: Resource = serde_json::from_value(json!({
+            "path": "/manifests/test/actions/echo",
             "metadata": {
-                "path": "/manifests/test/actions/echo",
                 "manifest": "/builtin/action",
                 "name": "echo",
                 "state": "available",

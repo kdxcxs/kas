@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/roles/editor",
   "metadata": {
-    "path": "/builtin/roles/editor",
     "manifest": "/builtin/role",
     "name": "system:editor"
   },

@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/relations/run-driver",
   "metadata": {
-    "path": "/builtin/relations/run-driver",
     "manifest": "/builtin/relation",
     "name": "run-driver"
   },

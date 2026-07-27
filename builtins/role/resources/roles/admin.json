@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/roles/admin",
   "metadata": {
-    "path": "/builtin/roles/admin",
     "manifest": "/builtin/role",
     "name": "system:admin"
   },

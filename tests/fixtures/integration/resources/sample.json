@@ -1,6 +1,6 @@
 {
+  "path": "/resources/integrations/demo",
   "metadata": {
-    "path": "/resources/integrations/demo",
     "manifest": ".",
     "name": "integration-demo"
   },

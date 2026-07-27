@@ -16,6 +16,7 @@ pub const BUILTIN_PACKAGE_MEDIA_TYPE: &str = "application/vnd.kas.builtin+json";
 /// The only public persistent object in KAS.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resource {
+    pub path: String,
     pub metadata: ResourceMetadata,
     pub spec: Value,
     pub status: ResourceStatus,
@@ -29,8 +30,6 @@ pub struct DriverObservation {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ResourceMetadata {
-    #[serde(default)]
-    pub path: String,
     #[serde(default)]
     pub manifest: String,
     #[serde(default)]
@@ -51,6 +50,10 @@ pub struct KasMetadata {
     pub generation: u64,
     #[serde(default)]
     pub observed: BTreeMap<String, DriverObservation>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub protected: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub managed_by: String,
     #[serde(default)]
     pub created_at: DateTime<Utc>,
     #[serde(default)]
@@ -96,7 +99,6 @@ impl Resource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PlannedResourceMetadata {
-    pub path: String,
     pub manifest: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -106,6 +108,7 @@ pub struct PlannedResourceMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlannedResource {
+    pub path: String,
     pub metadata: PlannedResourceMetadata,
     #[serde(default = "default_document")]
     pub spec: Value,
@@ -477,6 +480,7 @@ pub struct CredentialSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceDefinition {
+    pub path: String,
     pub metadata: PlannedResourceMetadata,
     #[serde(default = "default_document")]
     pub spec: Value,
@@ -490,6 +494,10 @@ fn default_document() -> Value {
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Deref for ResourceDefinition {
@@ -630,8 +638,8 @@ impl PackageDefinition {
         let mut driver_count = 0;
         resource_owners.insert(root_path.clone(), root_path.clone());
         resources.push(PlannedResource {
+            path: root_path.clone(),
             metadata: PlannedResourceMetadata {
-                path: root_path.clone(),
                 manifest: manifest_type,
                 name: self.manifest.name,
                 state: String::new(),
@@ -643,13 +651,11 @@ impl PackageDefinition {
             resource.path = resolve_reference_path(&root_path, &resource.path)?;
             resource.manifest = resolve_reference_path(&root_path, &resource.manifest)?;
             if resource.manifest == MANIFEST_MANIFEST_PATH {
-                return Err(ManifestDefinitionError::NestedManifest(
-                    resource.metadata.path,
-                ));
+                return Err(ManifestDefinitionError::NestedManifest(resource.path));
             }
             if !resource_paths.insert(resource.path.clone()) {
                 return Err(ManifestDefinitionError::DuplicateResourcePath(
-                    resource.metadata.path,
+                    resource.path,
                 ));
             }
             if resource.manifest == "/builtin/driver" {
@@ -666,6 +672,7 @@ impl PackageDefinition {
             )?;
             resource_owners.insert(resource.path.clone(), root_path.clone());
             resources.push(PlannedResource {
+                path: resource.path,
                 metadata: resource.metadata,
                 spec: resource.spec,
                 status: resource.status,
@@ -1038,7 +1045,6 @@ mod tests {
     fn resource_is_the_single_persistent_shape() {
         let now = Utc::now();
         let metadata = ResourceMetadata {
-            path: "/agents/main".into(),
             manifest: "/manifests/agent".into(),
             name: "main".into(),
             state: STATE_AVAILABLE.into(),
@@ -1046,11 +1052,14 @@ mod tests {
                 revision: 1,
                 generation: 0,
                 observed: BTreeMap::new(),
+                protected: false,
+                managed_by: "user".into(),
                 created_at: now,
                 updated_at: now,
             },
         };
         let resource = Resource {
+            path: "/agents/main".into(),
             metadata: metadata.clone(),
             spec: json!({"working_directory": "/workspace"}),
             status: ResourceStatus {
@@ -1099,8 +1108,8 @@ mod tests {
                 initial_state: STATE_PENDING.into(),
             },
             resources: vec![ResourceDefinition {
+                path: "./actions/example".into(),
                 metadata: PlannedResourceMetadata {
-                    path: "./actions/example".into(),
                     manifest: "/builtin/action".into(),
                     name: "example".into(),
                     state: String::new(),
@@ -1133,8 +1142,8 @@ mod tests {
                 initial_state: STATE_AVAILABLE.into(),
             },
             resources: vec![ResourceDefinition {
+                path: "./nested".into(),
                 metadata: PlannedResourceMetadata {
-                    path: "./nested".into(),
                     manifest: MANIFEST_MANIFEST_PATH.into(),
                     name: "nested".into(),
                     state: String::new(),
@@ -1165,8 +1174,8 @@ mod tests {
                 initial_state: STATE_AVAILABLE.into(),
             },
             resources: vec![ResourceDefinition {
+                path: "./driver".into(),
                 metadata: PlannedResourceMetadata {
-                    path: "./driver".into(),
                     manifest: "/builtin/driver".into(),
                     name: "driver".into(),
                     state: String::new(),

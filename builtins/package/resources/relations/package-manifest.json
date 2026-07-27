@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/relations/package-manifest",
   "metadata": {
-    "path": "/builtin/relations/package-manifest",
     "manifest": "/builtin/relation",
     "name": "package-manifest"
   },

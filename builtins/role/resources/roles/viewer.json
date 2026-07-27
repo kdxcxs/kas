@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/roles/viewer",
   "metadata": {
-    "path": "/builtin/roles/viewer",
     "manifest": "/builtin/role",
     "name": "system:viewer"
   },

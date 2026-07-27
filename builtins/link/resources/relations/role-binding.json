@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/relations/role-binding",
   "metadata": {
-    "path": "/builtin/relations/role-binding",
     "manifest": "/builtin/relation",
     "name": "role-binding"
   },

@@ -1,6 +1,6 @@
 {
+  "path": "/builtin/relations/run-resource",
   "metadata": {
-    "path": "/builtin/relations/run-resource",
     "manifest": "/builtin/relation",
     "name": "run-resource"
   },
