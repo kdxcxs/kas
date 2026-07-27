@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 10;
+pub const LATEST_SCHEMA_VERSION: u32 = 11;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -62,6 +62,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         10,
         include_str!("../migrations/0010_resource_metadata_and_driver_watches.sql"),
+    ),
+    (
+        11,
+        include_str!("../migrations/0011_active_driver_deliveries.sql"),
     ),
 ];
 
@@ -935,10 +939,6 @@ impl Store {
                 now,
             )?);
         }
-        tx.execute(
-            "UPDATE driver_deliveries SET status='completed',completed_at=? WHERE id=?",
-            params![stamp(now), delivery_id.to_string()],
-        )?;
         match delivery.work {
             DriverWork::Reconcile {
                 driver_revision,
@@ -975,6 +975,10 @@ impl Store {
             }
             DriverWork::Run { .. } => {}
         }
+        tx.execute(
+            "DELETE FROM driver_deliveries WHERE id=?",
+            [delivery_id.to_string()],
+        )?;
         tx.commit()?;
         Ok(results)
     }
@@ -1102,17 +1106,20 @@ impl Store {
         generation: u64,
     ) -> Result<DriverDelivery, StoreError> {
         let now = Utc::now();
+        let mut delivery = self.get_driver_delivery(id)?;
         let changed = self.connection.execute(
-            "UPDATE driver_deliveries SET status='completed',completed_at=?
+            "DELETE FROM driver_deliveries
              WHERE id=? AND driver_path=? AND generation=? AND status='acked'",
-            params![stamp(now), id.to_string(), driver_path, generation],
+            params![id.to_string(), driver_path, generation],
         )?;
         if changed != 1 {
             return Err(StoreError::Conflict(
                 "Driver delivery is not acknowledged".into(),
             ));
         }
-        self.get_driver_delivery(id)
+        delivery.status = DeliveryStatus::Completed;
+        delivery.completed_at = Some(now);
+        Ok(delivery)
     }
 
     pub fn get_driver_delivery(&self, id: Uuid) -> Result<DriverDelivery, StoreError> {
@@ -1374,7 +1381,7 @@ impl Store {
 }
 
 const DELIVERY_SELECT: &str =
-    "SELECT id,driver_path,generation,work_json,status,created_at,acked_at,completed_at
+    "SELECT id,driver_path,generation,work_json,status,created_at,acked_at
      FROM driver_deliveries";
 
 struct BuiltinDocuments {
@@ -1576,7 +1583,6 @@ fn delivery_from_row(row: &Row<'_>) -> rusqlite::Result<DriverDelivery> {
         status: match status.as_str() {
             "pending" => DeliveryStatus::Pending,
             "acked" => DeliveryStatus::Acked,
-            "completed" => DeliveryStatus::Completed,
             other => {
                 return Err(from_sql(
                     4,
@@ -1586,7 +1592,7 @@ fn delivery_from_row(row: &Row<'_>) -> rusqlite::Result<DriverDelivery> {
         },
         created_at: time_from_row(row, 5)?,
         acked_at: optional_time_from_row(row, 6)?,
-        completed_at: optional_time_from_row(row, 7)?,
+        completed_at: None,
     })
 }
 
@@ -1811,18 +1817,10 @@ fn project_resource(
         MANIFEST_MANIFEST => {
             let spec: ManifestSpec = decode(&planned.spec, "Manifest spec")?;
             validate_manifest_states(&spec)?;
-            tx.execute(
-                "INSERT INTO manifest_index(manifest_path,version) VALUES (?,?)",
-                params![planned.path, spec.version],
-            )?;
         }
         RELATION_MANIFEST => {}
         ACTION_MANIFEST => {
             let _: ActionSpec = decode(&planned.spec, "Action spec")?;
-            tx.execute(
-                "INSERT INTO action_index(action_path,owner_manifest_path) VALUES (?,?)",
-                params![planned.path, owner_manifest],
-            )?;
         }
         DRIVER_MANIFEST => {
             let spec: DriverSpec = decode(&planned.spec, "Driver spec")?;
@@ -3137,5 +3135,55 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(unresolved.status.metadata.state, kas_core::STATE_PENDING);
+    }
+
+    #[test]
+    fn completed_driver_deliveries_are_not_retained() {
+        let mut store = Store::memory().unwrap();
+        let driver_path = "/builtin/link/driver";
+        store.start_driver(driver_path).unwrap();
+        let generation = store.driver_generation(driver_path).unwrap();
+        store
+            .mark_driver_ready(
+                driver_path,
+                DriverReady {
+                    generation,
+                    process_id: 1,
+                    metadata: json!({}),
+                },
+            )
+            .unwrap();
+
+        let delivery = store
+            .claim_driver_delivery(driver_path, generation)
+            .unwrap()
+            .expect("running Driver has reconciliation work");
+        store
+            .acknowledge_driver_delivery(delivery.id, driver_path, generation)
+            .unwrap();
+        store
+            .finish_reconciliation_with_mutations(delivery.id, driver_path, generation, Vec::new())
+            .unwrap();
+
+        assert!(matches!(
+            store.get_driver_delivery(delivery.id),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn redundant_manifest_and_action_projections_are_absent() {
+        let store = Store::memory().unwrap();
+        for table in ["manifest_index", "action_index"] {
+            let present: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!present, "{table} should be represented by Resources");
+        }
     }
 }
