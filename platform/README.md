@@ -258,3 +258,49 @@ Resources and render through the same iframe runtime. Their bundle reuses the
 complete Svelte management UI, including File, Skill, Approval, and navigation
 operations. Chat and the current Thread context remain part of the minimal
 host shell.
+
+## Docker
+
+Build the complete Platform image from the repository root:
+
+```bash
+docker build -f platform/Dockerfile -t kas-platform .
+```
+
+Run it with a named volume so the SQLite database, installed packages, File
+blobs, plugins, and Codex sessions survive container replacement:
+
+```bash
+docker run --name kas-platform \
+  -p 5173:5173 \
+  -p 3000:3000 \
+  -v kas-data:/var/lib/kas \
+  -e OPENAI_API_KEY \
+  kas-platform
+```
+
+The multi-stage build compiles Core and every Platform Driver in release mode,
+builds the Svelte host, creates the `.kas` archives, bundles the built-in
+iframe plugins, and installs the Codex CLI. The runtime image runs as the
+unprivileged `kas` User under `tini`.
+
+On a new volume, the entrypoint migrates the database, bootstraps an admin,
+starts KAS, installs all packages, creates the three Proxy Resources, and
+installs Threads, Agents, Skills, Approvals, and Objects as FrontendPlugin
+Resources. The initial admin token is printed once in the container logs:
+
+```bash
+docker logs kas-platform
+```
+
+Open `http://localhost:5173/` and connect with that token. The control-plane
+API is available on port `3000`; File, Skill, and Approval APIs normally remain
+behind the Frontend Gateway. Set `KAS_ADMIN_NAME` before the first start to
+choose another bootstrap User name. `CODEX_VERSION` is a build argument when a
+specific Codex CLI release is required:
+
+```bash
+docker build -f platform/Dockerfile \
+  --build-arg CODEX_VERSION=latest \
+  -t kas-platform .
+```
