@@ -660,7 +660,7 @@ curl --fail --silent \
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"metadata":{"path":"/role-bindings/e2e-viewer","manifest":"/builtin/role-binding","name":"e2e-viewer"},"spec":{"role":"/roles/e2e-viewer","subjects":["/users/e2e-viewer"]}}' \
+  -d '{"metadata":{"path":"/links/e2e-viewer-role","manifest":"/builtin/link","name":"e2e-viewer-role"},"spec":{"relation":"/builtin/relations/role-binding","source":"/users/e2e-viewer","target":"/roles/e2e-viewer","metadata":{}}}' \
   "$API/resources" >/dev/null
 VIEWER_CREDENTIAL="$(
   curl --fail --silent \

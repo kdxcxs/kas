@@ -289,8 +289,7 @@ pub enum RelationRole {
     RunAction,
     RunDriver,
     DriverServiceAccount,
-    RoleBindingRole,
-    RoleBindingSubject,
+    RoleBinding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -446,12 +445,6 @@ pub struct RoleSpec {
     pub rules: Vec<RbacRuleSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_role: Option<SystemRole>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RoleBindingSpec {
-    pub role: String,
-    pub subjects: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -730,14 +723,6 @@ fn resolve_embedded_resource_references(
                 }
             }
             *spec = serde_json::to_value(value).expect("RoleSpec serialization cannot fail");
-        }
-        "/builtin/role-binding" => {
-            let mut value: RoleBindingSpec = decode_resource_spec(spec)?;
-            value.role = resolve_reference_path(manifest_path, &value.role)?;
-            for subject in &mut value.subjects {
-                *subject = resolve_reference_path(manifest_path, subject)?;
-            }
-            *spec = serde_json::to_value(value).expect("RoleBindingSpec serialization cannot fail");
         }
         "/builtin/credential" => {
             let mut value: CredentialSpec = decode_resource_spec(spec)?;
@@ -1192,7 +1177,6 @@ mod tests {
             include_str!("../../../builtins/user/manifest.json"),
             include_str!("../../../builtins/service-account/manifest.json"),
             include_str!("../../../builtins/role/manifest.json"),
-            include_str!("../../../builtins/role-binding/manifest.json"),
             include_str!("../../../builtins/credential/manifest.json"),
             include_str!("../../../builtins/package/manifest.json"),
         ];
@@ -1206,7 +1190,7 @@ mod tests {
             paths.push(definition.path);
         }
 
-        assert_eq!(paths.len(), 12);
+        assert_eq!(paths.len(), 11);
         assert!(paths.contains(&"/builtin/manifest".into()));
         assert!(paths.contains(&"/builtin/package".into()));
     }

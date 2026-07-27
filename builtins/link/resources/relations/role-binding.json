@@ -1,14 +1,17 @@
 {
   "metadata": {
-    "path": "/builtin/relations/role-binding-role",
+    "path": "/builtin/relations/role-binding",
     "manifest": "/builtin/relation",
-    "name": "role-binding-role"
+    "name": "role-binding"
   },
   "spec": {
-    "role": "role_binding_role",
+    "role": "role_binding",
     "sources": [
       {
-        "manifest": "/builtin/role-binding"
+        "manifest": [
+          "/builtin/user",
+          "/builtin/service-account"
+        ]
       }
     ],
     "targets": [

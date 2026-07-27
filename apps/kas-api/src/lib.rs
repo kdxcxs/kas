@@ -21,8 +21,8 @@ use chrono::{DateTime, Utc};
 use kas_auth::{AuthContext, AuthorizationCheck, AuthorizationDecision, IssuedCredential};
 use kas_core::{
     package_path_for_digest, DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork,
-    Mutation, PackageSpec, Resource, RestartPolicy, UpdateResource, BUILTIN_PACKAGE_MEDIA_TYPE,
-    MANIFEST_PACKAGE_MEDIA_TYPE,
+    LinkSpec, Mutation, PackageSpec, PlannedResource, Resource, RestartPolicy, UpdateResource,
+    BUILTIN_PACKAGE_MEDIA_TYPE, MANIFEST_PACKAGE_MEDIA_TYPE,
 };
 use kas_driver::{ClientMessage, MutationError, MutationStatus, ServerMessage};
 use kas_store::{Store, StoreError};
@@ -37,6 +37,9 @@ use supervisor::{DriverLaunch, Supervisor};
 
 const DRIVER_MANIFEST: &str = "/builtin/driver";
 const PACKAGE_MANIFEST: &str = "/builtin/package";
+const LINK_MANIFEST: &str = "/builtin/link";
+const ROLE_MANIFEST: &str = "/builtin/role";
+const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
 
 #[derive(Clone)]
 struct AppState {
@@ -265,13 +268,8 @@ async fn create_resource(
     headers: HeaderMap,
     Json(input): Json<kas_core::CreateResource>,
 ) -> ApiResult<(StatusCode, Json<Resource>)> {
-    require(
-        &state,
-        &headers,
-        &input.manifest,
-        "create",
-        Some(&input.path),
-    )?;
+    let auth = authenticate(&state, &headers)?;
+    authorize_planned_resource(&auth, &input, "create")?;
     Ok((
         StatusCode::CREATED,
         Json(lock(&state)?.create_resource(input)?),
@@ -306,13 +304,16 @@ async fn update_resource(
     Json(input): Json<UpdateResource>,
 ) -> ApiResult<Json<Resource>> {
     let current = lock(&state)?.get_resource(&query.path)?;
-    require(
-        &state,
-        &headers,
+    let auth = authenticate(&state, &headers)?;
+    if !kas_auth::allows(
+        &auth.rules,
         &current.manifest,
         "update",
         Some(&current.path),
-    )?;
+    ) {
+        return Err(forbidden());
+    }
+    authorize_role_binding(&auth, &current.manifest, &input.spec)?;
     Ok(Json(lock(&state)?.update_resource(&query.path, input)?))
 }
 
@@ -358,14 +359,7 @@ async fn install_package(
         return Err(forbidden());
     }
     for resource in &expansion.resources {
-        if !kas_auth::allows(
-            &auth.rules,
-            &resource.manifest,
-            "create",
-            Some(&resource.path),
-        ) {
-            return Err(forbidden());
-        }
+        authorize_planned_resource(&auth, resource, "create")?;
     }
     let installed = package::install(&state.data_dir, &body).map_err(|error| {
         ApiError(
@@ -871,12 +865,15 @@ fn apply_driver_mutation(
 }
 
 fn authorize_mutation(state: &AppState, auth: &AuthContext, mutation: &Mutation) -> ApiResult<()> {
-    let (manifest, verb, path) = match mutation {
+    match mutation {
         Mutation::CreateResource { resource } => {
-            (&resource.manifest, "create", resource.path.as_str())
+            authorize_planned_resource(auth, resource, "create")
         }
-        Mutation::UpdateResource { resource_path, .. }
-        | Mutation::UpdateResourceStatus { resource_path, .. } => {
+        Mutation::UpdateResource {
+            resource_path,
+            spec,
+            ..
+        } => {
             let resource = lock(state)?.get_resource(resource_path)?;
             if !kas_auth::allows(
                 &auth.rules,
@@ -886,7 +883,20 @@ fn authorize_mutation(state: &AppState, auth: &AuthContext, mutation: &Mutation)
             ) {
                 return Err(forbidden());
             }
-            return Ok(());
+            authorize_role_binding(auth, &resource.manifest, spec)?;
+            Ok(())
+        }
+        Mutation::UpdateResourceStatus { resource_path, .. } => {
+            let resource = lock(state)?.get_resource(resource_path)?;
+            if !kas_auth::allows(
+                &auth.rules,
+                &resource.manifest,
+                "update",
+                Some(resource_path),
+            ) {
+                return Err(forbidden());
+            }
+            Ok(())
         }
         Mutation::DeleteResource { resource_path, .. } => {
             let resource = lock(state)?.get_resource(resource_path)?;
@@ -898,20 +908,39 @@ fn authorize_mutation(state: &AppState, auth: &AuthContext, mutation: &Mutation)
             ) {
                 return Err(forbidden());
             }
-            return Ok(());
+            Ok(())
         }
-        Mutation::CompleteRun { .. } => {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "complete_run is only valid as the final Run delivery operation".into(),
-            ));
-        }
-    };
-    if kas_auth::allows(&auth.rules, manifest, verb, Some(path)) {
-        Ok(())
-    } else {
-        Err(forbidden())
+        Mutation::CompleteRun { .. } => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "complete_run is only valid as the final Run delivery operation".into(),
+        )),
     }
+}
+
+fn authorize_planned_resource(
+    auth: &AuthContext,
+    resource: &PlannedResource,
+    verb: &str,
+) -> ApiResult<()> {
+    if !kas_auth::allows(&auth.rules, &resource.manifest, verb, Some(&resource.path)) {
+        return Err(forbidden());
+    }
+    authorize_role_binding(auth, &resource.manifest, &resource.spec)
+}
+
+fn authorize_role_binding(auth: &AuthContext, manifest: &str, spec: &Value) -> ApiResult<()> {
+    if manifest != LINK_MANIFEST {
+        return Ok(());
+    }
+    let Ok(link) = serde_json::from_value::<LinkSpec>(spec.clone()) else {
+        return Ok(());
+    };
+    if link.relation == ROLE_BINDING_RELATION
+        && !kas_auth::allows(&auth.rules, ROLE_MANIFEST, "bind", Some(&link.target))
+    {
+        return Err(forbidden());
+    }
+    Ok(())
 }
 
 fn mutation_error(error: ApiError) -> MutationError {

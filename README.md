@@ -76,7 +76,6 @@ KAS 启动时自动安装一组 built-in Manifest：
 /builtin/user
 /builtin/service-account
 /builtin/role
-/builtin/role-binding
 /builtin/credential
 /builtin/package
 ```
@@ -86,8 +85,8 @@ KAS 启动时自动安装一组 built-in Manifest：
 `/builtin/relations/run-action` 和 `/builtin/roles/admin`。业务 Manifest
 仍使用 `/manifests/{name}`，业务 Resource 可以按自己的领域选择 path。
 
-Action、Relation、Link、Driver、Run、User、ServiceAccount、Role、RoleBinding
-和 Credential 因而都只是由 built-in Manifest 定义的 Resource。例如：
+Action、Relation、Link、Driver、Run、User、ServiceAccount、Role 和 Credential
+因而都只是由 built-in Manifest 定义的 Resource。例如：
 
 ```text
 /manifests/message/relations/mentioned
@@ -145,7 +144,7 @@ target，因此 Manifest、Action、Driver、User、Role 等不需要专门的 L
 
 - Thread `mentions` Agent
 - Driver `uses` ServiceAccount
-- RoleBinding `binds` Role 和 Subject
+- Subject 通过内置 `role-binding` Relation 的 Link 绑定 Role
 - Run `executes` Action
 
 ## 基本关系
@@ -256,7 +255,7 @@ Store 打开数据库时会自动安装随 KAS 发布的
 以解开根 Manifest 的自描述启动依赖。它们从首次启动起就存在，不由 Migration
 写死，也不依赖管理命令注入。
 `kas-admin bootstrap` 只使用其中标记为 admin 的 Role 创建首个 User、
-RoleBinding 和 Credential，并把 Bearer token 输出到终端。
+role-binding Link 和 Credential，并把 Bearer token 输出到终端。
 
 ## Manifest 包
 
@@ -338,8 +337,9 @@ entrypoint。Supervisor 管理 singleton、generation、临时 Credential、hell
 ## 权限
 
 权限规则同样以 Resource 保存到 SQLite，不从配置文件加载。User、
-ServiceAccount、Role、RoleBinding 和 Credential 分别由对应的系统 Manifest
-定义。所有 API 默认拒绝，`/health` 除外。
+ServiceAccount、Role 和 Credential 分别由对应的系统 Manifest 定义；授权
+关系是 `/builtin/relations/role-binding` 下的普通 Link。所有 API 默认拒绝，
+`/health` 除外。
 
 Rule 同时约束 Resource 的 Manifest、verb 和实例 path：
 
@@ -354,8 +354,8 @@ Rule 同时约束 Resource 的 Manifest、verb 和实例 path：
 Manifest 和 Path pattern 都支持精确匹配、单段 `*` 和递归 `**`；省略
 `paths` 表示匹配这些 Manifest 的全部实例。List 会逐 Resource 过滤。
 
-Manifest 包通过 `resources/` 声明自己的 ServiceAccount、Role 和 RoleBinding。
-这些 Resource 随包原子安装并受保护。Driver 必须在 `spec.service_account` 中引用
+Manifest 包通过 `resources/` 声明自己的 ServiceAccount、Role 和 role-binding
+Link。这些 Resource 随包原子安装并受保护。Driver 必须在 `spec.service_account` 中引用
 一个 ServiceAccount Resource；KAS 不猜测业务权限，也不会自动生成 Role
 或 Binding。Driver 每次启动会签发绑定当前 generation 和该 ServiceAccount
 的短期 Credential，旧 Credential 会被撤销。
@@ -367,7 +367,7 @@ Manifest 包通过 `resources/` 声明自己的 ServiceAccount、Role 和 RoleBi
 调用者可以通过 `GET /auth` 查看当前 Bearer Credential 的完整授权上下文，
 包括 Credential path、Subject、所有当前有效 Rule，以及 Driver Credential
 的 Driver path 和 generation。该结果反映每次请求时数据库中的 Role 和
-RoleBinding，不是签发 Credential 时固化的权限快照。
+role-binding Link，不是签发 Credential 时固化的权限快照。
 
 外部 Driver 或服务可以通过 `POST /auth/check` 判断当前 Bearer Credential
 是否允许对一个确定对象执行指定 verb：
@@ -512,10 +512,10 @@ KAS 先把 `metadata.state` 改为 `deleted`，所属 Driver reconcile 后把
 KAS 删除 Resource 和相关运行数据，不保留 tombstone，也暂不提供 force
 delete；原 path 随后可以重新使用。
 
-Action、Relation、Driver、ServiceAccount、Role 和 RoleBinding 都拥有
-Manifest 下的独立 Path。Manifest 安装时，KAS 根据 built-in Relation 的
-语义 role 自动创建 Manifest 到初始化 Resource、Driver 到 ServiceAccount、RoleBinding
-到 Role 和 Subject 的受保护 Link。创建 Run 时，KAS 同样创建 Run 到目标
+Action、Relation、Driver、ServiceAccount 和 Role 都拥有 Manifest 下的独立
+Path。Manifest 安装时，KAS 根据 built-in Relation 的语义 role 自动创建
+Manifest 到初始化 Resource、Driver 到 ServiceAccount 的受保护 Link；RBAC
+授权本身直接由 Subject 到 Role 的 role-binding Link 表达。创建 Run 时，KAS 同样创建 Run 到目标
 Resource、Action 和 Driver 的受保护 Link。Resource 的类型身份直接由
 envelope 中不可变的 `manifest` path 表达，不再重复创建类型 Link。
 
@@ -556,7 +556,7 @@ Link 也只是 manifest 为 `/builtin/link` 的 Resource。
 
 Mutation 只保留 `create_resource`、`update_resource`、`delete_resource`、
 `update_resource_status` 和 `complete_run`。Driver 因而可以在同一事务中创建
-任意获授权的 Resource，包括 ServiceAccount、Role、RoleBinding 或 Link。
+任意获授权的 Resource，包括 ServiceAccount、Role 或 Link。
 空 mutation 表示当前 Driver 已经消费该 Resource revision；KAS 原子完成
 delivery，并写入该 Driver 自己的
 `status.metadata["[kas]"].observed` 条目。如果处理期间 Resource 或 Driver
@@ -612,7 +612,7 @@ tests/e2e.sh
   → 验证 Run 到 Resource/Action/Driver 的系统 Link
   → Driver 执行 echo 并完成 Run
   → DELETE Resource，经 Driver reconcile 后验证硬删除及 path 可复用
-  → 创建 User/Role/RoleBinding/Credential Resource 并验证 RBAC
+  → 创建 User/Role/role-binding Link/Credential Resource 并验证 RBAC
   → 停止 Driver 并确认子进程退出
 ```
 

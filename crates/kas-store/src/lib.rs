@@ -10,9 +10,9 @@ use kas_core::{
     EventFilter, EventType, FinishRun, KasMetadata, LinkSpec, ManifestDefinition, ManifestSpec,
     Mutation, PackageDefinition, PackageExpansion, PackageSpec, PlannedResource, RelationRole,
     RelationSpec, Resource, ResourceDefinition, ResourceMetadata, ResourceStatus,
-    ResourceStatusMetadata, RestartPolicy, RoleBindingSpec, RoleSpec, RunResult, RunSpec, RunState,
-    SystemRole, UpdateResource, UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE,
-    STATE_AVAILABLE, STATE_DELETED,
+    ResourceStatusMetadata, RestartPolicy, RoleSpec, RunResult, RunSpec, RunState, SystemRole,
+    UpdateResource, UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE, STATE_AVAILABLE,
+    STATE_DELETED,
 };
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::de::DeserializeOwned;
@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 11;
+pub const LATEST_SCHEMA_VERSION: u32 = 12;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -33,7 +33,7 @@ pub const RUN_MANIFEST: &str = "/builtin/run";
 pub const USER_MANIFEST: &str = "/builtin/user";
 pub const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
 pub const ROLE_MANIFEST: &str = "/builtin/role";
-pub const ROLE_BINDING_MANIFEST: &str = "/builtin/role-binding";
+pub const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
 pub const CREDENTIAL_MANIFEST: &str = "/builtin/credential";
 pub const PACKAGE_MANIFEST: &str = "/builtin/package";
 
@@ -66,6 +66,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         11,
         include_str!("../migrations/0011_active_driver_deliveries.sql"),
+    ),
+    (
+        12,
+        include_str!("../migrations/0012_role_binding_links.sql"),
     ),
 ];
 
@@ -1207,20 +1211,26 @@ impl Store {
                     .is_ok_and(|spec| spec.system_role == Some(SystemRole::Admin))
             })
             .ok_or_else(|| StoreError::NotFound("built-in admin Role".into()))?;
-        let binding_path = format!("{path}/role-bindings/admin");
+        let binding_path = format!("{path}/links/admin-role");
         if self.get_resource(&binding_path).is_err() {
+            let spec = LinkSpec {
+                relation: ROLE_BINDING_RELATION.into(),
+                source: path.clone(),
+                target: admin_role.path.clone(),
+                metadata: json!({}),
+            };
             self.create_resource(PlannedResource {
                 metadata: kas_core::PlannedResourceMetadata {
                     path: binding_path,
-                    manifest: ROLE_BINDING_MANIFEST.into(),
+                    manifest: LINK_MANIFEST.into(),
                     name: format!("{name}-admin"),
                     state: String::new(),
                 },
-                spec: serde_json::to_value(RoleBindingSpec {
-                    role: admin_role.path.clone(),
-                    subjects: vec![path.clone()],
-                })?,
-                status: ResourceStatus::default(),
+                spec: serde_json::to_value(&spec)?,
+                status: ResourceStatus {
+                    metadata: ResourceStatusMetadata::default(),
+                    spec: serde_json::to_value(&spec)?,
+                },
             })?;
         }
         self.issue_credential(&path, None)
@@ -1325,21 +1335,26 @@ impl Store {
         }
 
         let mut rules = Vec::new();
-        for binding in self.list_resources(Some(ROLE_BINDING_MANIFEST))? {
-            let binding_spec: RoleBindingSpec = decode(&binding.spec, "RoleBinding spec")?;
-            if binding_spec
-                .subjects
-                .iter()
-                .any(|path| path == &spec.subject)
-            {
-                let role = self.get_resource(&binding_spec.role)?;
-                let role_spec: RoleSpec = decode(&role.spec, "Role spec")?;
-                rules.extend(role_spec.rules.into_iter().map(|rule| Rule {
-                    manifests: rule.manifests,
-                    verbs: rule.verbs,
-                    paths: rule.paths,
-                }));
+        for binding in self.list_links(
+            Some(&spec.subject),
+            Some(ROLE_BINDING_RELATION),
+            None,
+            false,
+        )? {
+            if binding.metadata.state == STATE_DELETED {
+                continue;
             }
+            let binding_spec: LinkSpec = decode(&binding.spec, "RoleBinding Link spec")?;
+            let role = self.get_resource(&binding_spec.target)?;
+            if role.manifest != ROLE_MANIFEST || role.metadata.state == STATE_DELETED {
+                continue;
+            }
+            let role_spec: RoleSpec = decode(&role.spec, "Role spec")?;
+            rules.extend(role_spec.rules.into_iter().map(|rule| Rule {
+                manifests: rule.manifests,
+                verbs: rule.verbs,
+                paths: rule.paths,
+            }));
         }
         let driver_path = if subject_resource.manifest == SERVICE_ACCOUNT_MANIFEST {
             self.connection
@@ -1389,7 +1404,7 @@ struct BuiltinDocuments {
     resources: &'static [&'static str],
 }
 
-fn builtin_documents() -> [BuiltinDocuments; 12] {
+fn builtin_documents() -> [BuiltinDocuments; 11] {
     [
         BuiltinDocuments {
             manifest: include_str!("../../../builtins/manifest/manifest.json"),
@@ -1408,9 +1423,10 @@ fn builtin_documents() -> [BuiltinDocuments; 12] {
         BuiltinDocuments {
             manifest: include_str!("../../../builtins/link/manifest.json"),
             resources: &[
+                include_str!("../../../builtins/link/resources/relations/role-binding.json"),
                 include_str!("../../../builtins/link/resources/service-accounts/driver.json"),
                 include_str!("../../../builtins/link/resources/roles/driver.json"),
-                include_str!("../../../builtins/link/resources/role-bindings/driver.json"),
+                include_str!("../../../builtins/link/resources/links/driver.json"),
                 include_str!("../../../builtins/link/resources/drivers/driver.json"),
             ],
         },
@@ -1442,17 +1458,6 @@ fn builtin_documents() -> [BuiltinDocuments; 12] {
                 include_str!("../../../builtins/role/resources/roles/admin.json"),
                 include_str!("../../../builtins/role/resources/roles/editor.json"),
                 include_str!("../../../builtins/role/resources/roles/viewer.json"),
-            ],
-        },
-        BuiltinDocuments {
-            manifest: include_str!("../../../builtins/role-binding/manifest.json"),
-            resources: &[
-                include_str!(
-                    "../../../builtins/role-binding/resources/relations/role-binding-role.json"
-                ),
-                include_str!(
-                    "../../../builtins/role-binding/resources/relations/role-binding-subject.json"
-                ),
             ],
         },
         BuiltinDocuments {
@@ -1844,9 +1849,6 @@ fn project_resource(
         ROLE_MANIFEST => {
             let _: RoleSpec = decode(&planned.spec, "Role spec")?;
         }
-        ROLE_BINDING_MANIFEST => {
-            project_role_binding_runtime(tx, planned)?;
-        }
         CREDENTIAL_MANIFEST => {
             let _: CredentialSpec = decode(&planned.spec, "Credential spec")?;
         }
@@ -1949,24 +1951,6 @@ fn is_builtin_state(state: &str) -> bool {
     )
 }
 
-fn project_role_binding_runtime(
-    tx: &Transaction<'_>,
-    planned: &PlannedResource,
-) -> Result<(), StoreError> {
-    let spec: RoleBindingSpec = decode(&planned.spec, "RoleBinding spec")?;
-    tx.execute(
-        "INSERT INTO role_binding_roles(role_binding_path,role_path) VALUES (?,?)",
-        params![planned.path, spec.role],
-    )?;
-    for subject in spec.subjects {
-        tx.execute(
-            "INSERT INTO role_binding_subjects(role_binding_path,subject_path) VALUES (?,?)",
-            params![planned.path, subject],
-        )?;
-    }
-    Ok(())
-}
-
 fn project_run(tx: &Transaction<'_>, planned: &PlannedResource) -> Result<(), StoreError> {
     let mut spec: RunSpec = decode(&planned.spec, "Run spec")?;
     let target = resource_in(tx, &spec.resource)?;
@@ -2024,33 +2008,6 @@ fn project_declared_relationships(
                     &spec.service_account,
                     now,
                 )?;
-            }
-        }
-        ROLE_BINDING_MANIFEST => {
-            let spec: RoleBindingSpec = decode(&resource.spec, "RoleBinding spec")?;
-            if relation_path_for_role(tx, RelationRole::RoleBindingRole)?.is_some() {
-                let link_path = format!("{}/links/role", resource.path);
-                create_system_link(
-                    tx,
-                    &link_path,
-                    RelationRole::RoleBindingRole,
-                    &resource.path,
-                    &spec.role,
-                    now,
-                )?;
-            }
-            if relation_path_for_role(tx, RelationRole::RoleBindingSubject)?.is_some() {
-                for (index, subject) in spec.subjects.iter().enumerate() {
-                    let link_path = format!("{}/links/subjects/{index}", resource.path);
-                    create_system_link(
-                        tx,
-                        &link_path,
-                        RelationRole::RoleBindingSubject,
-                        &resource.path,
-                        subject,
-                        now,
-                    )?;
-                }
             }
         }
         RUN_MANIFEST => {
@@ -2163,33 +2120,6 @@ fn refresh_projection(
                 params![spec.service_account, resource.path],
             )?;
             reconcile_all_resources(tx, "driver_management_updated", now)?;
-        }
-        ROLE_BINDING_MANIFEST => {
-            let link_paths = {
-                let mut statement = tx.prepare(
-                    "SELECT path FROM resources
-                     WHERE managed_by='system'
-                       AND substr(path,1,length(?))=?",
-                )?;
-                let prefix = format!("{}/links/", resource.path);
-                let rows = statement
-                    .query_map(params![prefix, prefix], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                rows
-            };
-            for link_path in link_paths {
-                hard_delete_resource(tx, &link_path, now)?;
-            }
-            tx.execute(
-                "DELETE FROM role_binding_roles WHERE role_binding_path=?",
-                [&resource.path],
-            )?;
-            tx.execute(
-                "DELETE FROM role_binding_subjects WHERE role_binding_path=?",
-                [&resource.path],
-            )?;
-            project_role_binding_runtime(tx, &planned_from_resource(resource.clone()))?;
-            project_declared_relationships(tx, &planned_from_resource(resource.clone()), now)?;
         }
         _ => {}
     }
@@ -2949,7 +2879,6 @@ mod tests {
             USER_MANIFEST,
             SERVICE_ACCOUNT_MANIFEST,
             ROLE_MANIFEST,
-            ROLE_BINDING_MANIFEST,
             CREDENTIAL_MANIFEST,
             PACKAGE_MANIFEST,
         ] {
@@ -2961,7 +2890,7 @@ mod tests {
                     .clone(),
             );
         }
-        assert_eq!(builtin_packages.len(), 12);
+        assert_eq!(builtin_packages.len(), 11);
         assert!(store
             .list_resources(Some(ROLE_MANIFEST))
             .unwrap()
