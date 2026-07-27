@@ -536,15 +536,15 @@ wait_for_state "$OBSERVER_PATH" available >/dev/null
 
 for path in \
   "$AGENT_PATH/service-account" \
-  "$AGENT_PATH/role-binding" \
+  "$AGENT_PATH/links/runtime-role" \
   "$AGENT_PATH/skill-role" \
-  "$AGENT_PATH/skill-role-binding" \
+  "$AGENT_PATH/links/skill-role" \
   "$AGENT_PATH/links/service-account" \
   "$AGENT_PATH/links/skills/kas" \
   "$OBSERVER_PATH/service-account" \
-  "$OBSERVER_PATH/role-binding" \
+  "$OBSERVER_PATH/links/runtime-role" \
   "$OBSERVER_PATH/skill-role" \
-  "$OBSERVER_PATH/skill-role-binding" \
+  "$OBSERVER_PATH/links/skill-role" \
   "$OBSERVER_PATH/links/skills/kas" \
   "$OBSERVER_PATH/links/service-account"; do
   get_resource "$path" >/dev/null
@@ -625,18 +625,28 @@ assert_approval_link() {
 
 assert_no_per_approval_rbac() {
   local request_path="$1"
-  for manifest in /builtin/role /builtin/role-binding; do
-    request --fail-with-body --silent --show-error --get \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "manifest=$manifest" \
-      "$API/resources" |
-      jq -e --arg request "$request_path" '
-        all(.[];
-          (.metadata.path | startswith($request + "/") | not)
-          and ((.spec | tostring | contains($request)) | not)
-        )
-      ' >/dev/null
-  done
+  request --fail-with-body --silent --show-error --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "manifest=/builtin/role" \
+    "$API/resources" |
+    jq -e --arg request "$request_path" '
+      all(.[];
+        (.metadata.path | startswith($request + "/") | not)
+        and ((.spec | tostring | contains($request)) | not)
+      )
+    ' >/dev/null
+  request --fail-with-body --silent --show-error --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "manifest=/builtin/link" \
+    "$API/resources" |
+    jq -e --arg request "$request_path" '
+      all(
+        .[]
+        | select(.spec.relation == "/builtin/relations/role-binding");
+        (.metadata.path | startswith($request + "/") | not)
+        and ((.spec | tostring | contains($request)) | not)
+      )
+    ' >/dev/null
 }
 
 # An Agent cannot perform this privileged write directly, but may request that

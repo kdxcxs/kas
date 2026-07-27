@@ -1457,7 +1457,6 @@ button:disabled {
 .resource-overview small,
 .property-grid article > small,
 .rule-card small,
-.binding-layout > div > small,
 .driver-scope small,
 .link-route-large small {
   color: var(--quiet);
@@ -1613,23 +1612,6 @@ button:disabled {
   white-space: nowrap;
 }
 
-.binding-layout {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
-}
-
-.binding-layout > div {
-  display: grid;
-  align-content: start;
-  gap: 7px;
-  padding: 14px;
-  background: #121510;
-  border: 1px solid #292f25;
-  border-radius: 11px;
-}
-
-.binding-layout button,
 .link-route-large button {
   min-width: 0;
   padding: 10px;
@@ -1641,13 +1623,8 @@ button:disabled {
   text-align: left;
 }
 
-.binding-layout button:hover,
 .link-route-large button:hover {
   border-color: #60724c;
-}
-
-.binding-layout button .object-kind-pill {
-  margin-right: 7px;
 }
 
 .link-route-large {
@@ -2755,7 +2732,6 @@ button:disabled {
 
   .resource-overview,
   .property-grid,
-  .binding-layout,
   .driver-scope,
   .link-route-large,
   .rule-card {

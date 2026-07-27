@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use kas_core::{
     DriverExecution, LinkSpec, Mutation, PlannedResource, PlannedResourceMetadata, RbacRuleSpec,
-    Resource, ResourceStatus, RoleBindingSpec, RoleSpec, RunSpec, ServiceAccountSpec,
+    Resource, ResourceStatus, RoleSpec, RunSpec, ServiceAccountSpec,
 };
 use kas_driver::{Driver, DriverError};
 use kas_skill_driver::{
@@ -29,7 +29,7 @@ const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
 const LINK_MANIFEST: &str = "/builtin/link";
 const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
 const ROLE_MANIFEST: &str = "/builtin/role";
-const ROLE_BINDING_MANIFEST: &str = "/builtin/role-binding";
+const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
 const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
 const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
 const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
@@ -592,18 +592,18 @@ impl AgentDriver {
 
     fn identity_mutations(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
         let service_account_path = format!("{}/service-account", resource.path);
-        let role_binding_path = format!("{}/role-binding", resource.path);
+        let role_link_path = format!("{}/links/runtime-role", resource.path);
         let skill_role_path = format!("{}/skill-role", resource.path);
-        let skill_role_binding_path = format!("{}/skill-role-binding", resource.path);
+        let skill_role_link_path = format!("{}/links/skill-role", resource.path);
         let link_path = format!("{}/links/service-account", resource.path);
         let kas_skill_link_path = format!("{}/links/skills/kas", resource.path);
         let mut mutations = Vec::new();
         for path in [
             &kas_skill_link_path,
             &link_path,
-            &skill_role_binding_path,
+            &skill_role_link_path,
             &skill_role_path,
-            &role_binding_path,
+            &role_link_path,
             &service_account_path,
         ] {
             if let Some(child) = self.fetch_resource(path)? {
@@ -630,18 +630,14 @@ impl AgentDriver {
                 ),
             });
         }
-        if self.fetch_resource(&role_binding_path)?.is_none() {
+        if self.fetch_resource(&role_link_path)?.is_none() {
             mutations.push(Mutation::CreateResource {
-                resource: planned(
-                    role_binding_path,
-                    ROLE_BINDING_MANIFEST,
-                    format!("{}-agent-runtime", resource_name(&resource.path)),
-                    serde_json::to_value(RoleBindingSpec {
-                        role: AGENT_RUNTIME_ROLE.into(),
-                        subjects: vec![service_account_path.clone()],
-                    })
-                    .map_err(|error| execution_error(error.to_string()))?,
-                ),
+                resource: link_resource(
+                    role_link_path,
+                    ROLE_BINDING_RELATION,
+                    service_account_path.clone(),
+                    AGENT_RUNTIME_ROLE,
+                )?,
             });
         }
         if self.fetch_resource(&skill_role_path)?.is_none() {
@@ -709,18 +705,14 @@ impl AgentDriver {
                 ),
             });
         }
-        if self.fetch_resource(&skill_role_binding_path)?.is_none() {
+        if self.fetch_resource(&skill_role_link_path)?.is_none() {
             mutations.push(Mutation::CreateResource {
-                resource: planned(
-                    skill_role_binding_path,
-                    ROLE_BINDING_MANIFEST,
-                    format!("{}-agent-skills", resource_name(&resource.path)),
-                    serde_json::to_value(RoleBindingSpec {
-                        role: skill_role_path,
-                        subjects: vec![service_account_path.clone()],
-                    })
-                    .map_err(|error| execution_error(error.to_string()))?,
-                ),
+                resource: link_resource(
+                    skill_role_link_path,
+                    ROLE_BINDING_RELATION,
+                    service_account_path.clone(),
+                    skill_role_path,
+                )?,
             });
         }
         if self.fetch_resource(&link_path)?.is_none() {

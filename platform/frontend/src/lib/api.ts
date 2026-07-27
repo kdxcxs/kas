@@ -24,7 +24,6 @@ const KIND_BY_MANIFEST: Record<string, ObjectKind> = {
   '/builtin/user': 'user',
   '/builtin/service-account': 'service_account',
   '/builtin/role': 'role',
-  '/builtin/role-binding': 'role_binding',
   '/builtin/credential': 'credential',
   '/builtin/package': 'package'
 };

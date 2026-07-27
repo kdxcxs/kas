@@ -149,17 +149,14 @@
       },
       {
         "manifests": [
-          "/builtin/role-binding"
+          "/builtin/role"
         ],
         "verbs": [
-          "get",
-          "list",
-          "create",
-          "delete"
+          "bind"
         ],
         "paths": [
-          "/agents/**/role-binding",
-          "/agents/**/skill-role-binding"
+          "/manifests/agent/roles/runtime",
+          "/agents/**/skill-role"
         ]
       }
     ]

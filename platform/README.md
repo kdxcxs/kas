@@ -20,7 +20,7 @@ packages/
 │   ├── resources/
 │   │   ├── drivers/
 │   │   ├── relations/
-│   │   ├── role-bindings/
+│   │   ├── links/
 │   │   ├── roles/
 │   │   └── service-accounts/
 │   └── driver/
@@ -39,7 +39,7 @@ packages/
 │   ├── resources/
 │   │   ├── drivers/
 │   │   ├── relations/
-│   │   ├── role-bindings/
+│   │   ├── links/
 │   │   ├── roles/
 │   │   └── service-accounts/
 │   └── driver/
@@ -55,7 +55,7 @@ packages/
     │   ├── actions/
     │   ├── drivers/
     │   ├── relations/
-    │   ├── role-bindings/
+    │   ├── links/
     │   ├── roles/
     │   └── service-accounts/
     └── driver/
@@ -64,8 +64,10 @@ packages/
 ```
 
 `manifest.json` defines only the package Manifest. Each Action, Relation,
-Driver, ServiceAccount, Role, and RoleBinding installed with the package is an
-ordinary Resource stored as one JSON file under `resources/`. `thread` is
+Driver, ServiceAccount, Role, and Link installed with the package is an
+ordinary Resource stored as one JSON file under `resources/`. Driver
+authorization is a Subject-to-Role Link using the built-in `role-binding`
+Relation. `thread` is
 data-only. `session` defines the persistent Thread-Agent session record.
 `file` stores immutable File descriptors in KAS while its singleton Driver
 owns the binary content API and storage. Binary content never passes through
@@ -92,7 +94,7 @@ principal namespaces: `/approvals{requester}/requests/{uuid}`,
 `/approvals{approver}/decisions/{uuid}`, and
 `/approvals{requester}/results/{uuid}`. Named Links record `requested-by`,
 `decides`, `decided-by`, `result-of`, and `produced-by`; no shared request ID
-or per-request Role and RoleBinding is required. A successful operation creates
+or per-request Role or role-binding Link is required. A successful operation creates
 an immutable `/manifests/approval-result` Resource containing the sanitized API
 response. Plaintext credentials are never stored in KAS Resources.
 

@@ -9,7 +9,6 @@ export type ObjectKind =
   | 'user'
   | 'service_account'
   | 'role'
-  | 'role_binding'
   | 'credential'
   | 'package';
 

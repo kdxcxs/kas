@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "path": "./links/driver-role",
+    "manifest": "/builtin/link",
+    "name": "frontend-driver-role"
+  },
+  "spec": {
+    "relation": "/builtin/relations/role-binding",
+    "source": "./service-accounts/driver",
+    "target": "./roles/driver",
+    "metadata": {}
+  }
+}

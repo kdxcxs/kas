@@ -78,7 +78,6 @@
     'user',
     'service_account',
     'role',
-    'role_binding',
     'credential',
     'package'
   ];
@@ -2468,30 +2467,6 @@
                         </div>
                       </article>
                     {/each}
-                  </div>
-                {:else if objectDetail.kind === 'role_binding'}
-                  <div class="binding-layout">
-                    <div>
-                      <small>Bound role</small>
-                      <button
-                        onclick={() =>
-                          void selectObject(
-                            objectRefForPath(String(detailSpec(objectDetail).role ?? ''))
-                          )}
-                      >
-                        <span class="object-kind-pill">Role</span>
-                        <code>{displayValue(detailSpec(objectDetail).role)}</code>
-                      </button>
-                    </div>
-                    <div>
-                      <small>Subjects</small>
-                      {#each strings(detailSpec(objectDetail).subjects) as subject}
-                        <button onclick={() => void selectObject(objectRefForPath(subject))}>
-                          <span class="object-kind-pill">{kindLabel(objectRefForPath(subject).kind)}</span>
-                          <code>{subject}</code>
-                        </button>
-                      {/each}
-                    </div>
                   </div>
                 {:else if objectDetail.kind === 'link'}
                   <div class="link-route-large">
