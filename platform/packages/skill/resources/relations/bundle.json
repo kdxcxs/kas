@@ -1,6 +1,6 @@
 {
+  "path": "./relations/bundle",
   "metadata": {
-    "path": "./relations/bundle",
     "manifest": "/builtin/relation",
     "name": "bundle"
   },

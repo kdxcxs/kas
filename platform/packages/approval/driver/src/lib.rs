@@ -49,6 +49,7 @@ pub enum ApprovalOperation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalCreateResource {
+    pub path: String,
     pub metadata: PlannedResourceMetadata,
     #[serde(default)]
     pub spec: Value,
@@ -57,7 +58,7 @@ pub struct ApprovalCreateResource {
 impl ApprovalOperation {
     pub fn scope_path(&self) -> &str {
         match self {
-            Self::Create { resource } => &resource.metadata.path,
+            Self::Create { resource } => &resource.path,
             Self::Update { path, .. } | Self::Delete { path, .. } | Self::Get { path } => path,
             Self::List { path_prefix, .. } => path_prefix.as_deref().unwrap_or("/"),
         }
@@ -220,8 +221,8 @@ mod tests {
     fn create_operation_uses_the_resource_path() {
         let operation = ApprovalOperation::Create {
             resource: ApprovalCreateResource {
+                path: "/messages/proof".into(),
                 metadata: PlannedResourceMetadata {
-                    path: "/messages/proof".into(),
                     manifest: "/manifests/message".into(),
                     name: "proof".into(),
                     state: String::new(),

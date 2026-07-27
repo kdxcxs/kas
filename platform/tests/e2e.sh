@@ -113,8 +113,8 @@ create_link() {
       --arg relation "$relation" \
       --arg source "$source" \
       --arg target "$target" '{
+        path: $path,
         metadata: {
-          path: $path,
           manifest: "/builtin/link",
           name: ($path | split("/") | last)
         },
@@ -234,8 +234,8 @@ create_proxy() {
       --arg name "$name" \
       --arg prefix "$prefix" \
       --arg upstream "$upstream" '{
+        path: $path,
         metadata: {
-          path: $path,
           manifest: "/manifests/proxy",
           name: $name
         },
@@ -430,10 +430,10 @@ FILE="$(
     -F "content=@$E2E_DIR/attachment.bin;type=application/octet-stream" \
     "$FILE_API/files?path=/files/e2e-input"
 )"
-FILE_PATH="$(jq -r '.metadata.path' <<<"$FILE")"
+FILE_PATH="$(jq -r '.path' <<<"$FILE")"
 jq -e --arg path "$FILE_PATH" '
   .metadata.manifest == "/manifests/file"
-  and .metadata.path == $path
+  and .path == $path
   and .spec.filename == "attachment.bin"
   and .spec.media_type == "application/octet-stream"
   and .spec.size > 0
@@ -455,8 +455,8 @@ cmp <(printf '%s' "${FILE_PROOF:4:4}") "$E2E_DIR/range.bin"
 FILE_ONLY_MESSAGE="/messages/e2e-file-only"
 post_resource "$(
   jq -n --arg path "$FILE_ONLY_MESSAGE" '{
+    path: $path,
     metadata: {
-      path: $path,
       manifest: "/manifests/message",
       name: "e2e-file-only"
     },
@@ -500,7 +500,7 @@ SKILL="$(
     "$SKILL_API/skills?path=$SKILL_PATH"
 )"
 jq -e --arg path "$SKILL_PATH" '
-  .metadata.path == $path
+  .path == $path
   and .metadata.manifest == "/manifests/skill"
   and .spec.name == "e2e-bundle"
 ' <<<"$SKILL" >/dev/null
@@ -517,8 +517,8 @@ create_agent() {
       --arg path "$path" \
       --arg name "$name" \
       --arg cwd "$E2E_DIR/workspace" '{
+        path: $path,
         metadata: {
-          path: $path,
           manifest: "/manifests/agent",
           name: $name
         },
@@ -554,8 +554,8 @@ post_resource "$(
     --arg path "$AGENT_PATH/links/skills/e2e-bundle" \
     --arg source "$AGENT_PATH" \
     --arg target "$SKILL_PATH" '{
+      path: $path,
       metadata: {
-        path: $path,
         manifest: "/builtin/link",
         name: "e2e-bundle"
       },
@@ -631,7 +631,7 @@ assert_no_per_approval_rbac() {
     "$API/resources" |
     jq -e --arg request "$request_path" '
       all(.[];
-        (.metadata.path | startswith($request + "/") | not)
+        (.path | startswith($request + "/") | not)
         and ((.spec | tostring | contains($request)) | not)
       )
     ' >/dev/null
@@ -643,7 +643,7 @@ assert_no_per_approval_rbac() {
       all(
         .[]
         | select(.spec.relation == "/builtin/relations/role-binding");
-        (.metadata.path | startswith($request + "/") | not)
+        (.path | startswith($request + "/") | not)
         and ((.spec | tostring | contains($request)) | not)
       )
     ' >/dev/null
@@ -654,8 +654,8 @@ assert_no_per_approval_rbac() {
 APPROVAL_TARGET="/approval-proofs/e2e-role"
 APPROVAL_RESOURCE="$(
   jq -n --arg path "$APPROVAL_TARGET" '{
+    path: $path,
     metadata: {
-      path: $path,
       manifest: "/builtin/role",
       name: "e2e-approved-role"
     },
@@ -696,7 +696,7 @@ APPROVAL_REQUEST="$(
     )" \
     "$APPROVAL_API/approvals"
 )"
-APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$APPROVAL_REQUEST")"
+APPROVAL_PATH="$(jq -r '.path' <<<"$APPROVAL_REQUEST")"
 APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$APPROVAL_REQUEST")"
 jq -e \
   --arg target "$APPROVAL_TARGET" '
@@ -706,7 +706,7 @@ jq -e \
     and (.spec | has("requested_by") | not)
     and (.spec | has("requester_subject") | not)
     and .spec.operation.verb == "create"
-    and .spec.operation.resource.metadata.path == $target
+    and .spec.operation.resource.path == $target
   ' <<<"$APPROVAL_REQUEST" >/dev/null
 [[ "$APPROVAL_PATH" == "/approvals$OBSERVER_PATH/requests/"* ]]
 assert_approval_link \
@@ -722,10 +722,10 @@ APPROVAL_DECISION="$(
     -d '{"decision":"approve"}' \
     "$APPROVAL_API/approvals/decide?path=$APPROVAL_PATH&expected_revision=$APPROVAL_REVISION"
 )"
-APPROVAL_DECISION_PATH="$(jq -r '.metadata.path' <<<"$APPROVAL_DECISION")"
+APPROVAL_DECISION_PATH="$(jq -r '.path' <<<"$APPROVAL_DECISION")"
 jq -e \
   --arg decision_prefix "/approvals/users/platform-admin/decisions/" '
-    (.metadata.path | startswith($decision_prefix))
+    (.path | startswith($decision_prefix))
     and .metadata.manifest == "/manifests/approval"
     and .spec.kind == "decision"
     and (.spec | has("approval") | not)
@@ -753,12 +753,12 @@ APPROVAL_RESULT="$(get_resource "$APPROVAL_RESULT_PATH")"
 jq -e \
   --arg result "$APPROVAL_RESULT_PATH" \
   --arg target "$APPROVAL_TARGET" '
-    .metadata.path == $result
+    .path == $result
     and .metadata.manifest == "/manifests/approval-result"
     and (.spec | has("approval") | not)
     and .spec.response.status == 201
     and (.spec.response.content_type | startswith("application/json"))
-    and .spec.response.body.metadata.path == $target
+    and .spec.response.body.path == $target
     and .spec.response.body.metadata.manifest == "/builtin/role"
     and .spec.response.body.metadata["[kas]"] == null
     and .spec.response.body.status.metadata["[kas]"] == null
@@ -804,8 +804,8 @@ REJECTED_REQUEST="$(
         operation: {
           verb: "create",
           resource: {
+            path: $path,
             metadata: {
-              path: $path,
               manifest: "/builtin/role",
               name: "e2e-rejected-role"
             },
@@ -820,7 +820,7 @@ REJECTED_REQUEST="$(
     )" \
     "$APPROVAL_API/approvals"
 )"
-REJECTED_APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$REJECTED_REQUEST")"
+REJECTED_APPROVAL_PATH="$(jq -r '.path' <<<"$REJECTED_REQUEST")"
 REJECTED_APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$REJECTED_REQUEST")"
 REJECTED_DECISION="$(
   request --fail-with-body --silent --show-error \
@@ -831,7 +831,7 @@ REJECTED_DECISION="$(
 )"
 jq -e \
   --arg decision_prefix "/approvals/users/platform-admin/decisions/" '
-    (.metadata.path | startswith($decision_prefix))
+    (.path | startswith($decision_prefix))
     and .spec.kind == "decision"
     and .spec.outcome == "rejected"
     and (.spec | has("approval") | not)
@@ -840,7 +840,7 @@ jq -e \
     and (.spec | has("result_path") | not)
     and .spec.error == null
   ' <<<"$REJECTED_DECISION" >/dev/null
-REJECTED_DECISION_PATH="$(jq -r '.metadata.path' <<<"$REJECTED_DECISION")"
+REJECTED_DECISION_PATH="$(jq -r '.path' <<<"$REJECTED_DECISION")"
 assert_approval_link \
   "/manifests/approval/relations/decides" \
   "$REJECTED_DECISION_PATH" \
@@ -873,8 +873,8 @@ assert_no_per_approval_rbac "$REJECTED_APPROVAL_PATH"
 LIMITED_APPROVER_PATH="/users/e2e-limited-approver"
 post_resource "$(
   jq -n --arg path "$LIMITED_APPROVER_PATH" '{
+    path: $path,
     metadata: {
-      path: $path,
       manifest: "/builtin/user",
       name: "e2e-limited-approver"
     },
@@ -907,7 +907,7 @@ GET_APPROVAL_REQUEST="$(
     )" \
     "$APPROVAL_API/approvals"
 )"
-GET_APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$GET_APPROVAL_REQUEST")"
+GET_APPROVAL_PATH="$(jq -r '.path' <<<"$GET_APPROVAL_REQUEST")"
 GET_APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$GET_APPROVAL_REQUEST")"
 INVALID_GET_DECISION="$(
   request --fail-with-body --silent --show-error \
@@ -916,10 +916,10 @@ INVALID_GET_DECISION="$(
     -d '{"decision":"approve"}' \
     "$APPROVAL_API/approvals/decide?path=$GET_APPROVAL_PATH&expected_revision=$GET_APPROVAL_REVISION"
 )"
-INVALID_GET_DECISION_PATH="$(jq -r '.metadata.path' <<<"$INVALID_GET_DECISION")"
+INVALID_GET_DECISION_PATH="$(jq -r '.path' <<<"$INVALID_GET_DECISION")"
 jq -e \
   --arg prefix "/approvals/users/e2e-limited-approver/decisions/" '
-    (.metadata.path | startswith($prefix))
+    (.path | startswith($prefix))
     and .spec.kind == "decision"
     and .spec.outcome == "invalid"
     and (.spec.error | length) > 0
@@ -955,7 +955,7 @@ GET_APPROVAL_DECISION="$(
     -d '{"decision":"approve"}' \
     "$APPROVAL_API/approvals/decide?path=$GET_APPROVAL_PATH&expected_revision=$GET_APPROVAL_REVISION"
 )"
-GET_APPROVAL_DECISION_PATH="$(jq -r '.metadata.path' <<<"$GET_APPROVAL_DECISION")"
+GET_APPROVAL_DECISION_PATH="$(jq -r '.path' <<<"$GET_APPROVAL_DECISION")"
 [[ "$GET_APPROVAL_DECISION_PATH" == "/approvals/users/platform-admin/decisions/"* ]]
 assert_approval_link \
   "/manifests/approval/relations/decides" \
@@ -978,7 +978,7 @@ jq -e \
     .metadata.manifest == "/manifests/approval-result"
     and .spec.response.status == 200
     and (.spec.response.content_type | startswith("application/json"))
-    and .spec.response.body.metadata.path == $target
+    and .spec.response.body.path == $target
     and .spec.response.body.metadata.manifest == "/builtin/role"
     and .spec.response.body.metadata["[kas]"] == null
     and .spec.response.body.status.metadata["[kas]"] == null
@@ -1043,7 +1043,7 @@ LIST_APPROVAL_REQUEST="$(
     )" \
     "$APPROVAL_API/approvals"
 )"
-LIST_APPROVAL_PATH="$(jq -r '.metadata.path' <<<"$LIST_APPROVAL_REQUEST")"
+LIST_APPROVAL_PATH="$(jq -r '.path' <<<"$LIST_APPROVAL_REQUEST")"
 LIST_APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$LIST_APPROVAL_REQUEST")"
 LIST_APPROVAL_DECISION="$(
   request --fail-with-body --silent --show-error \
@@ -1052,7 +1052,7 @@ LIST_APPROVAL_DECISION="$(
     -d '{"decision":"approve"}' \
     "$APPROVAL_API/approvals/decide?path=$LIST_APPROVAL_PATH&expected_revision=$LIST_APPROVAL_REVISION"
 )"
-LIST_APPROVAL_DECISION_PATH="$(jq -r '.metadata.path' <<<"$LIST_APPROVAL_DECISION")"
+LIST_APPROVAL_DECISION_PATH="$(jq -r '.path' <<<"$LIST_APPROVAL_DECISION")"
 LIST_APPROVAL_RESULT_PATH="$(
   approval_link_source \
     "/manifests/approval/relations/result-of" \
@@ -1074,7 +1074,7 @@ jq -e '
   and (.spec.response.content_type | startswith("application/json"))
   and (.spec.response.body | length) == 1
   and all(.spec.response.body[];
-    (.metadata.path | startswith("/approval-proofs/"))
+    (.path | startswith("/approval-proofs/"))
     and .metadata.manifest == "/builtin/role"
     and .metadata["[kas]"] == null
     and .status.metadata["[kas]"] == null)
@@ -1089,7 +1089,7 @@ OBSERVER_SKILL="$(
     "$SKILL_API/skills?path=$OBSERVER_SKILL_PATH"
 )"
 jq -e --arg path "$OBSERVER_SKILL_PATH" '
-  .metadata.path == $path and .metadata.manifest == "/manifests/skill"
+  .path == $path and .metadata.manifest == "/manifests/skill"
 ' <<<"$OBSERVER_SKILL" >/dev/null
 wait_for_state "$OBSERVER_SKILL_PATH" available >/dev/null
 jq -e --arg owner "$OBSERVER_PATH" '.spec.source == $owner' \
@@ -1114,7 +1114,7 @@ AGENT_UPLOAD="$(
     "$FILE_API/files?path=$AGENT_UPLOAD_PATH"
 )"
 jq -e --arg path "$AGENT_UPLOAD_PATH" '
-  .metadata.path == $path and .metadata.manifest == "/manifests/file"
+  .path == $path and .metadata.manifest == "/manifests/file"
 ' <<<"$AGENT_UPLOAD" >/dev/null
 OVERWRITE_STATUS="$(
   command curl --silent --output "$E2E_DIR/upload-conflict.json" --write-out "%{http_code}" \
@@ -1132,8 +1132,8 @@ cmp "$E2E_DIR/attachment.bin" "$E2E_DIR/agent-upload-download.bin"
 THREAD_PATH="/threads/e2e"
 post_resource "$(
   jq -n --arg path "$THREAD_PATH" '{
+    path: $path,
     metadata: {
-      path: $path,
       manifest: "/manifests/thread",
       name: "e2e-thread"
     },
@@ -1150,8 +1150,8 @@ post_resource "$(
   jq -n \
     --arg path "$MESSAGE_PATH" \
     --arg body "@e2e Use \$e2e-bundle and remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file. Also POST a Message Resource at $SKILL_PROOF_PATH with name e2e-agent-skill-proof, spec.role system, and spec.body set to the exact Skill bundle marker supplied by \$e2e-bundle. After both POST requests succeed, read both Resources back and verify their bodies, then publish the assistant reply CREATED through the KAS API exactly as required by \$kas. Do not rely on your final terminal response." '{
+    path: $path,
     metadata: {
-      path: $path,
       manifest: "/manifests/message",
       name: "e2e-user-message"
     },
@@ -1268,13 +1268,13 @@ UPDATED_SKILL="$(
     "$SKILL_API/skills?path=$SKILL_PATH&expected_revision=$SKILL_REVISION"
 )"
 jq -e --arg path "$SKILL_PATH" '
-  .metadata.path == $path and .spec.name == "e2e-bundle"
+  .path == $path and .spec.name == "e2e-bundle"
 ' <<<"$UPDATED_SKILL" >/dev/null
 wait_for_state "$SKILL_PATH" available >/dev/null
 UPDATED_SKILL_LINK="$(get_resource "$SKILL_PATH/links/bundle")"
 UPDATED_SKILL_FILE="$(jq -r '.spec.target' <<<"$UPDATED_SKILL_LINK")"
 [[ "$UPDATED_SKILL_FILE" != "$INITIAL_SKILL_FILE" ]]
-[[ "$(jq -r '.metadata.path' <<<"$UPDATED_SKILL_LINK")" == "$SKILL_PATH/links/bundle" ]]
+[[ "$(jq -r '.path' <<<"$UPDATED_SKILL_LINK")" == "$SKILL_PATH/links/bundle" ]]
 get_resource "$UPDATED_SKILL_FILE" >/dev/null
 
 SECOND_MESSAGE_PATH="/messages/e2e-user-resume"
@@ -1283,8 +1283,8 @@ post_resource "$(
   jq -n \
     --arg path "$SECOND_MESSAGE_PATH" \
     --arg body "@e2e Use \$e2e-bundle and POST a Message Resource at $UPDATED_SKILL_PROOF_PATH with name e2e-agent-skill-update-proof, spec.role system, and spec.body set to its exact current Skill bundle marker. Then publish an assistant reply through the KAS API containing exactly the secret I asked you to remember in the previous turn; do not add the marker to the reply and do not rely on your final terminal response." '{
+      path: $path,
       metadata: {
-        path: $path,
         manifest: "/manifests/message",
         name: "e2e-user-resume"
       },

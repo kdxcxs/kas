@@ -1,6 +1,6 @@
 {
+  "path": "./driver",
   "metadata": {
-    "path": "./driver",
     "manifest": "/builtin/driver",
     "name": "file-driver",
     "state": "running"

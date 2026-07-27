@@ -1,6 +1,6 @@
 {
+  "path": "./roles/runtime",
   "metadata": {
-    "path": "./roles/runtime",
     "manifest": "/builtin/role",
     "name": "agent-runtime"
   },

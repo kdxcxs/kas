@@ -1,6 +1,6 @@
 {
+  "path": "./roles/driver",
   "metadata": {
-    "path": "./roles/driver",
     "manifest": "/builtin/role",
     "name": "skill-driver"
   },

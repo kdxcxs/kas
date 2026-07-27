@@ -330,8 +330,8 @@ async function requireResponse(response: Response): Promise<void> {
 
 function resourcePayload(resource: CreateResource): unknown {
   return {
+    path: resource.path,
     metadata: {
-      path: resource.path,
       manifest: resource.manifest,
       name: resource.name
     },
@@ -341,7 +341,7 @@ function resourcePayload(resource: CreateResource): unknown {
 
 export function resourceFromDocument(document: ResourceDocument): Resource {
   return {
-    path: document.metadata.path,
+    path: document.path,
     manifest: document.metadata.manifest,
     name: document.metadata.name,
     state: document.metadata.state,

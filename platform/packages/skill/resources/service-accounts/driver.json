@@ -1,6 +1,6 @@
 {
+  "path": "./service-accounts/driver",
   "metadata": {
-    "path": "./service-accounts/driver",
     "manifest": "/builtin/service-account",
     "name": "skill-driver"
   },

@@ -176,8 +176,8 @@ describe('KasApi', () => {
     const request = vi.fn().mockImplementation(async () =>
       new Response(
         JSON.stringify({
+          path: '/agents/demo',
           metadata: {
-            path: '/agents/demo',
             manifest: '/manifests/agent',
             name: 'demo',
             state: 'available',
@@ -191,7 +191,6 @@ describe('KasApi', () => {
           spec: { working_directory: '/tmp/demo' },
           status: {
             metadata: {
-              path: '/agents/demo',
               manifest: '/manifests/agent',
               name: 'demo',
               state: 'available',
@@ -289,7 +288,6 @@ describe('KasApi', () => {
 
 function resourceDocument(path: string, manifest: string, name: string) {
   const metadata = {
-    path,
     manifest,
     name,
     state: 'available',
@@ -301,6 +299,7 @@ function resourceDocument(path: string, manifest: string, name: string) {
     }
   };
   return {
+    path,
     metadata,
     spec: {},
     status: { metadata, spec: {} }

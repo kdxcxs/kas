@@ -1,6 +1,6 @@
 {
+  "path": "./driver",
   "metadata": {
-    "path": "./driver",
     "manifest": "/builtin/driver",
     "name": "frontend-driver",
     "state": "running"
@@ -9,16 +9,23 @@
     "runtime": "process",
     "entrypoint": "./driver/bin/kas-frontend-driver",
     "service_account": "./service-accounts/driver",
-    "manages": [".", "/manifests/proxy"],
+    "manages": [
+      ".",
+      "/manifests/proxy"
+    ],
     "args": [],
     "watches": [
       {
         "manifest": "/builtin/link",
-        "paths": ["/frontend-plugins/**/links/bundle"]
+        "paths": [
+          "/frontend-plugins/**/links/bundle"
+        ]
       },
       {
         "manifest": "/manifests/file",
-        "paths": ["/files/frontend-plugins/**"]
+        "paths": [
+          "/files/frontend-plugins/**"
+        ]
       }
     ],
     "restart": "on_failure"

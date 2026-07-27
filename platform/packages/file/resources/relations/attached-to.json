@@ -1,6 +1,6 @@
 {
+  "path": "./relations/attached-to",
   "metadata": {
-    "path": "./relations/attached-to",
     "manifest": "/builtin/relation",
     "name": "attached-to"
   },

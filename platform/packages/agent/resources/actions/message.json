@@ -1,6 +1,6 @@
 {
+  "path": "./actions/message",
   "metadata": {
-    "path": "./actions/message",
     "manifest": "/builtin/action",
     "name": "message"
   },

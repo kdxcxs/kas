@@ -53,8 +53,8 @@ curl --fail-with-body --silent --show-error \
       --arg icon "$ICON" \
       --argjson order "$ORDER" \
       --arg route "$ROUTE" '{
+        path: $path,
         metadata: {
-          path: $path,
           manifest: "/manifests/frontend-plugin",
           name: $name
         },
@@ -85,9 +85,9 @@ curl --fail-with-body --silent --show-error \
     jq -n \
       --arg path "$PLUGIN_PATH/links/bundle" \
       --arg source "$PLUGIN_PATH" \
-      --arg target "$(jq -r '.metadata.path' <<<"$FILE")" '{
+      --arg target "$(jq -r '.path' <<<"$FILE")" '{
+        path: $path,
         metadata: {
-          path: $path,
           manifest: "/builtin/link",
           name: "bundle"
         },
@@ -103,5 +103,5 @@ curl --fail-with-body --silent --show-error \
 
 jq -n \
   --arg plugin "$PLUGIN_PATH" \
-  --arg file "$(jq -r '.metadata.path' <<<"$FILE")" \
+  --arg file "$(jq -r '.path' <<<"$FILE")" \
   '{plugin: $plugin, file: $file}'

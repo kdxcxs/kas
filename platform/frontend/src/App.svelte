@@ -1397,9 +1397,7 @@
     if (operation.verb === 'list' && typeof operation.manifest === 'string') {
       return operation.manifest;
     }
-    return String(record(operation.resource).metadata
-      ? record(record(operation.resource).metadata).path ?? 'Unknown target'
-      : 'Unknown target');
+    return String(record(operation.resource).path ?? 'Unknown target');
   }
 
   function operationManifest(approval: Resource | null): string {
@@ -1466,7 +1464,7 @@
   function resultValueSummary(value: unknown): string {
     if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? '' : 's'}`;
     if (isRecord(value)) {
-      const identity = value.path ?? record(value.metadata).path ?? value.name;
+      const identity = value.path ?? value.name;
       if (typeof identity === 'string') return identity;
       const count = Object.keys(value).length;
       return `${count} field${count === 1 ? '' : 's'}`;

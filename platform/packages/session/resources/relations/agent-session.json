@@ -1,6 +1,6 @@
 {
+  "path": "./relations/agent-session",
   "metadata": {
-    "path": "./relations/agent-session",
     "manifest": "/builtin/relation",
     "name": "agent-session"
   },

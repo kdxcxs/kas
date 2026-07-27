@@ -84,8 +84,8 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
           --arg name "$name" \
           --arg prefix "$prefix" \
           --arg upstream "$upstream" '{
+            path: $path,
             metadata: {
-              path: $path,
               manifest: "/manifests/proxy",
               name: $name
             },

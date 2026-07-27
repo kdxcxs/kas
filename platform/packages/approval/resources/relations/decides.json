@@ -1,6 +1,6 @@
 {
+  "path": "./relations/decides",
   "metadata": {
-    "path": "./relations/decides",
     "manifest": "/builtin/relation",
     "name": "decides"
   },

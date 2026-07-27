@@ -1,6 +1,6 @@
 {
+  "path": "./links/driver-role",
   "metadata": {
-    "path": "./links/driver-role",
     "manifest": "/builtin/link",
     "name": "frontend-driver-role"
   },

@@ -1,6 +1,6 @@
 {
+  "path": "./relations/thread-session",
   "metadata": {
-    "path": "./relations/thread-session",
     "manifest": "/builtin/relation",
     "name": "thread-session"
   },

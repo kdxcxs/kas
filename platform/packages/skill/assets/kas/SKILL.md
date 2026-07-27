@@ -60,8 +60,8 @@ Request through the `decides` Relation. A successful Result has its own
 `/approvals{requester-path}/results/{uuid}` path and connects to the Request
 through `result-of`; `produced-by` connects it to the Decision. Its
 `spec.response` contains the HTTP status, content type, and sanitized response
-body. Platform `[kas]` bookkeeping fields are omitted, but Resource `metadata`,
-`spec`, and `status` business data are retained.
+body. Platform `[kas]` bookkeeping fields are omitted, but Resource `path`,
+`metadata`, `spec`, and `status` business data are retained.
 Never retry the privileged operation directly or place credentials in an
 Approval.
 
@@ -107,8 +107,8 @@ curl -fsS \
   -H "Authorization: Bearer $KAS_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg path "$KAS_REPLY_PATH" --arg body "$reply_body" '{
+    path: $path,
     metadata: {
-      path: $path,
       manifest: "/manifests/message",
       name: "assistant-reply"
     },
@@ -128,8 +128,8 @@ create_reply_link() {
       --arg relation "$relation_path" \
       --arg source "$KAS_REPLY_PATH" \
       --arg target "$target_path" '{
+        path: $path,
         metadata: {
-          path: $path,
           manifest: "/builtin/link",
           name: ($path | split("/") | last)
         },

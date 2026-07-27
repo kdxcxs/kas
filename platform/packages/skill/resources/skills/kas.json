@@ -1,6 +1,6 @@
 {
+  "path": "/skills/kas",
   "metadata": {
-    "path": "/skills/kas",
     "manifest": ".",
     "name": "KAS",
     "state": "available"

@@ -236,6 +236,7 @@ function resource(
     created_at: metadata['[kas]'].created_at,
     updated_at: metadata['[kas]'].updated_at,
     document: {
+      path,
       metadata,
       spec,
       status: { metadata, spec }

@@ -1,6 +1,6 @@
 {
+  "path": "./relations/message-thread",
   "metadata": {
-    "path": "./relations/message-thread",
     "manifest": "/builtin/relation",
     "name": "message-thread"
   },

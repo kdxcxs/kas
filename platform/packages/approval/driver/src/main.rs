@@ -465,7 +465,7 @@ impl ApprovalService {
             ApprovalOperation::Create { resource } => (
                 resource.metadata.manifest.clone(),
                 "create",
-                resource.metadata.path.clone(),
+                resource.path.clone(),
             ),
             ApprovalOperation::List {
                 manifest,
@@ -801,8 +801,8 @@ fn planned_for(
     spec: Value,
 ) -> PlannedResource {
     PlannedResource {
+        path,
         metadata: PlannedResourceMetadata {
-            path,
             manifest: manifest.into(),
             name: name.into(),
             state: state.into(),
@@ -814,8 +814,8 @@ fn planned_for(
 
 fn safe_resource(resource: Resource) -> Value {
     json!({
+        "path": resource.path,
         "metadata": {
-            "path": resource.path,
             "manifest": resource.manifest,
             "name": resource.name,
             "state": resource.metadata.state,
@@ -826,7 +826,6 @@ fn safe_resource(resource: Resource) -> Value {
         "spec": resource.spec,
         "status": {
             "metadata": {
-                "path": resource.status.metadata.path,
                 "manifest": resource.status.metadata.manifest,
                 "name": resource.status.metadata.name,
                 "state": resource.status.metadata.state,
@@ -841,9 +840,9 @@ fn safe_resource(resource: Resource) -> Value {
 
 fn planned_link(path: String, relation: &str, source: String, target: String) -> PlannedResource {
     PlannedResource {
+        path: path.clone(),
         metadata: PlannedResourceMetadata {
             name: path.rsplit('/').next().unwrap_or("link").into(),
-            path,
             manifest: LINK_MANIFEST.into(),
             state: String::new(),
         },

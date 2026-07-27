@@ -162,8 +162,8 @@ create_proxy() {
         --arg name "$name" \
         --arg prefix "$prefix" \
         --arg upstream "$upstream" '{
+          path: $path,
           metadata: {
-            path: $path,
             manifest: "/manifests/proxy",
             name: $name
           },
@@ -337,8 +337,8 @@ fi
 
 AGENT_PAYLOAD="$(
   jq -n --arg cwd "$ROOT" '{
+    path: "/agents/preview",
     metadata: {
-      path: "/agents/preview",
       manifest: "/manifests/agent",
       name: "Preview Agent"
     },
@@ -388,8 +388,8 @@ fi
 
 THREAD_PAYLOAD="$(
   jq -n '{
+    path: "/threads/preview",
     metadata: {
-      path: "/threads/preview",
       manifest: "/manifests/thread",
       name: "Preview Thread"
     },
@@ -413,8 +413,8 @@ create_link() {
       jq -cn \
         --arg path "$path" \
         --arg target "$target" '{
+          path: $path,
           metadata: {
-            path: $path,
             manifest: "/builtin/link",
             name: ($path | split("/") | last)
           },

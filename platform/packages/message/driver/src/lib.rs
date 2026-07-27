@@ -216,8 +216,8 @@ fn planned(
     spec: Value,
 ) -> PlannedResource {
     PlannedResource {
+        path: path.into(),
         metadata: PlannedResourceMetadata {
-            path: path.into(),
             manifest: manifest.into(),
             name: name.into(),
             state: String::new(),

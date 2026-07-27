@@ -1,6 +1,6 @@
 {
+  "path": "./relations/replies-to",
   "metadata": {
-    "path": "./relations/replies-to",
     "manifest": "/builtin/relation",
     "name": "replies-to"
   },

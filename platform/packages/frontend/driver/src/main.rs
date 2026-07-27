@@ -26,11 +26,7 @@ use kas_driver::{Driver, DriverError, DriverRuntime};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::{
-    fs,
-    net::TcpListener,
-    sync::RwLock,
-};
+use tokio::{fs, net::TcpListener, sync::RwLock};
 use uuid::Uuid;
 use zip::ZipArchive;
 
@@ -115,13 +111,15 @@ struct FrontendDriver {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let api = normalized_url(env::var("KAS_API").unwrap_or_else(|_| "http://127.0.0.1:3000".into()));
+    let api =
+        normalized_url(env::var("KAS_API").unwrap_or_else(|_| "http://127.0.0.1:3000".into()));
     let address: SocketAddr = env::var("KAS_FRONTEND_ADDRESS")
         .unwrap_or_else(|_| "127.0.0.1:5173".into())
         .parse()?;
-    let package_root = PathBuf::from(env::var_os("KAS_PACKAGE_ROOT").ok_or_else(|| {
-        anyhow::anyhow!("KAS_PACKAGE_ROOT is required")
-    })?);
+    let package_root = PathBuf::from(
+        env::var_os("KAS_PACKAGE_ROOT")
+            .ok_or_else(|| anyhow::anyhow!("KAS_PACKAGE_ROOT is required"))?,
+    );
     let web_root = package_root.join("driver/web");
     if !web_root.join("index.html").is_file() {
         anyhow::bail!("Frontend web root is missing {}", web_root.display());
@@ -156,7 +154,10 @@ async fn main() -> anyhow::Result<()> {
             post(create_session).get(get_session).delete(delete_session),
         )
         .route("/plugins/{slug}", get(plugin_entrypoint))
-        .route("/plugins/{slug}/{*asset}", get(plugin_asset).head(plugin_asset))
+        .route(
+            "/plugins/{slug}/{*asset}",
+            get(plugin_asset).head(plugin_asset),
+        )
         .route("/api", any(proxy_core))
         .route("/api/{*rest}", any(proxy_core))
         .fallback(dynamic_request)
@@ -174,7 +175,10 @@ async fn create_session(
 ) -> Result<Response, GatewayError> {
     let token = input.token.trim();
     if token.is_empty() {
-        return Err(GatewayError::new(StatusCode::BAD_REQUEST, "token is required"));
+        return Err(GatewayError::new(
+            StatusCode::BAD_REQUEST,
+            "token is required",
+        ));
     }
     let response = state
         .client
@@ -231,9 +235,7 @@ async fn delete_session(
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         SET_COOKIE,
-        HeaderValue::from_static(
-            "kas_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-        ),
+        HeaderValue::from_static("kas_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"),
     );
     Ok(response)
 }
@@ -301,7 +303,9 @@ async fn proxy_to(
         "{}{}{}",
         upstream,
         if suffix.is_empty() { "/" } else { suffix },
-        uri.query().map(|query| format!("?{query}")).unwrap_or_default()
+        uri.query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
     );
     let (parts, body) = request.into_parts();
     let original_authorization = parts.headers.get(AUTHORIZATION).cloned();
@@ -373,7 +377,10 @@ async fn serve_host(
     };
     let media_type = mime_guess::from_path(&path).first_or_octet_stream();
     Ok((
-        [(CONTENT_TYPE, HeaderValue::from_str(media_type.as_ref()).map_err(internal)?)],
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_str(media_type.as_ref()).map_err(internal)?,
+        )],
         bytes,
     )
         .into_response())
@@ -443,9 +450,15 @@ async fn plugin_mount(
     let status = response.status();
     let decision: Value = response.json().await.map_err(internal)?;
     if !status.is_success()
-        || !decision.get("allowed").and_then(Value::as_bool).unwrap_or(false)
+        || !decision
+            .get("allowed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
-        return Err(GatewayError::new(StatusCode::FORBIDDEN, "plugin access denied"));
+        return Err(GatewayError::new(
+            StatusCode::FORBIDDEN,
+            "plugin access denied",
+        ));
     }
     Ok(mount)
 }
@@ -454,7 +467,10 @@ async fn serve_plugin_file(mount: &PluginMount, asset: &str) -> Result<Response,
     let relative = safe_relative_path(asset)?;
     let path = mount.root.join(relative);
     if !path.is_file() {
-        return Err(GatewayError::new(StatusCode::NOT_FOUND, "plugin asset was not found"));
+        return Err(GatewayError::new(
+            StatusCode::NOT_FOUND,
+            "plugin asset was not found",
+        ));
     }
     let bytes = fs::read(&path).await.map_err(internal)?;
     let media_type = mime_guess::from_path(&path).first_or_octet_stream();
@@ -477,12 +493,17 @@ async fn current_session(state: &GatewayState, headers: &HeaderMap) -> Option<Se
 }
 
 async fn request_token(state: &GatewayState, headers: &HeaderMap) -> Option<String> {
-    if let Some(value) = headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()) {
+    if let Some(value) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
         if let Some(token) = value.strip_prefix("Bearer ") {
             return Some(token.to_owned());
         }
     }
-    current_session(state, headers).await.map(|session| session.token)
+    current_session(state, headers)
+        .await
+        .map(|session| session.token)
 }
 
 fn session_id(headers: &HeaderMap) -> Option<String> {
@@ -603,13 +624,19 @@ impl FrontendDriver {
                     && source_of(candidate) == Some(plugin.path.as_str())
                     && candidate.metadata.state != kas_core::STATE_DELETED
             })
-            .ok_or_else(|| execution(format!("FrontendPlugin {} has no bundle Link", plugin.path)))?;
-        let file_path = target_of(link)
-            .ok_or_else(|| execution("FrontendPlugin bundle Link has no target"))?;
+            .ok_or_else(|| {
+                execution(format!("FrontendPlugin {} has no bundle Link", plugin.path))
+            })?;
+        let file_path =
+            target_of(link).ok_or_else(|| execution("FrontendPlugin bundle Link has no target"))?;
         let file = resources
             .iter()
             .find(|candidate| candidate.path == file_path && candidate.manifest == FILE_MANIFEST)
-            .ok_or_else(|| execution(format!("FrontendPlugin bundle File {file_path} was not found")))?;
+            .ok_or_else(|| {
+                execution(format!(
+                    "FrontendPlugin bundle File {file_path} was not found"
+                ))
+            })?;
         let digest = file
             .spec
             .get("digest")
@@ -718,10 +745,12 @@ async fn extract_plugin(
         let temporary = destination.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&temporary).map_err(|error| execution(error.to_string()))?;
         let result = (|| {
-            let mut archive =
-                ZipArchive::new(Cursor::new(bytes)).map_err(|error| execution(error.to_string()))?;
+            let mut archive = ZipArchive::new(Cursor::new(bytes))
+                .map_err(|error| execution(error.to_string()))?;
             if archive.len() == 0 || archive.len() > MAX_PLUGIN_FILES {
-                return Err(execution("FrontendPlugin ZIP contains an invalid number of files"));
+                return Err(execution(
+                    "FrontendPlugin ZIP contains an invalid number of files",
+                ));
             }
             let mut total = 0_u64;
             for index in 0..archive.len() {
@@ -729,13 +758,17 @@ async fn extract_plugin(
                     .by_index(index)
                     .map_err(|error| execution(error.to_string()))?;
                 if file.is_symlink() {
-                    return Err(execution("FrontendPlugin ZIP may not contain symbolic links"));
+                    return Err(execution(
+                        "FrontendPlugin ZIP may not contain symbolic links",
+                    ));
                 }
                 total = total
                     .checked_add(file.size())
                     .ok_or_else(|| execution("FrontendPlugin ZIP size overflow"))?;
                 if total > MAX_PLUGIN_UNCOMPRESSED_BYTES {
-                    return Err(execution("FrontendPlugin ZIP is too large after extraction"));
+                    return Err(execution(
+                        "FrontendPlugin ZIP is too large after extraction",
+                    ));
                 }
                 let enclosed = file
                     .enclosed_name()
@@ -763,8 +796,7 @@ async fn extract_plugin(
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| execution(error.to_string()))?;
             }
-            std::fs::rename(&temporary, &destination)
-                .map_err(|error| execution(error.to_string()))
+            std::fs::rename(&temporary, &destination).map_err(|error| execution(error.to_string()))
         })();
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&temporary);
@@ -796,9 +828,9 @@ fn validate_proxy_prefix(prefix: &str) -> Result<(), DriverError> {
     if !prefix.starts_with('/')
         || prefix.len() < 2
         || prefix.ends_with('/')
-        || prefix[1..]
-            .chars()
-            .any(|character| !(character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'))
+        || prefix[1..].chars().any(|character| {
+            !(character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
+        })
     {
         return Err(execution(format!("invalid Proxy prefix {prefix:?}")));
     }
@@ -899,12 +931,8 @@ mod tests {
             writer.finish().unwrap();
         }
         let directory = tempfile::tempdir().unwrap();
-        let result = extract_plugin(
-            bytes,
-            directory.path().join("plugin"),
-            "index.html".into(),
-        )
-        .await;
+        let result =
+            extract_plugin(bytes, directory.path().join("plugin"), "index.html".into()).await;
         assert!(result.is_err());
         assert!(!directory.path().join("index.html").exists());
     }

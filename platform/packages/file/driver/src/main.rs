@@ -187,8 +187,8 @@ async fn upload_file(
         handle,
     };
     let resource = PlannedResource {
+        path: path.clone(),
         metadata: PlannedResourceMetadata {
-            path: path.clone(),
             manifest: FILE_MANIFEST.into(),
             name: filename,
             state: kas_core::STATE_AVAILABLE.into(),
@@ -343,8 +343,8 @@ impl FileService {
         subject_path: &str,
     ) -> Result<Resource, FileApiError> {
         let resource = PlannedResource {
+            path: format!("{file_path}/links/uploaded-by"),
             metadata: PlannedResourceMetadata {
-                path: format!("{file_path}/links/uploaded-by"),
                 manifest: "/builtin/link".into(),
                 name: "uploaded-by".into(),
                 state: String::new(),

@@ -488,9 +488,9 @@ fn set_extracted_permissions(_path: &Path, _unix_mode: Option<u32>) -> Result<()
 
 fn planned_link(path: String, source: String, target: String) -> PlannedResource {
     PlannedResource {
+        path: path.clone(),
         metadata: PlannedResourceMetadata {
             name: path.split('/').next_back().unwrap_or("bundle").to_owned(),
-            path,
             manifest: LINK_MANIFEST.into(),
             state: String::new(),
         },

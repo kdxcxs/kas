@@ -118,8 +118,8 @@ async fn create_skill(
         .upload_file(&authorization, &file_path, &validated.spec, bytes)
         .await?;
     let skill = PlannedResource {
+        path: query.path.clone(),
         metadata: PlannedResourceMetadata {
-            path: query.path.clone(),
             manifest: SKILL_MANIFEST.into(),
             name: validated.spec.name.clone(),
             state: kas_core::STATE_AVAILABLE.into(),
@@ -457,8 +457,8 @@ fn planned_link(
     metadata: serde_json::Value,
 ) -> PlannedResource {
     PlannedResource {
+        path,
         metadata: PlannedResourceMetadata {
-            path,
             manifest: LINK_MANIFEST.into(),
             name: name.into(),
             state: String::new(),

@@ -1,6 +1,6 @@
 {
+  "path": "./relations/authored-by",
   "metadata": {
-    "path": "./relations/authored-by",
     "manifest": "/builtin/relation",
     "name": "authored-by"
   },

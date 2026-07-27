@@ -26,7 +26,6 @@ export interface DriverObservation {
 }
 
 export interface ResourceMetadata {
-  path: string;
   manifest: string;
   name: string;
   state: string;
@@ -39,6 +38,7 @@ export interface ResourceMetadata {
 }
 
 export interface ResourceDocument {
+  path: string;
   metadata: ResourceMetadata;
   spec: Record<string, unknown>;
   status: {

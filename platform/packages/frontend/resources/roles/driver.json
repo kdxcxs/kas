@@ -1,6 +1,6 @@
 {
+  "path": "./roles/driver",
   "metadata": {
-    "path": "./roles/driver",
     "manifest": "/builtin/role",
     "name": "frontend-driver"
   },
@@ -8,24 +8,55 @@
     "description": "Maintain installed FrontendPlugin bundles and serve the KAS web gateway.",
     "rules": [
       {
-        "manifests": ["/manifests/proxy"],
-        "verbs": ["get", "list", "update"],
-        "paths": ["/proxies/**"]
+        "manifests": [
+          "/manifests/proxy"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/proxies/**"
+        ]
       },
       {
-        "manifests": ["/manifests/frontend-plugin"],
-        "verbs": ["get", "list", "update"],
-        "paths": ["/frontend-plugins/**"]
+        "manifests": [
+          "/manifests/frontend-plugin"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/frontend-plugins/**"
+        ]
       },
       {
-        "manifests": ["/manifests/file"],
-        "verbs": ["get", "list", "download"],
-        "paths": ["/files/frontend-plugins/**"]
+        "manifests": [
+          "/manifests/file"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "download"
+        ],
+        "paths": [
+          "/files/frontend-plugins/**"
+        ]
       },
       {
-        "manifests": ["/builtin/link"],
-        "verbs": ["get", "list"],
-        "paths": ["/frontend-plugins/**"]
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/frontend-plugins/**"
+        ]
       }
     ]
   }
