@@ -39,7 +39,7 @@ failed() {
 trap 'failed "$LINENO"' ERR
 trap cleanup EXIT
 
-for command in cargo curl jq tar uuidgen python3 zip; do
+for command in cargo curl jq sqlite3 tar uuidgen python3 zip; do
   command -v "$command" >/dev/null || {
     echo "missing required command: $command" >&2
     exit 1
@@ -287,7 +287,12 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 command curl --fail --silent "$APPROVAL_API/health" | jq -e '.ok == true' >/dev/null
-wait_for_state "/skills/kas" available >/dev/null
+KAS_SKILL="$(wait_for_state "/skills/kas" available)"
+jq -e '
+  .metadata.state == "available"
+  and .status.metadata.state == "available"
+  and .spec == .status.spec
+' <<<"$KAS_SKILL" >/dev/null
 
 mkdir -p "$E2E_DIR/workspace"
 AGENT_PATH="/agents/e2e"
@@ -1216,6 +1221,23 @@ DELETED_DOWNLOAD_STATUS="$(
     "$FILE_API/files/content"
 )"
 [[ "$DELETED_DOWNLOAD_STATUS" == "404" ]]
+
+for _ in $(seq 1 200); do
+  ACTIVE_DELIVERIES="$(sqlite3 "$KAS_DATABASE" 'SELECT count(*) FROM driver_deliveries')"
+  if [[ "$ACTIVE_DELIVERIES" == "0" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+[[ "$ACTIVE_DELIVERIES" == "0" ]]
+SKILL_EVENT_COUNT="$(
+  sqlite3 "$KAS_DATABASE" \
+    "SELECT count(*) FROM events WHERE resource_path IN ('$SKILL_PATH','/skills/kas')"
+)"
+if (( SKILL_EVENT_COUNT >= 50 )); then
+  echo "Skill reconciliation did not converge: $SKILL_EVENT_COUNT Skill events" >&2
+  false
+fi
 
 control_driver "/manifests/message/driver" stopped
 control_driver "/manifests/agent/driver" stopped

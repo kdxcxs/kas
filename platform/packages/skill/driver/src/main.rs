@@ -122,7 +122,7 @@ async fn create_skill(
             path: query.path.clone(),
             manifest: SKILL_MANIFEST.into(),
             name: validated.spec.name.clone(),
-            state: "pending".into(),
+            state: kas_core::STATE_AVAILABLE.into(),
         },
         spec: serde_json::to_value(&validated.spec).map_err(internal)?,
         status: Default::default(),
@@ -211,7 +211,7 @@ async fn update_skill(
             UpdateResource {
                 expected_revision: current.revision,
                 metadata: Some(UpdateResourceMetadata {
-                    state: "pending".into(),
+                    state: kas_core::STATE_AVAILABLE.into(),
                 }),
                 spec: serde_json::to_value(&validated.spec).map_err(internal)?,
             },

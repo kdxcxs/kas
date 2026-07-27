@@ -3,7 +3,7 @@
     "path": "/skills/kas",
     "manifest": ".",
     "name": "KAS",
-    "state": "pending"
+    "state": "available"
   },
   "spec": {
     "name": "kas",
