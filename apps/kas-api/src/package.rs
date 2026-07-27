@@ -197,8 +197,8 @@ mod tests {
             "initial_state": "available"
         });
         let action = serde_json::json!({
+            "path": "./actions/echo",
             "metadata": {
-                "path": "./actions/echo",
                 "manifest": "/builtin/action",
                 "name": "echo"
             },
@@ -209,15 +209,15 @@ mod tests {
             }
         });
         let account = serde_json::json!({
+            "path": "./service-accounts/driver",
             "metadata": {
-                "path": "./service-accounts/driver",
                 "manifest": "/builtin/service-account",
                 "name": "driver"
             }
         });
         let driver = serde_json::json!({
+            "path": "./driver",
             "metadata": {
-                "path": "./driver",
                 "manifest": "/builtin/driver",
                 "name": "driver"
             },

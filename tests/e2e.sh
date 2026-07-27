@@ -219,7 +219,7 @@ curl --fail --silent --get \
   --data-urlencode "path=/builtin/manifest" \
   "$API/resources/by-path" |
   jq -e '
-    .metadata.path == "/builtin/manifest"
+    .path == "/builtin/manifest"
     and .metadata.manifest == "/builtin/manifest"
     and .spec.version == 1
   ' >/dev/null
@@ -229,10 +229,10 @@ curl --fail --silent --get \
   --data-urlencode "manifest=/builtin/manifest" \
   "$API/resources" |
   jq -e '
-    ([.[].metadata.path] | index("/builtin/manifest")) != null
-    and ([.[].metadata.path] | index("/builtin/driver")) != null
-    and ([.[].metadata.path] | index("/builtin/run")) != null
-    and ([.[].metadata.path] | index("/builtin/link")) != null
+    ([.[].path] | index("/builtin/manifest")) != null
+    and ([.[].path] | index("/builtin/driver")) != null
+    and ([.[].path] | index("/builtin/run")) != null
+    and ([.[].path] | index("/builtin/link")) != null
   ' >/dev/null
 
 PACKAGE_ROOT="$E2E_DIR/package"
@@ -251,7 +251,7 @@ PACKAGE="$(
     "$API/packages"
 )"
 echo "$PACKAGE" | jq -e '
-  (.metadata.path | startswith("/packages/sha256/"))
+  (.path | startswith("/packages/sha256/"))
   and .metadata.manifest == "/builtin/package"
   and (.spec.digest | startswith("sha256:"))
   and .spec.size_bytes > 0
@@ -261,14 +261,14 @@ echo "$PACKAGE" | jq -e '
   echo "Package installation failed: $PACKAGE" >&2
   false
 }
-PACKAGE_PATH="$(echo "$PACKAGE" | jq -r '.metadata.path')"
+PACKAGE_PATH="$(echo "$PACKAGE" | jq -r '.path')"
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   --data-urlencode "path=/manifests/echo" \
   "$API/resources/by-path" |
   jq -e '
-    .metadata.path == "/manifests/echo"
+    .path == "/manifests/echo"
     and .metadata.manifest == "/builtin/manifest"
     and (.spec | has("package_digest") | not)
   ' >/dev/null
@@ -312,7 +312,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 echo "$DRIVER" | jq -e '
-  .metadata.path == "/manifests/echo/driver"
+  .path == "/manifests/echo/driver"
   and .metadata.manifest == "/builtin/driver"
   and .metadata.state == "running"
   and .status.metadata.state == "running"
@@ -398,8 +398,8 @@ echo "$INTEGRATION_RESOURCE" | jq -e '
 RESOURCE_PATH="/resources/e2e/echo"
 RESOURCE_PAYLOAD="$(
   jq -n --arg resource "$RESOURCE_PATH" '{
+    path: $resource,
     metadata: {
-      path: $resource,
       manifest: "/manifests/echo",
       name: "echo"
     },
@@ -412,7 +412,7 @@ curl --fail --silent \
   -d "$RESOURCE_PAYLOAD" \
   "$API/resources" |
   jq -e '
-    .metadata.path == "/resources/e2e/echo"
+    .path == "/resources/e2e/echo"
     and .metadata.state == "available"
     and .status.metadata.state == "pending"
   ' >/dev/null
@@ -443,8 +443,8 @@ curl --fail --silent \
   -H "Content-Type: application/json" \
   -d "$(
     jq -n --arg path "$LINK_PATH" --arg resource "$RESOURCE_PATH" '{
+      path: $path,
       metadata: {
-        path: $path,
         manifest: "/builtin/link",
         name: "echo-self"
       },
@@ -491,8 +491,8 @@ curl --fail --silent \
   -H "Content-Type: application/json" \
   -d "$(
     jq -n --arg path "$INVALID_LINK_PATH" --arg resource "$RESOURCE_PATH" '{
+      path: $path,
       metadata: {
-        path: $path,
         manifest: "/builtin/link",
         name: "invalid-target"
       },
@@ -537,8 +537,8 @@ RUN_PAYLOAD="$(
     --arg run "$RUN_PATH" \
     --arg request_id "$REQUEST_ID" \
     --arg resource "$RESOURCE_PATH" '{
+      path: $run,
       metadata: {
-        path: $run,
         manifest: "/builtin/run",
         name: $request_id
       },
@@ -642,7 +642,7 @@ curl --fail --silent \
   -d "$RESOURCE_PAYLOAD" \
   "$API/resources" |
   jq -e '
-    .metadata.path == "/resources/e2e/echo"
+    .path == "/resources/e2e/echo"
     and .metadata["[kas]"].revision == 0
     and .status.metadata.state == "pending"
   ' >/dev/null
@@ -650,17 +650,17 @@ curl --fail --silent \
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"metadata":{"path":"/users/e2e-viewer","manifest":"/builtin/user","name":"e2e-viewer"},"spec":{"disabled":false}}' \
+  -d '{"path":"/users/e2e-viewer","metadata":{"manifest":"/builtin/user","name":"e2e-viewer"},"spec":{"disabled":false}}' \
   "$API/resources" >/dev/null
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"metadata":{"path":"/roles/e2e-viewer","manifest":"/builtin/role","name":"e2e-viewer"},"spec":{"rules":[{"manifests":["/manifests/echo"],"verbs":["get","download"],"paths":["/resources/e2e/**"]}]}}' \
+  -d '{"path":"/roles/e2e-viewer","metadata":{"manifest":"/builtin/role","name":"e2e-viewer"},"spec":{"rules":[{"manifests":["/manifests/echo"],"verbs":["get","download"],"paths":["/resources/e2e/**"]}]}}' \
   "$API/resources" >/dev/null
 curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"metadata":{"path":"/links/e2e-viewer-role","manifest":"/builtin/link","name":"e2e-viewer-role"},"spec":{"relation":"/builtin/relations/role-binding","source":"/users/e2e-viewer","target":"/roles/e2e-viewer","metadata":{}}}' \
+  -d '{"path":"/links/e2e-viewer-role","metadata":{"manifest":"/builtin/link","name":"e2e-viewer-role"},"spec":{"relation":"/builtin/relations/role-binding","source":"/users/e2e-viewer","target":"/roles/e2e-viewer","metadata":{}}}' \
   "$API/resources" >/dev/null
 VIEWER_CREDENTIAL="$(
   curl --fail --silent \
@@ -722,7 +722,7 @@ curl --fail --silent --get \
   -H "Authorization: Bearer $VIEWER_TOKEN" \
   --data-urlencode "path=$RESOURCE_PATH" \
   "$API/resources/by-path" |
-  jq -e '.metadata.path == "/resources/e2e/echo"' >/dev/null
+  jq -e '.path == "/resources/e2e/echo"' >/dev/null
 RBAC_STATUS="$(
   curl --silent --output "$E2E_DIR/rbac-denied.json" --write-out "%{http_code}" \
     --get \

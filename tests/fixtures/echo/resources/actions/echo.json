@@ -1,6 +1,6 @@
 {
+  "path": "./actions/echo",
   "metadata": {
-    "path": "./actions/echo",
     "manifest": "/builtin/action",
     "name": "echo"
   },

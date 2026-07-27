@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 13;
+pub const LATEST_SCHEMA_VERSION: u32 = 14;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -76,12 +76,13 @@ const MIGRATIONS: &[(u32, &str)] = &[
         13,
         include_str!("../migrations/0013_resources_and_events_only.sql"),
     ),
+    (
+        14,
+        include_str!("../migrations/0014_resource_documents.sql"),
+    ),
 ];
 
-const RESOURCE_SELECT: &str =
-    "SELECT path,manifest_path,name,spec_json,status_json,revision,state,observed_json,
-            created_at,updated_at,generation
-     FROM resources";
+const RESOURCE_SELECT: &str = "SELECT path,metadata,spec,status FROM resources";
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -233,7 +234,9 @@ impl Store {
             if self.get_resource(&root.path).is_ok() {
                 existing_count += 1;
                 let package = self.package_for_manifest(&root.path)?;
-                if package.path != package_path {
+                if package.path != package_path
+                    && installation.media_type != BUILTIN_PACKAGE_MEDIA_TYPE
+                {
                     return Err(StoreError::Conflict(format!(
                         "Manifest {} is already installed",
                         root.path
@@ -315,8 +318,8 @@ impl Store {
                 media_type: installation.media_type.clone(),
             };
             let package = PlannedResource {
+                path: package_path.clone(),
                 metadata: kas_core::PlannedResourceMetadata {
-                    path: package_path.clone(),
                     manifest: PACKAGE_MANIFEST.into(),
                     name: package_spec.digest.clone(),
                     state: String::new(),
@@ -423,9 +426,16 @@ impl Store {
 
     pub fn list_resources(&self, manifest: Option<&str>) -> Result<Vec<Resource>, StoreError> {
         let sql = if manifest.is_some() {
-            format!("{RESOURCE_SELECT} WHERE manifest_path=? ORDER BY created_at,path")
+            format!(
+                "{RESOURCE_SELECT}
+                 WHERE json_extract(metadata,'$.manifest')=?
+                 ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
+            )
         } else {
-            format!("{RESOURCE_SELECT} ORDER BY created_at,path")
+            format!(
+                "{RESOURCE_SELECT}
+                 ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
+            )
         };
         let mut statement = self.connection.prepare(&sql)?;
         if let Some(manifest) = manifest {
@@ -456,7 +466,7 @@ impl Store {
         input: UpdateResource,
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
-        let current = resource_in(&tx, path)?;
+        let mut current = resource_in(&tx, path)?;
         if current.manifest == CREDENTIAL_MANIFEST {
             return Err(StoreError::Invalid(
                 "Credential Resources can only be changed through credential endpoints".into(),
@@ -468,23 +478,17 @@ impl Store {
             .map(|metadata| metadata.state.as_str())
             .unwrap_or(&current.metadata.state);
         validate_against_manifest(&tx, &current.manifest, state, &input.spec, &current.status)?;
-        let now = Utc::now();
-        let changed = tx.execute(
-            "UPDATE resources SET spec_json=?,state=?,revision=revision+1,updated_at=?
-             WHERE path=? AND revision=? AND protected=0",
-            params![
-                serde_json::to_string(&input.spec)?,
-                state,
-                stamp(now),
-                path,
-                input.expected_revision
-            ],
-        )?;
-        if changed != 1 {
+        if current.revision != input.expected_revision || current.metadata.kas.protected {
             return Err(StoreError::Conflict(format!(
                 "Resource {path} revision is stale or protected"
             )));
         }
+        let now = Utc::now();
+        current.spec = input.spec;
+        current.metadata.state = state.into();
+        current.metadata.kas.revision += 1;
+        current.metadata.kas.updated_at = now;
+        save_resource_in(&tx, &current)?;
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
@@ -512,17 +516,12 @@ impl Store {
             &input.status,
         )?;
         let now = Utc::now();
-        let changed = tx.execute(
-            "UPDATE resources SET status_json=? WHERE path=? AND revision=?",
-            params![
-                serde_json::to_string(&input.status)?,
-                path,
-                input.expected_revision
-            ],
-        )?;
-        if changed != 1 {
+        if current.revision != input.expected_revision {
             return Err(StoreError::Conflict("Resource revision is stale".into()));
         }
+        let mut current = current;
+        current.status = input.status;
+        save_resource_in(&tx, &current)?;
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
@@ -543,17 +542,16 @@ impl Store {
                 "Resource {path} revision is stale"
             )));
         }
-        if is_protected(&tx, path)? {
+        if resource.metadata.kas.protected {
             return Err(StoreError::Conflict(format!(
                 "Resource {path} is protected"
             )));
         }
-        resource.metadata.state = STATE_DELETED.into();
         let now = Utc::now();
-        tx.execute(
-            "UPDATE resources SET state=?,revision=revision+1,updated_at=? WHERE path=?",
-            params![STATE_DELETED, stamp(now), path],
-        )?;
+        resource.metadata.state = STATE_DELETED.into();
+        resource.metadata.kas.revision += 1;
+        resource.metadata.kas.updated_at = now;
+        save_resource_in(&tx, &resource)?;
         resource = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "delete_requested", now)?;
@@ -563,10 +561,8 @@ impl Store {
             status.metadata = resource.metadata.clone();
             status.metadata.kas.observed = actual;
             status.spec = resource.spec.clone();
-            tx.execute(
-                "UPDATE resources SET status_json=? WHERE path=?",
-                params![serde_json::to_string(&status)?, path],
-            )?;
+            resource.status = status;
+            save_resource_in(&tx, &resource)?;
             maybe_finish_deleted_resource(&tx, path, now)?;
         }
         tx.commit()?;
@@ -703,18 +699,16 @@ impl Store {
         }
         let now = Utc::now();
         if driver.metadata.state != "running" {
-            tx.execute(
-                "UPDATE resources SET state='running',revision=revision+1,updated_at=? WHERE path=?",
-                params![stamp(now), path],
-            )?;
+            driver.metadata.state = "running".into();
+            driver.metadata.kas.revision += 1;
+            driver.metadata.kas.updated_at = now;
+            save_resource_in(&tx, &driver)?;
             driver = resource_in(&tx, path)?;
             reconcile_all_resources(&tx, "driver_started", now)?;
         }
         let generation = driver.metadata.kas.generation + 1;
-        tx.execute(
-            "UPDATE resources SET generation=? WHERE path=?",
-            params![generation, path],
-        )?;
+        driver.metadata.kas.generation = generation;
+        save_resource_in(&tx, &driver)?;
         update_status_document(&tx, path, DriverState::Starting, &driver.status.spec, now)?;
         driver = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &driver, now)?;
@@ -765,10 +759,10 @@ impl Store {
         let state = driver_state(&driver)?;
         let now = Utc::now();
         if driver.metadata.state != "stopped" {
-            tx.execute(
-                "UPDATE resources SET state='stopped',revision=revision+1,updated_at=? WHERE path=?",
-                params![stamp(now), path],
-            )?;
+            driver.metadata.state = "stopped".into();
+            driver.metadata.kas.revision += 1;
+            driver.metadata.kas.updated_at = now;
+            save_resource_in(&tx, &driver)?;
             driver = resource_in(&tx, path)?;
             reconcile_all_resources(&tx, "driver_stopped", now)?;
         }
@@ -856,8 +850,8 @@ impl Store {
             spec: spec.clone(),
         };
         self.create_resource(PlannedResource {
+            path: input.path,
             metadata: kas_core::PlannedResourceMetadata {
-                path: input.path,
                 manifest: RUN_MANIFEST.into(),
                 name: input.request_id.to_string(),
                 state: run_state_name(RunState::Queued).into(),
@@ -957,10 +951,7 @@ impl Store {
                             resource_revision: resource.revision,
                         },
                     );
-                    tx.execute(
-                        "UPDATE resources SET status_json=? WHERE path=?",
-                        params![serde_json::to_string(&current.status)?, resource.path],
-                    )?;
+                    save_resource_in(&tx, &current)?;
                 }
                 if let Ok(current) = resource_in(&tx, &resource.path) {
                     enqueue_if_drifted(&tx, &current, "delivery_completed", now)?;
@@ -1007,10 +998,10 @@ impl Store {
             let run_path: Option<String> = tx
                 .query_row(
                     "SELECT path FROM resources
-                     WHERE manifest_path='/builtin/run'
-                       AND json_extract(spec_json,'$.driver')=?
-                       AND json_extract(status_json,'$.metadata.state') IN ('queued','running')
-                     ORDER BY created_at,path LIMIT 1",
+                     WHERE json_extract(metadata,'$.manifest')='/builtin/run'
+                       AND json_extract(spec,'$.driver')=?
+                       AND json_extract(status,'$.metadata.state') IN ('queued','running')
+                     ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path LIMIT 1",
                     [driver_path],
                     |row| row.get(0),
                 )
@@ -1152,8 +1143,8 @@ impl Store {
         let path = format!("/users/{}", permission_segment(name));
         if self.get_resource(&path).is_err() {
             self.create_resource(PlannedResource {
+                path: path.clone(),
                 metadata: kas_core::PlannedResourceMetadata {
-                    path: path.clone(),
                     manifest: USER_MANIFEST.into(),
                     name: name.into(),
                     state: String::new(),
@@ -1182,8 +1173,8 @@ impl Store {
                 metadata: json!({}),
             };
             self.create_resource(PlannedResource {
+                path: binding_path,
                 metadata: kas_core::PlannedResourceMetadata {
-                    path: binding_path,
                     manifest: LINK_MANIFEST.into(),
                     name: format!("{name}-admin"),
                     state: String::new(),
@@ -1244,8 +1235,8 @@ impl Store {
         let tx = self.connection.transaction()?;
         let now = Utc::now();
         let planned = PlannedResource {
+            path: credential_path.clone(),
             metadata: kas_core::PlannedResourceMetadata {
-                path: credential_path.clone(),
                 manifest: CREDENTIAL_MANIFEST.into(),
                 name: id.to_string(),
                 state: String::new(),
@@ -1274,7 +1265,9 @@ impl Store {
             .connection
             .query_row(
                 &format!(
-                    "{RESOURCE_SELECT} WHERE manifest_path=? AND json_extract(spec_json,'$.token_hash')=?"
+                    "{RESOURCE_SELECT}
+                     WHERE json_extract(metadata,'$.manifest')=?
+                       AND json_extract(spec,'$.token_hash')=?"
                 ),
                 params![CREDENTIAL_MANIFEST, hash],
                 resource_from_row,
@@ -1447,10 +1440,21 @@ fn migrate_connection(connection: &mut Connection) -> Result<u32, StoreError> {
         if *version <= current {
             continue;
         }
-        let tx = connection.transaction()?;
-        tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", version)?;
-        tx.commit()?;
+        let rebuilds_resource_table = *version == 14;
+        if rebuilds_resource_table {
+            connection.pragma_update(None, "foreign_keys", false)?;
+        }
+        let migration = (|| -> Result<(), StoreError> {
+            let tx = connection.transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", version)?;
+            tx.commit()?;
+            Ok(())
+        })();
+        if rebuilds_resource_table {
+            connection.pragma_update(None, "foreign_keys", true)?;
+        }
+        migration?;
     }
     Ok(LATEST_SCHEMA_VERSION)
 }
@@ -1492,21 +1496,10 @@ fn digest_documents(manifest: &str, resources: &[&str]) -> String {
 
 fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
     Ok(Resource {
-        metadata: ResourceMetadata {
-            path: row.get(0)?,
-            manifest: row.get(1)?,
-            name: row.get(2)?,
-            state: row.get(6)?,
-            kas: KasMetadata {
-                revision: row.get(5)?,
-                generation: row.get(10)?,
-                observed: json_from_row(row, 7)?,
-                created_at: time_from_row(row, 8)?,
-                updated_at: time_from_row(row, 9)?,
-            },
-        },
-        spec: json_from_row(row, 3)?,
-        status: json_from_row(row, 4)?,
+        path: row.get(0)?,
+        metadata: json_from_row(row, 1)?,
+        spec: json_from_row(row, 2)?,
+        status: json_from_row(row, 3)?,
     })
 }
 
@@ -1607,8 +1600,8 @@ fn normalize_resource_states(planned: &mut PlannedResource, manifest: &ManifestS
 
 fn planned_from_resource(resource: Resource) -> PlannedResource {
     PlannedResource {
+        path: resource.path,
         metadata: kas_core::PlannedResourceMetadata {
-            path: resource.metadata.path,
             manifest: resource.metadata.manifest,
             name: resource.metadata.name,
             state: resource.metadata.state,
@@ -1694,14 +1687,29 @@ fn insert_resource_row(
     managed_by: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
+    let metadata = ResourceMetadata {
+        manifest: planned.manifest.clone(),
+        name: planned.name.clone(),
+        state: planned.metadata.state.clone(),
+        kas: KasMetadata {
+            revision: 0,
+            generation: 0,
+            observed: Default::default(),
+            protected,
+            managed_by: managed_by.into(),
+            created_at: now,
+            updated_at: now,
+        },
+    };
     let mut status = planned.status.clone();
-    status.metadata.path = planned.path.clone();
     status.metadata.manifest = planned.manifest.clone();
     status.metadata.name = planned.name.clone();
     status.metadata.kas = KasMetadata {
         revision: 0,
         generation: 0,
         observed: Default::default(),
+        protected,
+        managed_by: managed_by.into(),
         created_at: now,
         updated_at: now,
     };
@@ -1713,21 +1721,12 @@ fn insert_resource_row(
         &status,
     )?;
     tx.execute(
-        "INSERT INTO resources(
-            path,manifest_path,name,spec_json,status_json,revision,state,observed_json,
-            protected,managed_by,created_at,updated_at
-         ) VALUES (?,?,?,?,?,0,?,'{}',?,?,?,?)",
+        "INSERT INTO resources(path,metadata,spec,status) VALUES (?,?,?,?)",
         params![
             planned.path,
-            planned.manifest,
-            planned.name,
+            serde_json::to_string(&metadata)?,
             serde_json::to_string(&planned.spec)?,
-            serde_json::to_string(&status)?,
-            planned.metadata.state,
-            protected,
-            managed_by,
-            stamp(now),
-            stamp(now)
+            serde_json::to_string(&status)?
         ],
     )
     .map_err(|error| constraint(error, "Resource already exists"))?;
@@ -1905,16 +1904,10 @@ fn project_run(tx: &Transaction<'_>, planned: &PlannedResource) -> Result<(), St
         .expect("Run spec was checked as an object")
         .entry("driver_generation")
         .or_insert(Value::Null);
-    tx.execute(
-        "UPDATE resources
-         SET spec_json=?,status_json=json_set(status_json,'$.spec',json(?))
-         WHERE path=?",
-        params![
-            serde_json::to_string(&stored_spec)?,
-            serde_json::to_string(&stored_spec)?,
-            planned.path
-        ],
-    )?;
+    let mut run = resource_in(tx, &planned.path)?;
+    run.spec = stored_spec.clone();
+    run.status.spec = stored_spec;
+    save_resource_in(tx, &run)?;
     Ok(())
 }
 
@@ -1990,8 +1983,8 @@ fn create_system_link(
         metadata: json!({}),
     };
     let planned = PlannedResource {
+        path: path.into(),
         metadata: kas_core::PlannedResourceMetadata {
-            path: path.into(),
             manifest: LINK_MANIFEST.into(),
             name: path.rsplit('/').next().unwrap_or("link").into(),
             state: String::new(),
@@ -2125,21 +2118,20 @@ fn enqueue_if_drifted(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let mut updated = resource.clone();
+    let mut changed = false;
     if expected != resource.metadata.kas.observed {
-        tx.execute(
-            "UPDATE resources SET observed_json=? WHERE path=?",
-            params![serde_json::to_string(&expected)?, resource.path],
-        )?;
+        updated.metadata.kas.observed = expected.clone();
+        changed = true;
     }
     let mut actual = resource.status.metadata.kas.observed.clone();
     actual.retain(|driver, _| expected.contains_key(driver));
     if actual != resource.status.metadata.kas.observed {
-        let mut status = resource.status.clone();
-        status.metadata.kas.observed = actual.clone();
-        tx.execute(
-            "UPDATE resources SET status_json=? WHERE path=?",
-            params![serde_json::to_string(&status)?, resource.path],
-        )?;
+        updated.status.metadata.kas.observed = actual;
+        changed = true;
+    }
+    if changed {
+        save_resource_in(tx, &updated)?;
     }
     Ok(())
 }
@@ -2226,7 +2218,7 @@ fn apply_mutation(
             metadata,
             spec,
         } => {
-            let current = resource_in(tx, &resource_path)?;
+            let mut current = resource_in(tx, &resource_path)?;
             if current.manifest == CREDENTIAL_MANIFEST {
                 return Err(StoreError::Invalid(
                     "Credential Resources can only be changed through credential endpoints".into(),
@@ -2237,20 +2229,14 @@ fn apply_mutation(
                 .map(|metadata| metadata.state.as_str())
                 .unwrap_or(&current.metadata.state);
             validate_against_manifest(tx, &current.manifest, state, &spec, &current.status)?;
-            let changed = tx.execute(
-                "UPDATE resources SET spec_json=?,state=?,revision=revision+1,updated_at=?
-                 WHERE path=? AND revision=?",
-                params![
-                    serde_json::to_string(&spec)?,
-                    state,
-                    stamp(now),
-                    resource_path,
-                    expected_revision
-                ],
-            )?;
-            if changed != 1 {
+            if current.revision != expected_revision {
                 return Err(StoreError::Conflict("Resource revision is stale".into()));
             }
+            current.spec = spec;
+            current.metadata.state = state.into();
+            current.metadata.kas.revision += 1;
+            current.metadata.kas.updated_at = now;
+            save_resource_in(tx, &current)?;
             let updated = resource_in(tx, &resource_path)?;
             refresh_projection(tx, &updated, now)?;
             append_event(tx, EventType::Updated, &updated, now)?;
@@ -2266,10 +2252,9 @@ fn apply_mutation(
                 return Err(StoreError::Conflict("Resource revision is stale".into()));
             }
             resource.metadata.state = STATE_DELETED.into();
-            tx.execute(
-                "UPDATE resources SET state=?,revision=revision+1,updated_at=? WHERE path=?",
-                params![STATE_DELETED, stamp(now), resource_path],
-            )?;
+            resource.metadata.kas.revision += 1;
+            resource.metadata.kas.updated_at = now;
+            save_resource_in(tx, &resource)?;
             resource = resource_in(tx, &resource_path)?;
             append_event(tx, EventType::Updated, &resource, now)?;
             enqueue_if_drifted(tx, &resource, "driver_delete_requested", now)?;
@@ -2279,10 +2264,8 @@ fn apply_mutation(
                 status.metadata = resource.metadata.clone();
                 status.metadata.kas.observed = actual;
                 status.spec = resource.spec.clone();
-                tx.execute(
-                    "UPDATE resources SET status_json=? WHERE path=?",
-                    params![serde_json::to_string(&status)?, resource_path],
-                )?;
+                resource.status = status;
+                save_resource_in(tx, &resource)?;
                 maybe_finish_deleted_resource(tx, &resource_path, now)?;
             }
             Ok(serde_json::to_value(resource)?)
@@ -2293,7 +2276,7 @@ fn apply_mutation(
             mut status,
         } => {
             assert_driver_owns(tx, &resource_path, driver_path, generation)?;
-            let current = resource_in(tx, &resource_path)?;
+            let mut current = resource_in(tx, &resource_path)?;
             normalize_submitted_status(&current, &mut status);
             validate_against_manifest(
                 tx,
@@ -2302,17 +2285,11 @@ fn apply_mutation(
                 &current.spec,
                 &status,
             )?;
-            let changed = tx.execute(
-                "UPDATE resources SET status_json=? WHERE path=? AND revision=?",
-                params![
-                    serde_json::to_string(&status)?,
-                    resource_path,
-                    expected_revision
-                ],
-            )?;
-            if changed != 1 {
+            if current.revision != expected_revision {
                 return Err(StoreError::Conflict("Resource revision is stale".into()));
             }
+            current.status = status;
+            save_resource_in(tx, &current)?;
             let updated = resource_in(tx, &resource_path)?;
             refresh_projection(tx, &updated, now)?;
             append_event(tx, EventType::Updated, &updated, now)?;
@@ -2347,8 +2324,8 @@ fn hard_delete_resource(
     let run_paths = {
         let mut statement = tx.prepare(
             "SELECT path FROM resources
-             WHERE manifest_path='/builtin/run'
-               AND json_extract(spec_json,'$.resource')=?",
+             WHERE json_extract(metadata,'$.manifest')='/builtin/run'
+               AND json_extract(spec,'$.resource')=?",
         )?;
         let rows = statement
             .query_map([path], |row| row.get::<_, String>(0))?
@@ -2387,23 +2364,25 @@ fn maybe_finish_deleted_resource(
 }
 
 fn desired_document_matches_status(resource: &Resource) -> bool {
-    resource.metadata.path == resource.status.metadata.path
-        && resource.metadata.manifest == resource.status.metadata.manifest
+    resource.metadata.manifest == resource.status.metadata.manifest
         && resource.metadata.name == resource.status.metadata.name
         && resource.metadata.state == resource.status.metadata.state
         && resource.metadata.kas.revision == resource.status.metadata.kas.revision
         && resource.metadata.kas.generation == resource.status.metadata.kas.generation
+        && resource.metadata.kas.protected == resource.status.metadata.kas.protected
+        && resource.metadata.kas.managed_by == resource.status.metadata.kas.managed_by
         && resource.metadata.kas.created_at == resource.status.metadata.kas.created_at
         && resource.metadata.kas.updated_at == resource.status.metadata.kas.updated_at
         && resource.spec == resource.status.spec
 }
 
 fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) {
-    status.metadata.path = resource.metadata.path.clone();
     status.metadata.manifest = resource.metadata.manifest.clone();
     status.metadata.name = resource.metadata.name.clone();
     status.metadata.kas.revision = resource.metadata.kas.revision;
     status.metadata.kas.generation = resource.metadata.kas.generation;
+    status.metadata.kas.protected = resource.metadata.kas.protected;
+    status.metadata.kas.managed_by = resource.metadata.kas.managed_by.clone();
     status.metadata.kas.created_at = resource.metadata.kas.created_at;
     status.metadata.kas.updated_at = resource.metadata.kas.updated_at;
     status.metadata.kas.observed = resource.status.metadata.kas.observed.clone();
@@ -2450,17 +2429,15 @@ fn update_status_document<S: Serialize, T: Serialize>(
     let state = state
         .as_str()
         .ok_or_else(|| StoreError::Invalid("Resource status state must be a string".into()))?;
-    let resource = resource_in(tx, path)?;
+    let mut resource = resource_in(tx, path)?;
     let mut metadata = resource.status_metadata(state);
     metadata.kas.observed = resource.status.metadata.kas.observed.clone();
     let status = ResourceStatus {
         metadata,
         spec: serde_json::to_value(status)?,
     };
-    tx.execute(
-        "UPDATE resources SET status_json=? WHERE path=?",
-        params![serde_json::to_string(&status)?, path],
-    )?;
+    resource.status = status;
+    save_resource_in(tx, &resource)?;
     Ok(())
 }
 
@@ -2475,7 +2452,7 @@ fn update_platform_resource<S: Serialize, T: Serialize>(
     let state = state
         .as_str()
         .ok_or_else(|| StoreError::Invalid("Resource state must be a string".into()))?;
-    let current = resource_in(tx, path)?;
+    let mut current = resource_in(tx, path)?;
     let spec = serde_json::to_value(spec)?;
     let mut metadata = current.metadata.clone();
     metadata.state = state.into();
@@ -2487,18 +2464,10 @@ fn update_platform_resource<S: Serialize, T: Serialize>(
         metadata: status_metadata,
         spec: spec.clone(),
     };
-    tx.execute(
-        "UPDATE resources
-         SET spec_json=?,status_json=?,state=?,revision=revision+1,updated_at=?
-         WHERE path=?",
-        params![
-            serde_json::to_string(&spec)?,
-            serde_json::to_string(&status)?,
-            state,
-            stamp(now),
-            path
-        ],
-    )?;
+    current.metadata = metadata;
+    current.spec = spec;
+    current.status = status;
+    save_resource_in(tx, &current)?;
     let updated = resource_in(tx, path)?;
     enqueue_if_drifted(tx, &updated, "platform_updated", now)?;
     Ok(())
@@ -2590,7 +2559,10 @@ fn event_type_name(event_type: EventType) -> &'static str {
 }
 
 fn all_resources_in(tx: &Transaction<'_>) -> Result<Vec<Resource>, StoreError> {
-    let mut statement = tx.prepare(&format!("{RESOURCE_SELECT} ORDER BY created_at,path"))?;
+    let mut statement = tx.prepare(&format!(
+        "{RESOURCE_SELECT}
+         ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
+    ))?;
     let rows = statement.query_map([], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
@@ -2601,22 +2573,26 @@ fn resources_for_manifest_in(
     manifest: &str,
 ) -> Result<Vec<Resource>, StoreError> {
     let mut statement = tx.prepare(&format!(
-        "{RESOURCE_SELECT} WHERE manifest_path=? ORDER BY created_at,path"
+        "{RESOURCE_SELECT}
+         WHERE json_extract(metadata,'$.manifest')=?
+         ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
     ))?;
     let rows = statement.query_map([manifest], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
 }
 
-fn is_protected(connection: &Connection, path: &str) -> Result<bool, StoreError> {
-    connection
-        .query_row(
-            "SELECT protected FROM resources WHERE path=?",
-            [path],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| StoreError::NotFound(format!("Resource {path}")))
+fn save_resource_in(tx: &Transaction<'_>, resource: &Resource) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE resources SET metadata=?,spec=?,status=? WHERE path=?",
+        params![
+            serde_json::to_string(&resource.metadata)?,
+            serde_json::to_string(&resource.spec)?,
+            serde_json::to_string(&resource.status)?,
+            resource.path
+        ],
+    )?;
+    Ok(())
 }
 
 fn require_manifest(resource: &Resource, expected: &str) -> Result<(), StoreError> {
@@ -2680,8 +2656,8 @@ mod tests {
 
     fn planned(path: &str, manifest: &str, name: &str, spec: Value) -> PlannedResource {
         PlannedResource {
+            path: path.into(),
             metadata: PlannedResourceMetadata {
-                path: path.into(),
                 manifest: manifest.into(),
                 name: name.into(),
                 state: String::new(),
@@ -2710,8 +2686,8 @@ mod tests {
                 initial_state: kas_core::STATE_PENDING.into(),
             },
             resources: vec![ResourceDefinition {
+                path: "./relations/peer".into(),
                 metadata: PlannedResourceMetadata {
-                    path: "./relations/peer".into(),
                     manifest: RELATION_MANIFEST.into(),
                     name: "peer".into(),
                     state: String::new(),
@@ -2809,7 +2785,6 @@ mod tests {
         assert_eq!(created.status.spec, created.spec);
         assert_eq!(created.metadata.state, STATE_AVAILABLE);
         assert_eq!(created.status.metadata.state, kas_core::STATE_PENDING);
-        assert_eq!(created.status.metadata.path, created.metadata.path);
         assert_eq!(created.status.metadata.manifest, created.metadata.manifest);
         assert_eq!(created.status.metadata.name, created.metadata.name);
         assert_eq!(
@@ -3032,5 +3007,15 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(tables, vec!["events", "resources"]);
+        let mut statement = store
+            .connection
+            .prepare("SELECT name FROM pragma_table_info('resources') ORDER BY cid")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(columns, vec!["path", "metadata", "spec", "status"]);
     }
 }

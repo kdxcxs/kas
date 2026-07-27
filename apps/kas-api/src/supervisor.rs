@@ -473,8 +473,8 @@ mod tests {
             manifest_path: "/manifests/echo".into(),
             package_root: package.path().to_owned(),
             driver: serde_json::from_value(json!({
+                "path": "/manifests/echo/driver",
                 "metadata": {
-                    "path": "/manifests/echo/driver",
                     "manifest": "/builtin/driver",
                     "name": "driver",
                     "state": "running",
@@ -494,7 +494,6 @@ mod tests {
                 },
                 "status": {
                     "metadata": {
-                        "path": "/manifests/echo/driver",
                         "manifest": "/builtin/driver",
                         "name": "driver",
                         "state": "stopped",

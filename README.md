@@ -5,8 +5,8 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 
 ```json
 {
+  "path": "/agents/planner",
   "metadata": {
-    "path": "/agents/planner",
     "manifest": "/manifests/agent",
     "name": "Planner",
     "state": "available",
@@ -32,10 +32,14 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 }
 ```
 
-`metadata.path` 是 Resource 的全局稳定身份；`metadata.manifest` 指向定义
+顶层 `path` 是 Resource 的全局稳定身份；`metadata.manifest` 指向定义
 该 Resource 的另一个 Resource。所有引用只保存 path，不再携带 `kind`。
 `spec` 只保存业务期望；生命周期状态、revision 和 Driver 消费进度都是
 平台 metadata。
+
+SQLite 中的 `resources` 表也严格保持这一形状，只包含 `path`、`metadata`、
+`spec`、`status` 四列；后三列是 JSON 文档。Manifest、Run、Link 等查询通过
+JSON expression index 加速，不再为平台字段维护平行列。
 
 ## Manifest 是定义 Resource 的 Resource
 
@@ -281,8 +285,8 @@ agent.kas
 
 `manifest.json` 只定义 Manifest 自身，不包含 `members` 或 `resources`
 字段。`resources/` 可选；KAS 递归读取其中所有 `.json`，每个文件定义一个
-初始化 Resource。文件目录只用于组织，Resource 身份始终来自 JSON 内的
-`metadata.path`；文件同样使用通用的 `metadata/spec/status` envelope。
+初始化 Resource。文件目录只用于组织，Resource 身份始终来自 JSON 顶层
+`path`；文件同样使用通用的 `path/metadata/spec/status` envelope。
 
 初始化 Resource 使用相对于 Manifest path 的 `./` 路径：
 
