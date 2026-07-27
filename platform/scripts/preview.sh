@@ -234,6 +234,29 @@ if [[ "$file_ready" != true ]]; then
   exit 1
 fi
 
+"$PLATFORM_ROOT/scripts/build-workspace-plugin.sh" \
+  "$PLATFORM_ROOT/frontend/dist" \
+  "$PREVIEW_DIR/workspace.zip"
+install_workspace_plugin() {
+  local id="$1" label="$2" icon="$3" order="$4"
+  KAS_API_URL="$API" \
+  KAS_FILE_API_URL="$FILE_API" \
+  KAS_TOKEN="$ADMIN_TOKEN" \
+    "$PLATFORM_ROOT/scripts/install-frontend-plugin.sh" \
+      "$PREVIEW_DIR/workspace.zip" \
+      "/frontend-plugins/$id" \
+      "$id" \
+      "$id.html" \
+      "$label" \
+      "$icon" \
+      "$order" \
+      "/$id" >/dev/null
+}
+install_workspace_plugin threads Threads "#" 10
+install_workspace_plugin agents Agents A 20
+install_workspace_plugin skills Skills "⌁" 30
+install_workspace_plugin approvals Approvals "✓" 40
+
 KAS_API_URL="$API" \
 KAS_FILE_API_URL="$FILE_API" \
 KAS_TOKEN="$ADMIN_TOKEN" \
@@ -266,6 +289,25 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 jq -e '.status.metadata.state == "available"' <<<"$PLUGIN" >/dev/null
+for plugin_path in \
+  /frontend-plugins/threads \
+  /frontend-plugins/agents \
+  /frontend-plugins/skills \
+  /frontend-plugins/approvals; do
+  for _ in $(seq 1 200); do
+    PLUGIN="$(
+      curl --fail --silent --get \
+        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        --data-urlencode "path=$plugin_path" \
+        "$API/resources/by-path"
+    )"
+    if [[ "$(jq -r '.status.metadata.state' <<<"$PLUGIN")" == "available" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  jq -e '.status.metadata.state == "available"' <<<"$PLUGIN" >/dev/null
+done
 
 skill_ready=false
 for _ in $(seq 1 100); do

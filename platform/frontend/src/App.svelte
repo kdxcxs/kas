@@ -39,6 +39,7 @@
     frontendPluginEntries,
     isPluginRequest
   } from './lib/plugins';
+  import { embeddedContext, embeddedView } from './lib/embedded';
   import type { FrontendPluginEntry } from './lib/plugins';
   import type {
     CreateResource,
@@ -214,6 +215,23 @@
 
   onMount(() => {
     window.addEventListener('message', handlePluginMessage);
+    if (embeddedView) {
+      view = embeddedView;
+      showSettings = false;
+      void embeddedContext.then((context) => {
+        settings = {
+          apiBase: DEFAULT_API_BASE,
+          token: '',
+          userPath: context.subject?.path || '/users/admin'
+        };
+        draftSettings = { ...settings };
+        if (context.workspace?.activeThread) {
+          activeThreadPath = context.workspace.activeThread;
+        }
+        void connect();
+      });
+      return;
+    }
     const saved = localStorage.getItem(SETTINGS_KEY);
     if (saved) {
       try {
@@ -342,6 +360,35 @@
           });
           break;
         }
+        case 'gateway.fetch': {
+          const path = requiredStringParam(params, 'path');
+          if (
+            !['/api/', '/files-api/', '/skills-api/', '/approvals-api/'].some((prefix) =>
+              path.startsWith(prefix)
+            )
+          ) {
+            throw new Error('Frontend Plugin gateway requests must target an approved API prefix.');
+          }
+          const headers = new Headers(optionalStringRecordParam(params, 'headers'));
+          for (const name of ['authorization', 'cookie', 'host', 'content-length']) {
+            headers.delete(name);
+          }
+          const method = stringParam(params.method) || 'GET';
+          const body = params.body instanceof ArrayBuffer ? params.body : undefined;
+          const response = await fetch(path, {
+            method,
+            headers,
+            body: method === 'GET' || method === 'HEAD' ? undefined : body,
+            credentials: 'same-origin'
+          });
+          result = {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            body: await response.arrayBuffer()
+          };
+          break;
+        }
         case 'navigation.openThread':
           chooseThread(requiredStringParam(params, 'path'));
           result = null;
@@ -400,6 +447,19 @@
     return value;
   }
 
+  function optionalStringRecordParam(
+    params: Record<string, unknown>,
+    key: string
+  ): Record<string, string> {
+    const value = params[key];
+    if (!isRecord(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string'
+      )
+    );
+  }
+
   async function connect(): Promise<void> {
     connecting = true;
     error = '';
@@ -422,7 +482,7 @@
       notice = 'Connected to KAS';
     } catch (cause) {
       error = messageOf(cause);
-      showSettings = true;
+      showSettings = !embeddedView;
     } finally {
       connecting = false;
     }
@@ -549,18 +609,25 @@
 
   function chooseAgent(path: string): void {
     selectedAgentPath = path;
+    const threadPath = threadsForAgent(threads, path)[0]?.path ?? null;
+    if (embeddedView && threadPath) {
+      navigateHostThread(threadPath);
+      return;
+    }
     view = 'chat';
-    activeThreadPath = threadsForAgent(threads, path)[0]?.path ?? null;
+    activeThreadPath = threadPath;
     error = '';
   }
 
   function openAgentManagement(): void {
+    if (!embeddedView && openBuiltInPlugin('agents')) return;
     view = 'agents';
     error = '';
     notice = '';
   }
 
   function openSkillManagement(path = selectedSkillPath): void {
+    if (!embeddedView && openBuiltInPlugin('skills')) return;
     view = 'skills';
     selectedSkillPath =
       (path && skills.some((skill) => skill.path === path) ? path : skills[0]?.path) ?? '';
@@ -569,6 +636,7 @@
   }
 
   function openApprovalManagement(path = selectedApprovalPath): void {
+    if (!embeddedView && openBuiltInPlugin('approvals')) return;
     view = 'approvals';
     selectedApprovalPath =
       (path && approvalRequests.some((approval) => approval.path === path)
@@ -714,6 +782,7 @@
   }
 
   function openThreadManagement(path = activeThreadPath): void {
+    if (!embeddedView && openBuiltInPlugin('threads')) return;
     view = 'threads';
     const requested = path ? threads.find((thread) => thread.path === path) : null;
     selectManagedThread(requested?.path ?? threads[0]?.path ?? '');
@@ -784,10 +853,34 @@
 
   function openManagedThreadChat(): void {
     if (!managedThread) return;
+    if (embeddedView) {
+      navigateHostThread(managedThread.path);
+      return;
+    }
     activeThreadPath = managedThread.path;
     view = 'chat';
     error = '';
     notice = '';
+  }
+
+  function openBuiltInPlugin(id: string): boolean {
+    const entry = pluginEntries.find((candidate) => candidate.id === id);
+    if (!entry) return false;
+    void openFrontendPlugin(entry);
+    return true;
+  }
+
+  function navigateHostThread(path: string): void {
+    window.parent.postMessage(
+      {
+        source: 'kas-frontend-plugin',
+        type: 'request',
+        id: `navigation-${Date.now()}`,
+        method: 'navigation.openThread',
+        params: { path }
+      },
+      '*'
+    );
   }
 
   async function resetAgentSession(thread: Resource, agent: Resource): Promise<void> {
@@ -1471,8 +1564,9 @@
   <title>{pageTitle} · KAS</title>
 </svelte:head>
 
-<div class="shell">
-  <aside class="sidebar">
+<div class:embedded={Boolean(embeddedView)} class="shell">
+  {#if !embeddedView}
+    <aside class="sidebar">
     <header class="brand">
       <div class="brand-mark">K</div>
       <div>
@@ -1491,25 +1585,6 @@
         >
           <span class="nav-icon">◉</span>
           <span><strong>Chat</strong><small>Current conversation</small></span>
-        </button>
-        <button class:active={view === 'threads'} onclick={() => openThreadManagement()}>
-          <span class="nav-icon">#</span>
-          <span><strong>Threads</strong><small>{threads.length} conversations</small></span>
-        </button>
-        <button class:active={view === 'agents'} onclick={openAgentManagement}>
-          <span class="nav-icon">A</span>
-          <span><strong>Agents</strong><small>{agents.length} workers</small></span>
-        </button>
-        <button class:active={view === 'skills'} onclick={() => openSkillManagement()}>
-          <span class="nav-icon">⌁</span>
-          <span><strong>Skills</strong><small>{skills.length} capabilities</small></span>
-        </button>
-        <button class:active={view === 'approvals'} onclick={() => openApprovalManagement()}>
-          <span class="nav-icon">✓</span>
-          <span>
-            <strong>Approvals</strong>
-            <small>{pendingApprovalCount} pending · {approvalRequests.length} total</small>
-          </span>
         </button>
         {#each pluginEntries.filter((entry) => entry.section === 'workspace') as entry}
           <button
@@ -1572,7 +1647,8 @@
         ⚙
       </button>
     </footer>
-  </aside>
+    </aside>
+  {/if}
 
   <main class="workspace">
     <header class="workspace-header">
@@ -2778,7 +2854,7 @@
   </div>
 {/if}
 
-{#if showSettings}
+{#if showSettings && !embeddedView}
   <div class="modal-backdrop" role="presentation">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="modal-kicker">Connection</div>

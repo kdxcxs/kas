@@ -318,6 +318,35 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 command curl --fail --silent "$FILE_API/health" | jq -e '.ok == true' >/dev/null
+"$PLATFORM_ROOT/scripts/build-workspace-plugin.sh" \
+  "$PLATFORM_ROOT/frontend/dist" \
+  "$E2E_DIR/workspace.zip"
+install_workspace_plugin() {
+  local id="$1" label="$2" icon="$3" order="$4"
+  KAS_API_URL="$API" \
+  KAS_FILE_API_URL="$FILE_API" \
+  KAS_TOKEN="$ADMIN_TOKEN" \
+    "$PLATFORM_ROOT/scripts/install-frontend-plugin.sh" \
+      "$E2E_DIR/workspace.zip" \
+      "/frontend-plugins/$id" \
+      "$id" \
+      "$id.html" \
+      "$label" \
+      "$icon" \
+      "$order" \
+      "/$id" >/dev/null
+}
+install_workspace_plugin threads Threads "#" 10
+install_workspace_plugin agents Agents A 20
+install_workspace_plugin skills Skills "⌁" 30
+install_workspace_plugin approvals Approvals "✓" 40
+for plugin_path in \
+  /frontend-plugins/threads \
+  /frontend-plugins/agents \
+  /frontend-plugins/skills \
+  /frontend-plugins/approvals; do
+  wait_for_state "$plugin_path" available >/dev/null
+done
 "$PLATFORM_ROOT/scripts/build-frontend-plugin.sh" \
   "$PLATFORM_ROOT/plugins/registry" \
   "$E2E_DIR/registry.zip"
@@ -362,6 +391,10 @@ command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/skills-api/health" | jq
 command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/approvals-api/health" | jq -e '.ok == true' >/dev/null
 command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/plugins/e2e-registry/index.html" |
   grep -q "Object Registry"
+for plugin in threads agents skills approvals; do
+  command curl --fail --silent -b "$COOKIE_JAR" "$FRONTEND/plugins/$plugin/$plugin.html" |
+    grep -q '<div id="app"></div>'
+done
 for _ in $(seq 1 200); do
   if command curl --fail --silent "$SKILL_API/health" >/dev/null 2>&1; then
     break

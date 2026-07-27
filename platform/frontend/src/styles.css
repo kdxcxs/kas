@@ -61,6 +61,10 @@ textarea:focus-visible {
     #0e100d;
 }
 
+.shell.embedded {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;

@@ -12,7 +12,9 @@ use axum::{
     body::Body,
     extract::{OriginalUri, Path as AxumPath, Request, State},
     http::{
-        header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HOST, SET_COOKIE},
+        header::{
+            ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE, COOKIE, HOST, SET_COOKIE,
+        },
         HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::{IntoResponse, Response},
@@ -395,8 +397,26 @@ async fn plugin_asset(
     AxumPath((slug, asset)): AxumPath<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
-    let mount = plugin_mount(&state, &slug, &headers).await?;
+    let candidate = plugin_mount_unchecked(&state, &slug).await?;
+    let mount = if asset == candidate.entrypoint {
+        plugin_mount(&state, &slug, &headers).await?
+    } else {
+        candidate
+    };
     serve_plugin_file(&mount, &asset).await
+}
+
+async fn plugin_mount_unchecked(
+    state: &GatewayState,
+    slug: &str,
+) -> Result<PluginMount, GatewayError> {
+    state
+        .plugins
+        .read()
+        .await
+        .get(slug)
+        .cloned()
+        .ok_or_else(|| GatewayError::new(StatusCode::NOT_FOUND, "plugin was not found"))
 }
 
 async fn plugin_mount(
@@ -404,13 +424,7 @@ async fn plugin_mount(
     slug: &str,
     headers: &HeaderMap,
 ) -> Result<PluginMount, GatewayError> {
-    let mount = state
-        .plugins
-        .read()
-        .await
-        .get(slug)
-        .cloned()
-        .ok_or_else(|| GatewayError::new(StatusCode::NOT_FOUND, "plugin was not found"))?;
+    let mount = plugin_mount_unchecked(state, slug).await?;
     let token = request_token(state, headers)
         .await
         .ok_or_else(|| GatewayError::new(StatusCode::UNAUTHORIZED, "session is required"))?;
@@ -445,7 +459,13 @@ async fn serve_plugin_file(mount: &PluginMount, asset: &str) -> Result<Response,
     let bytes = fs::read(&path).await.map_err(internal)?;
     let media_type = mime_guess::from_path(&path).first_or_octet_stream();
     Ok((
-        [(CONTENT_TYPE, HeaderValue::from_str(media_type.as_ref()).map_err(internal)?)],
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_str(media_type.as_ref()).map_err(internal)?,
+            ),
+            (ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*")),
+        ],
         bytes,
     )
         .into_response())

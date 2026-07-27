@@ -207,8 +207,8 @@ Gateway Session. Only an `HttpOnly`, `SameSite=Strict` session cookie remains
 in the browser; the Gateway forwards each operation with the current User's
 Credential rather than its Driver ServiceAccount.
 
-The UI stores its KAS Bearer token and User path in browser-local settings. It
-can create Agents and independent Threads, add multiple Agent participants,
+The UI stores the User path and API base in browser-local settings; it does
+not persist the exchanged Bearer Credential. It can create Agents and independent Threads, add multiple Agent participants,
 turn `@handle` mentions into structured Links, wait for Driver-created real
 Codex Runs, display the linked assistant Messages, inspect the Session for each
 Thread participant, reset a Session when a fresh Codex context is needed, and
@@ -246,9 +246,15 @@ The Frontend Driver watches the plugin, bundle Link, and File; validates and
 extracts the ZIP into a digest-addressed cache; and serves the entrypoint and
 relative assets below `/plugins/{slug}/`. The host loads that URL in a
 sandboxed iframe without exposing the User Credential. A `postMessage` bridge
-provides plugin context plus Resource, Link, authorization, raw API, and
-navigation operations; every operation is executed by the host with the
-current User's normal KAS permissions. `platform/plugins/registry/` is the
-first real plugin and implements the generic Objects registry page. The
-Threads, Agents, Skills, and Approvals management pages can migrate to the
-same mechanism incrementally, while Chat remains part of the host shell.
+provides plugin context plus Resource, Link, authorization, approved Gateway
+API, and navigation operations; every operation is executed by the host with
+the current User's normal KAS permissions. Static JavaScript and CSS assets
+are CORS-readable so an opaque-origin sandbox can load modules, but entrypoints
+and all data operations remain authenticated.
+
+`platform/plugins/registry/` implements the generic Objects registry.
+Threads, Agents, Skills, and Approvals are also installed FrontendPlugin
+Resources and render through the same iframe runtime. Their bundle reuses the
+complete Svelte management UI, including File, Skill, Approval, and navigation
+operations. Chat and the current Thread context remain part of the minimal
+host shell.

@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
   const approvalTarget = env.KAS_APPROVAL_API_URL || 'http://127.0.0.1:3003';
 
   return {
+    base: './',
     plugins: [svelte()],
     server: {
       host: '127.0.0.1',
