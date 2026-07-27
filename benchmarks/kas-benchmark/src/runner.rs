@@ -109,7 +109,9 @@ impl BenchmarkRunner {
             result_dir.join("config.json"),
             serde_json::to_vec_pretty(&scenario)?,
         )?;
-        let database = data_root.join("kas.db");
+        let sqlite_database = data_root.join("kas.db");
+        let database = std::env::var("KAS_BENCHMARK_DATABASE")
+            .unwrap_or_else(|_| sqlite_database.to_string_lossy().into_owned());
         let port = reserve_tcp_port()?;
         let api = format!("http://127.0.0.1:{port}");
         let metrics_listener = TokioTcpListener::bind("127.0.0.1:0").await?;
@@ -215,9 +217,13 @@ impl BenchmarkRunner {
 
         metrics_task.abort();
         let metrics_snapshot = driver_metrics.lock().unwrap().clone();
-        let database_bytes = fs::metadata(&database)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let database_bytes = if is_postgres(&database) {
+            0
+        } else {
+            fs::metadata(&database)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        };
         let mut extra = std::collections::BTreeMap::new();
         extra.insert("actual_resource_bytes".into(), actual_resource_bytes.into());
         extra.insert(
@@ -763,7 +769,7 @@ fn summarize_process(samples: &[(f64, u64)]) -> ProcessSummary {
 fn run_command(
     program: &Path,
     arguments: &[&str],
-    database: &Path,
+    database: &str,
     data_root: &Path,
     api: Option<&str>,
 ) -> anyhow::Result<String> {
@@ -784,6 +790,10 @@ fn run_command(
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn is_postgres(database: &str) -> bool {
+    database.starts_with("postgres://") || database.starts_with("postgresql://")
 }
 
 fn reserve_tcp_port() -> anyhow::Result<u16> {

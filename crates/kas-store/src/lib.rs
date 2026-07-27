@@ -1,9 +1,12 @@
-//! SQLite persistence for KAS's single-Resource model.
+//! Persistence for KAS's single-Resource model.
+
+mod database;
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
+use database::{Connection, Error as DatabaseError, OptionalExtension, Row, Transaction};
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
     package_path_for_digest, ActionSpec, CreateResource, CreateRun, CredentialSpec, DeliveryStatus,
@@ -15,7 +18,6 @@ use kas_core::{
     UpdateResource, UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE, STATE_AVAILABLE,
     STATE_DELETED,
 };
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -87,7 +89,7 @@ const RESOURCE_SELECT: &str = "SELECT path,metadata,spec,status FROM resources";
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(#[from] DatabaseError),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("not found: {0}")]
@@ -117,7 +119,12 @@ struct PackageInstallation {
 }
 
 pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
-    let mut connection = Connection::open(path)?;
+    let database = path.as_ref().to_string_lossy();
+    migrate_database(&database)
+}
+
+pub fn migrate_database(database: &str) -> Result<u32, StoreError> {
+    let mut connection = Connection::open_database(database)?;
     configure(&connection)?;
     migrate_connection(&mut connection)
 }
@@ -129,7 +136,12 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let connection = Connection::open(path)?;
+        let database = path.as_ref().to_string_lossy();
+        Self::open_database(&database)
+    }
+
+    pub fn open_database(database: &str) -> Result<Self, StoreError> {
+        let connection = Connection::open_database(database)?;
         configure(&connection)?;
         require_current_schema(&connection)?;
         let mut store = Self {
@@ -414,7 +426,7 @@ impl Store {
         project_resource(&tx, &input, "", now)?;
         let resource = tx.query_row(
             &format!("{RESOURCE_SELECT} WHERE path=?"),
-            [&input.path],
+            db_params![&input.path],
             resource_from_row,
         )?;
         project_declared_relationships(&tx, &planned_from_resource(resource.clone()), now)?;
@@ -439,11 +451,11 @@ impl Store {
         };
         let mut statement = self.connection.prepare(&sql)?;
         if let Some(manifest) = manifest {
-            let rows = statement.query_map([manifest], resource_from_row)?;
+            let rows = statement.query_map(db_params![manifest], resource_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(StoreError::from)
         } else {
-            let rows = statement.query_map([], resource_from_row)?;
+            let rows = statement.query_map(db_params![], resource_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(StoreError::from)
         }
@@ -453,7 +465,7 @@ impl Store {
         self.connection
             .query_row(
                 &format!("{RESOURCE_SELECT} WHERE path=?"),
-                [path],
+                db_params![path],
                 resource_from_row,
             )
             .optional()?
@@ -615,9 +627,11 @@ impl Store {
 
     pub fn current_event_sequence(&self) -> Result<u64, StoreError> {
         self.connection
-            .query_row("SELECT COALESCE(MAX(sequence),0) FROM events", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(sequence),0) FROM events",
+                db_params![],
+                |row| row.get(0),
+            )
             .map_err(StoreError::from)
     }
 
@@ -630,7 +644,7 @@ impl Store {
              ORDER BY sequence LIMIT ?3",
         )?;
         let rows = statement.query_map(
-            params![
+            db_params![
                 filter.resource_path,
                 filter.after_sequence.unwrap_or(0),
                 limit
@@ -1002,7 +1016,7 @@ impl Store {
                        AND json_extract(spec,'$.driver')=?
                        AND json_extract(status,'$.metadata.state') IN ('queued','running')
                      ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path LIMIT 1",
-                    [driver_path],
+                    db_params![driver_path],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -1269,7 +1283,7 @@ impl Store {
                      WHERE json_extract(metadata,'$.manifest')=?
                        AND json_extract(spec,'$.token_hash')=?"
                 ),
-                params![CREDENTIAL_MANIFEST, hash],
+                db_params![CREDENTIAL_MANIFEST, hash],
                 resource_from_row,
             )
             .optional()?
@@ -1420,6 +1434,9 @@ fn builtin_documents() -> [BuiltinDocuments; 11] {
 }
 
 fn configure(connection: &Connection) -> Result<(), StoreError> {
+    if connection.is_postgres() {
+        return Ok(());
+    }
     connection.execute_batch(
         "PRAGMA foreign_keys=ON;
          PRAGMA journal_mode=WAL;
@@ -1429,6 +1446,67 @@ fn configure(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn migrate_connection(connection: &mut Connection) -> Result<u32, StoreError> {
+    if connection.is_postgres() {
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kas_schema (
+                 version INTEGER NOT NULL
+             );
+             INSERT INTO kas_schema(version)
+             SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM kas_schema);
+             CREATE TABLE IF NOT EXISTS resources (
+                 path TEXT PRIMARY KEY,
+                 metadata TEXT NOT NULL,
+                 spec TEXT NOT NULL,
+                 status TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS events (
+                 sequence BIGSERIAL PRIMARY KEY,
+                 event_type TEXT NOT NULL,
+                 resource_path TEXT NOT NULL,
+                 revision BIGINT NOT NULL,
+                 value_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS resources_by_manifest
+             ON resources (
+                 ((metadata::jsonb->>'manifest')),
+                 ((metadata::jsonb#>>'{\"[kas]\",created_at}')),
+                 path
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS credentials_by_token_hash
+             ON resources ((spec::jsonb->>'token_hash'))
+             WHERE (metadata::jsonb->>'manifest')='/builtin/credential';
+             CREATE UNIQUE INDEX IF NOT EXISTS runs_by_request_id
+             ON resources ((spec::jsonb->>'request_id'))
+             WHERE (metadata::jsonb->>'manifest')='/builtin/run';
+             CREATE INDEX IF NOT EXISTS runs_by_driver_state
+             ON resources (
+                 ((spec::jsonb->>'driver')),
+                 ((status::jsonb#>>'{metadata,state}')),
+                 ((metadata::jsonb#>>'{\"[kas]\",created_at}')),
+                 path
+             )
+             WHERE (metadata::jsonb->>'manifest')='/builtin/run';
+             CREATE INDEX IF NOT EXISTS links_by_relation_source
+             ON resources (
+                 ((spec::jsonb->>'relation')),
+                 ((spec::jsonb->>'source')),
+                 path
+             )
+             WHERE (metadata::jsonb->>'manifest')='/builtin/link';
+             CREATE INDEX IF NOT EXISTS links_by_relation_target
+             ON resources (
+                 ((spec::jsonb->>'relation')),
+                 ((spec::jsonb->>'target')),
+                 path
+             )
+             WHERE (metadata::jsonb->>'manifest')='/builtin/link';
+             CREATE INDEX IF NOT EXISTS events_by_resource_sequence
+             ON events(resource_path,sequence);
+             UPDATE kas_schema SET version=14;",
+        )?;
+        return Ok(LATEST_SCHEMA_VERSION);
+    }
     let current = schema_version(connection)?;
     if current > LATEST_SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema {
@@ -1475,6 +1553,16 @@ fn require_current_schema(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn schema_version(connection: &Connection) -> Result<u32, StoreError> {
+    if connection.is_postgres() {
+        return connection
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM kas_schema",
+                db_params![],
+                |row| row.get::<_, u64>(0),
+            )
+            .map(|version| version as u32)
+            .map_err(StoreError::from);
+    }
     connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(StoreError::from)
@@ -1494,7 +1582,7 @@ fn digest_documents(manifest: &str, resources: &[&str]) -> String {
     format!("sha256:{hex}")
 }
 
-fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
+fn resource_from_row(row: &Row<'_>) -> database::Result<Resource> {
     Ok(Resource {
         path: row.get(0)?,
         metadata: json_from_row(row, 1)?,
@@ -1503,7 +1591,7 @@ fn resource_from_row(row: &Row<'_>) -> rusqlite::Result<Resource> {
     })
 }
 
-fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
+fn event_from_row(row: &Row<'_>) -> database::Result<Event> {
     let event_type: String = row.get(1)?;
     Ok(Event {
         sequence: row.get(0)?,
@@ -1528,7 +1616,7 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
 fn resource_in(tx: &Transaction<'_>, path: &str) -> Result<Resource, StoreError> {
     tx.query_row(
         &format!("{RESOURCE_SELECT} WHERE path=?"),
-        [path],
+        db_params![path],
         resource_from_row,
     )
     .optional()?
@@ -1624,7 +1712,7 @@ fn validate_against_manifest(
         && tx
             .query_row(
                 "SELECT 1 FROM resources WHERE path=?",
-                [MANIFEST_MANIFEST],
+                db_params![MANIFEST_MANIFEST],
                 |_| Ok(()),
             )
             .optional()?
@@ -1722,7 +1810,7 @@ fn insert_resource_row(
     )?;
     tx.execute(
         "INSERT INTO resources(path,metadata,spec,status) VALUES (?,?,?,?)",
-        params![
+        db_params![
             planned.path,
             serde_json::to_string(&metadata)?,
             serde_json::to_string(&planned.spec)?,
@@ -1996,7 +2084,11 @@ fn create_system_link(
         },
     };
     if tx
-        .query_row("SELECT 1 FROM resources WHERE path=?", [path], |_| Ok(()))
+        .query_row(
+            "SELECT 1 FROM resources WHERE path=?",
+            db_params![path],
+            |_| Ok(()),
+        )
         .optional()?
         .is_some()
     {
@@ -2140,28 +2232,50 @@ fn next_reconciliation_in(
     tx: &Transaction<'_>,
     driver_path: &str,
 ) -> Result<Option<(String, u64)>, StoreError> {
+    let pending_sql = if tx.is_postgres() {
+        "SELECT resources.path,
+                (expected.value->>'driver_revision')::bigint
+         FROM resources
+         JOIN LATERAL jsonb_each(
+             resources.metadata::jsonb#>'{\"[kas]\",observed}'
+         ) AS expected(key,value) ON true
+         LEFT JOIN LATERAL jsonb_each(
+             resources.status::jsonb#>'{metadata,\"[kas]\",observed}'
+         ) AS actual(key,value) ON actual.key=expected.key
+         WHERE expected.key=?
+           AND (
+             actual.key IS NULL
+             OR (actual.value->>'driver_revision')::bigint
+                != (expected.value->>'driver_revision')::bigint
+             OR (actual.value->>'resource_revision')::bigint
+                != (expected.value->>'resource_revision')::bigint
+           )
+         ORDER BY resources.metadata::jsonb#>>'{\"[kas]\",created_at}',
+                  resources.path
+         LIMIT 1"
+    } else {
+        "SELECT resources.path,
+                json_extract(expected.value,'$.driver_revision')
+         FROM resources
+         JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
+         LEFT JOIN json_each(resources.status,'$.metadata.\"[kas]\".observed') AS actual
+           ON actual.key=expected.key
+         WHERE expected.key=?
+           AND (
+             actual.key IS NULL
+             OR json_extract(actual.value,'$.driver_revision')
+                != json_extract(expected.value,'$.driver_revision')
+             OR json_extract(actual.value,'$.resource_revision')
+                != json_extract(expected.value,'$.resource_revision')
+           )
+         ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
+                  resources.path
+         LIMIT 1"
+    };
     let pending = tx
-        .query_row(
-            "SELECT resources.path,
-                    json_extract(expected.value,'$.driver_revision')
-             FROM resources
-             JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
-             LEFT JOIN json_each(resources.status,'$.metadata.\"[kas]\".observed') AS actual
-               ON actual.key=expected.key
-             WHERE expected.key=?
-               AND (
-                 actual.key IS NULL
-                 OR json_extract(actual.value,'$.driver_revision')
-                    != json_extract(expected.value,'$.driver_revision')
-                 OR json_extract(actual.value,'$.resource_revision')
-                    != json_extract(expected.value,'$.resource_revision')
-               )
-             ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
-                      resources.path
-             LIMIT 1",
-            [driver_path],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
-        )
+        .query_row(pending_sql, db_params![driver_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })
         .optional()?;
     if pending.is_some() {
         return Ok(pending);
@@ -2170,29 +2284,49 @@ fn next_reconciliation_in(
     let driver = resource_in(tx, driver_path)?;
     let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
     for manifest in spec.manages {
-        let drifted = tx
-            .query_row(
-                "SELECT resources.path,
-                        json_extract(expected.value,'$.driver_revision')
-                 FROM resources
-                 JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
-                 WHERE expected.key=?
-                   AND json_extract(resources.metadata,'$.manifest')=?
-                   AND (
-                     json_remove(resources.metadata,'$.\"[kas]\".observed')
-                       IS NOT json_remove(
-                         json_extract(resources.status,'$.metadata'),
-                         '$.\"[kas]\".observed'
-                       )
-                     OR json(resources.spec)
-                       IS NOT json_quote(json_extract(resources.status,'$.spec'))
+        let drifted_sql = if tx.is_postgres() {
+            "SELECT resources.path,
+                    (expected.value->>'driver_revision')::bigint
+             FROM resources
+             JOIN LATERAL jsonb_each(
+                 resources.metadata::jsonb#>'{\"[kas]\",observed}'
+             ) AS expected(key,value) ON true
+             WHERE expected.key=?
+               AND (resources.metadata::jsonb->>'manifest')=?
+               AND (
+                 (resources.metadata::jsonb #- '{\"[kas]\",observed}')
+                   IS DISTINCT FROM
+                 ((resources.status::jsonb->'metadata') #- '{\"[kas]\",observed}')
+                 OR resources.spec::jsonb
+                   IS DISTINCT FROM (resources.status::jsonb->'spec')
+               )
+             ORDER BY resources.metadata::jsonb#>>'{\"[kas]\",created_at}',
+                      resources.path
+             LIMIT 1"
+        } else {
+            "SELECT resources.path,
+                    json_extract(expected.value,'$.driver_revision')
+             FROM resources
+             JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
+             WHERE expected.key=?
+               AND json_extract(resources.metadata,'$.manifest')=?
+               AND (
+                 json_remove(resources.metadata,'$.\"[kas]\".observed')
+                   IS NOT json_remove(
+                     json_extract(resources.status,'$.metadata'),
+                     '$.\"[kas]\".observed'
                    )
-                 ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
-                          resources.path
-                 LIMIT 1",
-                params![driver_path, manifest],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
-            )
+                 OR json(resources.spec)
+                   IS NOT json_quote(json_extract(resources.status,'$.spec'))
+               )
+             ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
+                      resources.path
+             LIMIT 1"
+        };
+        let drifted = tx
+            .query_row(drifted_sql, db_params![driver_path, manifest], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })
             .optional()?;
         if drifted.is_some() {
             return Ok(drifted);
@@ -2373,7 +2507,7 @@ fn hard_delete_resource(
                AND json_extract(spec,'$.resource')=?",
         )?;
         let rows = statement
-            .query_map([path], |row| row.get::<_, String>(0))?
+            .query_map(db_params![path], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
@@ -2381,7 +2515,7 @@ fn hard_delete_resource(
         hard_delete_resource(tx, &run, now)?;
     }
     append_deleted_event(tx, &resource, now)?;
-    tx.execute("DELETE FROM resources WHERE path=?", [path])?;
+    tx.execute("DELETE FROM resources WHERE path=?", db_params![path])?;
     Ok(())
 }
 
@@ -2553,7 +2687,7 @@ fn append_event(
     tx.execute(
         "INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
          VALUES (?,?,?,?,?)",
-        params![
+        db_params![
             event_type_name(event_type),
             resource.path,
             resource.revision,
@@ -2572,7 +2706,7 @@ fn append_deleted_event(
     tx.execute(
         "INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
          VALUES ('deleted',?,?,?,?)",
-        params![
+        db_params![
             resource.path,
             resource.revision,
             serde_json::to_string(resource)?,
@@ -2595,7 +2729,7 @@ fn all_resources_in(tx: &Transaction<'_>) -> Result<Vec<Resource>, StoreError> {
         "{RESOURCE_SELECT}
          ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
     ))?;
-    let rows = statement.query_map([], resource_from_row)?;
+    let rows = statement.query_map(db_params![], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
 }
@@ -2609,7 +2743,7 @@ fn resources_for_manifest_in(
          WHERE json_extract(metadata,'$.manifest')=?
          ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
     ))?;
-    let rows = statement.query_map([manifest], resource_from_row)?;
+    let rows = statement.query_map(db_params![manifest], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
 }
@@ -2617,7 +2751,7 @@ fn resources_for_manifest_in(
 fn save_resource_in(tx: &Transaction<'_>, resource: &Resource) -> Result<(), StoreError> {
     tx.execute(
         "UPDATE resources SET metadata=?,spec=?,status=? WHERE path=?",
-        params![
+        db_params![
             serde_json::to_string(&resource.metadata)?,
             serde_json::to_string(&resource.spec)?,
             serde_json::to_string(&resource.status)?,
@@ -2642,12 +2776,12 @@ fn decode<T: DeserializeOwned>(value: &Value, kind: &str) -> Result<T, StoreErro
         .map_err(|error| StoreError::Invalid(format!("invalid {kind}: {error}")))
 }
 
-fn json_from_row<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Result<T> {
+fn json_from_row<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> database::Result<T> {
     let raw: String = row.get(index)?;
     serde_json::from_str(&raw).map_err(|error| from_sql(index, error))
 }
 
-fn time_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<DateTime<Utc>> {
+fn time_from_row(row: &Row<'_>, index: usize) -> database::Result<DateTime<Utc>> {
     let raw: String = row.get(index)?;
     DateTime::parse_from_rfc3339(&raw)
         .map(|value| value.with_timezone(&Utc))
@@ -2658,20 +2792,29 @@ fn stamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
-fn from_sql(
-    index: usize,
-    error: impl std::error::Error + Send + Sync + 'static,
-) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(error))
+fn from_sql(index: usize, error: impl std::error::Error + Send + Sync + 'static) -> DatabaseError {
+    DatabaseError::Decode(format!("column {index}: {error}"))
 }
 
-fn constraint(error: rusqlite::Error, message: &str) -> StoreError {
+fn constraint(error: DatabaseError, message: &str) -> StoreError {
     match error {
-        rusqlite::Error::SqliteFailure(code, _)
+        DatabaseError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
             if matches!(
                 code.code,
                 rusqlite::ErrorCode::ConstraintViolation | rusqlite::ErrorCode::DatabaseBusy
             ) =>
+        {
+            StoreError::Conflict(message.into())
+        }
+        DatabaseError::Postgres(ref error)
+            if error.as_db_error().is_some_and(|error| {
+                matches!(
+                    error.code(),
+                    &postgres::error::SqlState::UNIQUE_VIOLATION
+                        | &postgres::error::SqlState::CHECK_VIOLATION
+                        | &postgres::error::SqlState::T_R_SERIALIZATION_FAILURE
+                )
+            }) =>
         {
             StoreError::Conflict(message.into())
         }
@@ -3034,7 +3177,7 @@ mod tests {
             )
             .unwrap();
         let tables = statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map(db_params![], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -3044,7 +3187,7 @@ mod tests {
             .prepare("SELECT name FROM pragma_table_info('resources') ORDER BY cid")
             .unwrap();
         let columns = statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map(db_params![], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
