@@ -756,4 +756,8 @@ echo "$DRIVER" | jq -e '
   and .status.spec == .spec
 ' >/dev/null
 
+TABLES="$(sqlite3 "$KAS_DATABASE" \
+  "SELECT group_concat(name, ',') FROM (SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name)")"
+[[ "$TABLES" == "events,resources" ]]
+
 echo "KAS end-to-end test passed"
