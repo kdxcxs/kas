@@ -1,0 +1,21 @@
+[package]
+name = "kas-benchmark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+kas-core.workspace = true
+kas-driver.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process"] }
+tokio-tungstenite.workspace = true
+url.workspace = true
+uuid.workspace = true

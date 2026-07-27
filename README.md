@@ -638,3 +638,31 @@ cargo run -p kas-test-driver
 入口只需要构造具体 Driver 并调用 `DriverRuntime::run()`。Runtime 会持续维护
 WebSocket、执行 reconciliation、接收 Run 和上报结果，不会在完成一条 Run
 后退出。
+
+### 端到端性能测试
+
+`benchmarks/kas-benchmark` 是独立的黑盒 Benchmark crate。它启动真实
+`kas-api`、内置 Driver 和动态生成的 singleton Driver 进程，通过正式 HTTP
+接口安装 Package 和创建 Resource，并通过正式 WebSocket 协议完成 reconcile；
+测试代码不会直接访问 SQLite。
+
+运行短 smoke：
+
+```bash
+./benchmarks/kas-benchmark/run.sh smoke
+```
+
+运行多维度扫描或自动寻找首次违反 SLO 的规模：
+
+```bash
+./benchmarks/kas-benchmark/run.sh sweep \
+  --profile benchmarks/kas-benchmark/profiles/scale.json
+
+./benchmarks/kas-benchmark/run.sh find-limit \
+  --profile benchmarks/kas-benchmark/profiles/limit.json \
+  --dimension resources
+```
+
+结果写入 `benchmark-results/`，包含请求与进程采样、JSON 汇总、Markdown
+报告、测试配置和服务日志。可扫描 Resource、Manifest、Driver、Resource
+大小、spec 字段数量、嵌套深度、watch fanout、并发度和 Driver 处理延迟。

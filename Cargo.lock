@@ -892,6 +892,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kas-benchmark"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures-util",
+ "kas-core",
+ "kas-driver",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tar",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "kas-builtin-driver"
 version = "0.1.0"
 dependencies = [
