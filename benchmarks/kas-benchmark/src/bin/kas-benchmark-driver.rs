@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .strip_suffix("/driver")
         .context("benchmark Driver path must end with /driver")?
         .to_owned();
-    let mut pending = HashMap::<Uuid, String>::new();
+    let mut pending = HashMap::<Uuid, Option<String>>::new();
     while let Some(message) = socket.next().await {
         match message? {
             Message::Text(text) => {
@@ -103,19 +103,28 @@ async fn main() -> anyhow::Result<()> {
                             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         }
                         let operations = reconcile(&owner_manifest, &resource);
-                        if owned {
-                            pending.insert(delivery_id, resource.path);
+                        pending.insert(delivery_id, owned.then_some(resource.path));
+                        if operations.is_empty() {
+                            send(
+                                &mut socket,
+                                &ClientMessage::ReconcileComplete {
+                                    delivery_id,
+                                    driver_generation: generation,
+                                },
+                            )
+                            .await?;
+                        } else {
+                            send(
+                                &mut socket,
+                                &ClientMessage::Mutation {
+                                    request_id: delivery_id,
+                                    delivery_id,
+                                    driver_generation: generation,
+                                    operations,
+                                },
+                            )
+                            .await?;
                         }
-                        send(
-                            &mut socket,
-                            &ClientMessage::Mutation {
-                                request_id: delivery_id,
-                                delivery_id,
-                                driver_generation: generation,
-                                operations,
-                            },
-                        )
-                        .await?;
                     }
                     ServerMessage::MutationResult {
                         delivery_id,
@@ -131,11 +140,25 @@ async fn main() -> anyhow::Result<()> {
                                     .unwrap_or_else(|| "unknown error".into())
                             );
                         }
-                        if let Some(path) = pending.remove(&delivery_id) {
+                        send(
+                            &mut socket,
+                            &ClientMessage::ReconcileComplete {
+                                delivery_id,
+                                driver_generation: generation,
+                            },
+                        )
+                        .await?;
+                    }
+                    ServerMessage::ReconcileCompleteResult { delivery_id, .. } => {
+                        if let Some(Some(path)) = pending.remove(&delivery_id) {
                             emit(&mut metrics, "completed", &driver_path, &path).await;
                         }
                     }
-                    ServerMessage::Stop { generation, .. } => {
+                    ServerMessage::Stop {
+                        delivery_id,
+                        generation,
+                    } => {
+                        send(&mut socket, &ClientMessage::Ack { delivery_id }).await?;
                         send(&mut socket, &ClientMessage::Stopped { generation }).await?;
                         return Ok(());
                     }

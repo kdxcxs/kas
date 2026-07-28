@@ -702,6 +702,14 @@ fn postgres_sql(sql: &str) -> String {
             "json_extract(metadata,'$.\"[kas]\".created_at')",
             "(metadata::jsonb#>>'{\"[kas]\",created_at}')",
         )
+        .replace(
+            "json_extract(metadata,'$.\"[kas]\".package')",
+            "(metadata::jsonb#>>'{\"[kas]\",package}')",
+        )
+        .replace(
+            "json_extract(status,'$.metadata.\"[kas]\".package')",
+            "(status::jsonb#>>'{metadata,\"[kas]\",package}')",
+        )
         .replace("json_extract(spec,'$.driver')", "(spec::jsonb->>'driver')")
         .replace(
             "json_extract(spec,'$.relation')",

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -24,7 +24,7 @@ use kas_core::{
     LinkSpec, Mutation, PackageSpec, PlannedResource, Resource, RestartPolicy, UpdateResource,
     BUILTIN_PACKAGE_MEDIA_TYPE, MANIFEST_PACKAGE_MEDIA_TYPE,
 };
-use kas_driver::{ClientMessage, MutationError, MutationStatus, ServerMessage};
+use kas_driver::{ClientMessage, CompletionStatus, MutationError, MutationStatus, ServerMessage};
 use kas_store::{Store, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -41,6 +41,7 @@ const PACKAGE_MANIFEST: &str = "/builtin/package";
 const LINK_MANIFEST: &str = "/builtin/link";
 const ROLE_MANIFEST: &str = "/builtin/role";
 const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
+const MAX_IN_FLIGHT_DELIVERIES: usize = 16;
 
 #[derive(Clone)]
 struct AppState {
@@ -358,13 +359,63 @@ async fn install_package(
         )
     })?;
     let auth = authenticate(&state, &headers)?;
+    let manifest_path = expansion
+        .resources
+        .first()
+        .map(|resource| resource.path.clone())
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Manifest package is empty".into()))?;
     let package_path = package_path_for_digest(&expansion.artifact_digest)
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Invalid Package digest".into()))?;
     if !kas_auth::allows(&auth.rules, PACKAGE_MANIFEST, "create", Some(&package_path)) {
         return Err(forbidden());
     }
+    let (previous_package, previous_members, existing_resources) = {
+        let store = lock(&state)?;
+        let previous_package = match optional_resource(&store, &manifest_path)? {
+            Some(_) => Some(store.package_for_manifest(&manifest_path)?),
+            None => None,
+        };
+        let previous_members = if previous_package.is_some() {
+            store.package_members_for_manifest(&manifest_path)?
+        } else {
+            Vec::new()
+        };
+        let existing_resources = expansion
+            .resources
+            .iter()
+            .filter_map(|planned| {
+                optional_resource(&store, &planned.path)
+                    .transpose()
+                    .map(|result| result.map(|resource| (planned.path.clone(), resource)))
+            })
+            .collect::<Result<BTreeMap<_, _>, StoreError>>()?;
+        (previous_package, previous_members, existing_resources)
+    };
+    let is_update = previous_package
+        .as_ref()
+        .is_some_and(|package| package.path != package_path);
+    if let Some(previous_package) = previous_package.as_ref().filter(|_| is_update) {
+        authorize_existing_resource(&auth, previous_package, "delete")?;
+    }
     for resource in &expansion.resources {
-        authorize_planned_resource(&auth, resource, "create")?;
+        let verb = if existing_resources.contains_key(&resource.path) {
+            "update"
+        } else {
+            "create"
+        };
+        authorize_planned_resource(&auth, resource, verb)?;
+    }
+    let next_paths = expansion
+        .resources
+        .iter()
+        .map(|resource| resource.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if is_update {
+        for resource in previous_members.iter().filter(|resource| {
+            resource.manifest != PACKAGE_MANIFEST && !next_paths.contains(resource.path.as_str())
+        }) {
+            authorize_existing_resource(&auth, resource, "delete")?;
+        }
     }
     let installed = package::install(&state.data_dir, &body).map_err(|error| {
         ApiError(
@@ -372,29 +423,52 @@ async fn install_package(
             format!("Invalid Manifest package: {error:#}"),
         )
     })?;
-    let driver_path = installed
+    let previous_drivers = previous_members
+        .iter()
+        .filter(|resource| resource.manifest == DRIVER_MANIFEST)
+        .map(|resource| resource.path.clone())
+        .collect::<BTreeSet<_>>();
+    let next_drivers = installed
         .expansion
         .resources
         .iter()
-        .find(|resource| resource.manifest == DRIVER_MANIFEST)
-        .map(|resource| resource.path.clone());
+        .filter(|resource| resource.manifest == DRIVER_MANIFEST)
+        .map(|resource| resource.path.clone())
+        .collect::<BTreeSet<_>>();
     let package = lock(&state)?.install_package(
         installed.expansion,
         installed.size_bytes,
         MANIFEST_PACKAGE_MEDIA_TYPE,
     )?;
     notify_reconcile(&state);
-    if let Some(driver_path) = driver_path {
+    for removed_driver in previous_drivers.difference(&next_drivers) {
+        state
+            .supervisor
+            .stop(removed_driver.clone())
+            .map_err(internal_error)?;
+    }
+    for driver_path in &next_drivers {
         let driver = lock(&state)?.get_driver(&driver_path)?;
         if driver.metadata.state == "running" {
             let launch = driver_launch(&state, driver, None)?;
-            state
-                .supervisor
-                .ensure_running(launch)
-                .map_err(internal_error)?;
+            if is_update && previous_drivers.contains(driver_path) {
+                state.supervisor.restart(launch).map_err(internal_error)?;
+            } else {
+                state
+                    .supervisor
+                    .ensure_running(launch)
+                    .map_err(internal_error)?;
+            }
         }
     }
-    Ok((StatusCode::CREATED, Json(package)))
+    Ok((
+        if is_update {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        Json(package),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -542,7 +616,13 @@ async fn serve_driver_socket(
     let initial_driver =
         match lock(&state).and_then(|store| store.get_driver(&driver_path).map_err(Into::into)) {
             Ok(driver) => driver,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!(
+                    "Driver {driver_path} WebSocket initialization failed: {}",
+                    error.1
+                );
+                return;
+            }
         };
     if send_server_message(
         &mut socket,
@@ -554,15 +634,29 @@ async fn serve_driver_socket(
     .await
     .is_err()
     {
+        eprintln!("Driver {driver_path} WebSocket hello send failed");
+        return;
+    }
+    if let Err(error) = lock(&state).and_then(|mut store| {
+        store
+            .reset_driver_delivery_leases(&driver_path, generation)
+            .map_err(Into::into)
+    }) {
+        eprintln!(
+            "Driver {driver_path} WebSocket lease reset failed: {}",
+            error.1
+        );
         return;
     }
 
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await;
-    let mut in_flight = None;
+    let mut lease_scan = tokio::time::interval(Duration::from_secs(1));
+    lease_scan.tick().await;
+    let mut in_flight = HashSet::new();
     let mut stop_delivery = None;
     let mut stop_acked = false;
-    loop {
+    'connection: loop {
         // Register before checking the queue so a write between the claim and
         // `select!` cannot be missed by this connection.
         let notified = state.reconcile_notify.notified();
@@ -570,13 +664,20 @@ async fn serve_driver_socket(
         notified.as_mut().enable();
 
         if !is_current_connection(&state, &driver_path, connection_id) {
+            eprintln!("Driver {driver_path} WebSocket superseded by a newer connection");
             break;
         }
         let driver = match lock(&state)
             .and_then(|store| store.get_driver(&driver_path).map_err(Into::into))
         {
             Ok(driver) => driver,
-            Err(_) => break,
+            Err(error) => {
+                eprintln!(
+                    "Driver {driver_path} WebSocket cannot load Driver: {}",
+                    error.1
+                );
+                break;
+            }
         };
         let current_state = match decode_driver_state(&driver) {
             Ok(driver_state)
@@ -586,25 +687,29 @@ async fn serve_driver_socket(
             {
                 driver_state
             }
-            _ => break,
+            _ => {
+                eprintln!("Driver {driver_path} WebSocket generation became stale");
+                break;
+            }
         };
         match current_state {
-            DriverState::Running if in_flight.is_none() => {
-                let delivery = match lock(&state).and_then(|mut store| {
+            DriverState::Running => {
+                let deliveries = match lock(&state).and_then(|mut store| {
                     store
-                        .claim_driver_delivery(&driver_path, generation)
+                        .claim_driver_deliveries(&driver_path, generation, MAX_IN_FLIGHT_DELIVERIES)
                         .map_err(Into::into)
                 }) {
-                    Ok(delivery) => delivery,
+                    Ok(deliveries) => deliveries,
                     Err(error) => {
                         eprintln!("Driver {driver_path} delivery claim failed: {}", error.1);
                         break;
                     }
                 };
-                if let Some(delivery) = delivery {
+                for delivery in deliveries {
+                    let delivery_id = delivery.id;
                     let message = match delivery.work {
                         DriverWork::Reconcile { resource, .. } => ServerMessage::Reconcile {
-                            delivery_id: delivery.id,
+                            delivery_id,
                             resource,
                         },
                         DriverWork::Run {
@@ -612,16 +717,17 @@ async fn serve_driver_socket(
                             resource,
                             action,
                         } => ServerMessage::Run {
-                            delivery_id: delivery.id,
+                            delivery_id,
                             run,
                             resource,
                             action,
                         },
                     };
                     if send_server_message(&mut socket, &message).await.is_err() {
-                        break;
+                        eprintln!("Driver {driver_path} WebSocket delivery send failed");
+                        break 'connection;
                     }
-                    in_flight = Some(delivery.id);
+                    in_flight.insert(delivery_id);
                 }
             }
             DriverState::Stopping if stop_delivery.is_none() => {
@@ -640,19 +746,26 @@ async fn serve_driver_socket(
                 }
                 stop_delivery = Some(delivery_id);
             }
-            DriverState::Stopped | DriverState::Failed => break,
+            DriverState::Stopped | DriverState::Failed => {
+                eprintln!("Driver {driver_path} WebSocket closed for state {current_state:?}");
+                break;
+            }
             _ => {}
         }
 
         tokio::select! {
             _ = &mut notified => {}
+            _ = lease_scan.tick() => {}
             _ = ping.tick() => {
                 if send_server_message(&mut socket, &ServerMessage::Ping).await.is_err() {
                     break;
                 }
             }
             incoming = socket.recv() => {
-                let Some(Ok(message)) = incoming else { break; };
+                let Some(Ok(message)) = incoming else {
+                    eprintln!("Driver {driver_path} WebSocket peer disconnected");
+                    break;
+                };
                 let Message::Text(text) = message else {
                     if matches!(message, Message::Close(_)) {
                         break;
@@ -715,7 +828,7 @@ struct DriverMessageContext<'a> {
 
 fn handle_driver_message(
     context: DriverMessageContext<'_>,
-    in_flight: &mut Option<Uuid>,
+    in_flight: &mut HashSet<Uuid>,
     stop_acked: &mut bool,
     message: ClientMessage,
 ) -> ApiResult<Option<ServerMessage>> {
@@ -762,7 +875,7 @@ fn handle_driver_message(
             if Some(delivery_id) == stop_delivery {
                 *stop_acked = true;
             } else if delivery_id != control_delivery {
-                ensure_in_flight(*in_flight, delivery_id)?;
+                ensure_in_flight(in_flight, delivery_id)?;
                 lock(state)?.acknowledge_driver_delivery(delivery_id, driver_path, generation)?;
             }
         }
@@ -777,17 +890,19 @@ fn handle_driver_message(
                 auth,
                 driver_path,
                 generation,
-                *in_flight,
+                in_flight,
                 request_id,
                 delivery_id,
                 driver_generation,
                 operations,
             );
             let (status, results, error) = match outcome {
-                Ok(results) => {
-                    *in_flight = None;
+                Ok(outcome) => {
+                    if outcome.delivery_completed {
+                        in_flight.remove(&delivery_id);
+                    }
                     notify_reconcile(state);
-                    (MutationStatus::Committed, results, None)
+                    (MutationStatus::Committed, outcome.results, None)
                 }
                 Err(error) => (
                     MutationStatus::Rejected,
@@ -802,6 +917,35 @@ fn handle_driver_message(
                 results,
                 error,
             }));
+        }
+        ClientMessage::ReconcileComplete {
+            delivery_id,
+            driver_generation,
+        } => {
+            require_bound_driver(auth, driver_path, driver_generation)?;
+            if driver_generation != generation {
+                return Err(forbidden());
+            }
+            let completed =
+                lock(state)?.complete_reconciliation(delivery_id, driver_path, generation)?;
+            in_flight.remove(&delivery_id);
+            notify_reconcile(state);
+            return Ok(Some(ServerMessage::ReconcileCompleteResult {
+                delivery_id,
+                status: if completed {
+                    CompletionStatus::Completed
+                } else {
+                    CompletionStatus::AlreadyCompleted
+                },
+            }));
+        }
+        ClientMessage::Heartbeat { delivery_ids } => {
+            let delivery_ids = delivery_ids
+                .into_iter()
+                .filter(|id| in_flight.contains(id))
+                .collect::<Vec<_>>();
+            lock(state)?.renew_driver_delivery_leases(driver_path, generation, &delivery_ids)?;
+            lock(state)?.heartbeat_driver(driver_path, generation)?;
         }
         ClientMessage::Stopped {
             generation: stopped_generation,
@@ -826,14 +970,14 @@ fn apply_driver_mutation(
     auth: &AuthContext,
     driver_path: &str,
     generation: u64,
-    in_flight: Option<Uuid>,
+    in_flight: &HashSet<Uuid>,
     request_id: Uuid,
     delivery_id: Uuid,
     driver_generation: u64,
     operations: Vec<Mutation>,
-) -> ApiResult<Vec<Value>> {
+) -> ApiResult<DriverMutationOutcome> {
     require_bound_driver(auth, driver_path, driver_generation)?;
-    if request_id != delivery_id || driver_generation != generation {
+    if driver_generation != generation {
         return Err(forbidden());
     }
     ensure_in_flight(in_flight, delivery_id)?;
@@ -850,12 +994,16 @@ fn apply_driver_mutation(
                     _ => authorize_mutation(state, auth, operation)?,
                 }
             }
-            Ok(lock(state)?.finish_reconciliation_with_mutations(
-                delivery_id,
-                driver_path,
-                generation,
-                operations,
-            )?)
+            Ok(DriverMutationOutcome {
+                results: lock(state)?.apply_reconciliation_mutations(
+                    delivery_id,
+                    request_id,
+                    driver_path,
+                    generation,
+                    operations,
+                )?,
+                delivery_completed: false,
+            })
         }
         DriverWork::Run { run, .. } => {
             let Some((completion, mutations)) = operations.split_last() else {
@@ -880,16 +1028,22 @@ fn apply_driver_mutation(
             for mutation in mutations {
                 authorize_mutation(state, auth, mutation)?;
             }
-            lock(state)?
-                .finish_run_delivery_with_mutations(
+            Ok(DriverMutationOutcome {
+                results: lock(state)?.finish_run_delivery_with_mutations(
                     delivery_id,
                     driver_path,
                     generation,
                     operations,
-                )
-                .map_err(Into::into)
+                )?,
+                delivery_completed: true,
+            })
         }
     }
+}
+
+struct DriverMutationOutcome {
+    results: Vec<Value>,
+    delivery_completed: bool,
 }
 
 fn authorize_mutation(state: &AppState, auth: &AuthContext, mutation: &Mutation) -> ApiResult<()> {
@@ -956,6 +1110,17 @@ fn authorize_planned_resource(
     authorize_role_binding(auth, &resource.manifest, &resource.spec)
 }
 
+fn authorize_existing_resource(
+    auth: &AuthContext,
+    resource: &Resource,
+    verb: &str,
+) -> ApiResult<()> {
+    if !kas_auth::allows(&auth.rules, &resource.manifest, verb, Some(&resource.path)) {
+        return Err(forbidden());
+    }
+    authorize_role_binding(auth, &resource.manifest, &resource.spec)
+}
+
 fn authorize_role_binding(auth: &AuthContext, manifest: &str, spec: &Value) -> ApiResult<()> {
     if manifest != LINK_MANIFEST {
         return Ok(());
@@ -986,8 +1151,8 @@ fn mutation_error(error: ApiError) -> MutationError {
     }
 }
 
-fn ensure_in_flight(in_flight: Option<Uuid>, delivery_id: Uuid) -> ApiResult<()> {
-    if in_flight == Some(delivery_id) {
+fn ensure_in_flight(in_flight: &HashSet<Uuid>, delivery_id: Uuid) -> ApiResult<()> {
+    if in_flight.contains(&delivery_id) {
         Ok(())
     } else {
         Err(forbidden())
@@ -1081,6 +1246,14 @@ fn lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Store>, ApiError> 
         .store
         .lock()
         .map_err(|_| internal_error("store lock poisoned"))
+}
+
+fn optional_resource(store: &Store, path: &str) -> Result<Option<Resource>, StoreError> {
+    match store.get_resource(path) {
+        Ok(resource) => Ok(Some(resource)),
+        Err(StoreError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 type ApiResult<T> = Result<T, ApiError>;

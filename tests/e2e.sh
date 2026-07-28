@@ -256,6 +256,8 @@ echo "$PACKAGE" | jq -e '
   and (.spec.digest | startswith("sha256:"))
   and .spec.size_bytes > 0
   and .spec.media_type == "application/vnd.kas.manifest+tar"
+  and .spec.manifest == "/manifests/echo"
+  and .spec.manifest_version == 1
   and .spec == .status.spec
 ' >/dev/null || {
   echo "Package installation failed: $PACKAGE" >&2
@@ -430,9 +432,11 @@ for _ in $(seq 1 200); do
   fi
   sleep 0.05
 done
-echo "$RESOURCE" | jq -e '
+echo "$RESOURCE" | jq -e --arg package "$PACKAGE_PATH" '
   .spec == .status.spec
   and .status.metadata.state == "available"
+  and .metadata["[kas]"].package == $package
+  and .status.metadata["[kas]"].package == $package
   and .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
   and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
 ' >/dev/null
@@ -575,6 +579,172 @@ echo "$RUN" | jq -e '
   and .spec == .status.spec
   and .spec.output.echo.message == "hello from e2e"
 ' >/dev/null
+
+# Updating a package replaces its managed definitions and restarts an already
+# running Driver against the new content-addressed package directory.
+DRIVER_GENERATION_BEFORE_UPDATE="$(
+  curl --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "path=$DRIVER_PATH" \
+    "$API/resources/by-path" |
+    jq -r '.metadata["[kas]"].generation'
+)"
+PACKAGE_V2_ROOT="$E2E_DIR/package-v2"
+mkdir -p "$PACKAGE_V2_ROOT"
+cp -R "$PACKAGE_ROOT/." "$PACKAGE_V2_ROOT/"
+jq '
+  .version = 2
+  | .description = "Updated real-process end-to-end test Manifest"
+' "$PACKAGE_V2_ROOT/manifest.json" >"$PACKAGE_V2_ROOT/manifest.json.next"
+mv "$PACKAGE_V2_ROOT/manifest.json.next" "$PACKAGE_V2_ROOT/manifest.json"
+COPYFILE_DISABLE=1 tar -C "$PACKAGE_V2_ROOT" -cf "$E2E_DIR/echo-v2.kas" manifest.json resources driver
+
+PACKAGE_V2="$(
+  curl --fail --silent --show-error \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/vnd.kas.manifest+tar" \
+    --data-binary "@$E2E_DIR/echo-v2.kas" \
+    "$API/packages"
+)"
+PACKAGE_V2_PATH="$(echo "$PACKAGE_V2" | jq -r '.path')"
+echo "$PACKAGE_V2" | jq -e \
+  --arg previous "$PACKAGE_PATH" '
+    (.path | startswith("/packages/sha256/"))
+    and .path != $previous
+    and .metadata.manifest == "/builtin/package"
+    and .spec.manifest == "/manifests/echo"
+    and .spec.manifest_version == 2
+    and .spec == .status.spec
+  ' >/dev/null
+
+UPDATED_DRIVER=""
+for _ in $(seq 1 300); do
+  UPDATED_DRIVER="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$DRIVER_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$UPDATED_DRIVER" | jq -r '.status.metadata.state')" == "running" ]] &&
+     (( "$(echo "$UPDATED_DRIVER" | jq -r '.metadata["[kas]"].generation')" > DRIVER_GENERATION_BEFORE_UPDATE )); then
+    break
+  fi
+  sleep 0.05
+done
+echo "$UPDATED_DRIVER" | jq -e \
+  --argjson previous_generation "$DRIVER_GENERATION_BEFORE_UPDATE" '
+    .metadata.state == "running"
+    and .status.metadata.state == "running"
+    and .status.spec == .spec
+    and .metadata["[kas]"].generation > $previous_generation
+  ' >/dev/null || {
+  echo "Updated Driver did not restart: $UPDATED_DRIVER" >&2
+  false
+}
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "path=/manifests/echo" \
+  "$API/resources/by-path" |
+  jq -e '
+    .spec.version == 2
+    and .spec.description == "Updated real-process end-to-end test Manifest"
+  ' >/dev/null
+
+UPDATED_RESOURCE=""
+for _ in $(seq 1 300); do
+  UPDATED_RESOURCE="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$RESOURCE_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$UPDATED_RESOURCE" | jq -r '.metadata["[kas]"].package')" == "$PACKAGE_V2_PATH" ]] &&
+     [[ "$(echo "$UPDATED_RESOURCE" | jq -r '.status.metadata["[kas]"].package')" == "$PACKAGE_V2_PATH" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$UPDATED_RESOURCE" | jq -e \
+  --arg package "$PACKAGE_V2_PATH" '
+    .metadata["[kas]"].package == $package
+    and .status.metadata["[kas]"].package == $package
+  ' >/dev/null || {
+  echo "Business Resource did not converge to updated Package: $UPDATED_RESOURCE" >&2
+  false
+}
+OLD_PACKAGE_STATUS=""
+for _ in $(seq 1 200); do
+  OLD_PACKAGE_STATUS="$(
+    curl --silent --output "$E2E_DIR/old-package.json" --write-out "%{http_code}" \
+      --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$PACKAGE_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$OLD_PACKAGE_STATUS" == "404" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+[[ "$OLD_PACKAGE_STATUS" == "404" ]]
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e --arg package "$PACKAGE_V2_PATH" '
+    [.[] | select(
+      .spec.relation == "/builtin/relations/package-manifest"
+      and .spec.target == "/manifests/echo"
+    )] as $links
+    | ($links | length) == 1
+    and $links[0].spec.source == $package
+  ' >/dev/null
+
+UPDATED_REQUEST_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+UPDATED_RUN_PATH="$RESOURCE_PATH/runs/$UPDATED_REQUEST_ID"
+curl --fail --silent \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n \
+      --arg run "$UPDATED_RUN_PATH" \
+      --arg request_id "$UPDATED_REQUEST_ID" \
+      --arg resource "$RESOURCE_PATH" '{
+        path: $run,
+        metadata: {
+          manifest: "/builtin/run",
+          name: $request_id
+        },
+        spec: {
+          request_id: $request_id,
+          resource: $resource,
+          action: "/manifests/echo/actions/echo",
+          input: {message: "hello after package update"}
+        }
+      }'
+  )" \
+  "$API/resources" >/dev/null
+UPDATED_RUN=""
+for _ in $(seq 1 200); do
+  UPDATED_RUN="$(
+    curl --fail --silent --get \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      --data-urlencode "path=$UPDATED_RUN_PATH" \
+      "$API/resources/by-path"
+  )"
+  if [[ "$(echo "$UPDATED_RUN" | jq -r '.status.metadata.state')" == "succeeded" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+echo "$UPDATED_RUN" | jq -e '
+  .status.metadata.state == "succeeded"
+  and .spec.output.echo.message == "hello after package update"
+' >/dev/null || {
+  echo "Updated Driver did not process a Run: $UPDATED_RUN" >&2
+  false
+}
 
 curl --fail --silent --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \

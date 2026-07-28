@@ -3,7 +3,7 @@
 mod database;
 mod reconcile;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 15;
+pub const LATEST_SCHEMA_VERSION: u32 = 16;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -90,9 +90,15 @@ const MIGRATIONS: &[(u32, &str)] = &[
         15,
         include_str!("../migrations/0015_link_endpoint_indexes.sql"),
     ),
+    (
+        16,
+        include_str!("../migrations/0016_resource_package_indexes.sql"),
+    ),
 ];
 
 const RESOURCE_SELECT: &str = "SELECT path,metadata,spec,status FROM resources";
+const DRIVER_DELIVERY_LEASE_SECONDS: i64 = 15;
+const COMPLETED_DELIVERY_CACHE_SIZE: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -140,6 +146,9 @@ pub fn migrate_database(database: &str) -> Result<u32, StoreError> {
 pub struct Store {
     connection: Connection,
     deliveries: HashMap<Uuid, DriverDelivery>,
+    mutation_results: HashMap<(Uuid, Uuid), Vec<Value>>,
+    completed_deliveries: HashSet<Uuid>,
+    completed_delivery_order: VecDeque<Uuid>,
     reconciliations: ReconcileQueue,
 }
 
@@ -192,9 +201,13 @@ impl Store {
         let mut store = Self {
             connection,
             deliveries: HashMap::new(),
+            mutation_results: HashMap::new(),
+            completed_deliveries: HashSet::new(),
+            completed_delivery_order: VecDeque::new(),
             reconciliations: ReconcileQueue::default(),
         };
         store.ensure_builtins()?;
+        reconcile_package_metadata(&mut store)?;
         reconcile_platform_state(&mut store)?;
         store.rebuild_reconcile_queue()?;
         Ok(store)
@@ -206,10 +219,14 @@ impl Store {
         let mut store = Self {
             connection,
             deliveries: HashMap::new(),
+            mutation_results: HashMap::new(),
+            completed_deliveries: HashSet::new(),
+            completed_delivery_order: VecDeque::new(),
             reconciliations: ReconcileQueue::default(),
         };
         migrate_connection(&mut store.connection)?;
         store.ensure_builtins()?;
+        reconcile_package_metadata(&mut store)?;
         reconcile_platform_state(&mut store)?;
         store.rebuild_reconcile_queue()?;
         Ok(store)
@@ -242,7 +259,13 @@ impl Store {
                 media_type: BUILTIN_PACKAGE_MEDIA_TYPE.into(),
             });
         }
-        self.install_packages(packages)?;
+        if self.get_resource(MANIFEST_MANIFEST).is_ok() {
+            for package in packages {
+                self.install_packages(vec![package])?;
+            }
+        } else {
+            self.install_packages(packages)?;
+        }
         Ok(())
     }
 
@@ -295,18 +318,33 @@ impl Store {
             if self.get_resource(&root.path).is_ok() {
                 existing_count += 1;
                 let package = self.package_for_manifest(&root.path)?;
-                if package.path != package_path
-                    && installation.media_type != BUILTIN_PACKAGE_MEDIA_TYPE
-                {
-                    return Err(StoreError::Conflict(format!(
-                        "Manifest {} is already installed",
-                        root.path
-                    )));
-                }
                 existing_packages.push(package);
             }
             roots.push(root);
             package_paths.push(package_path);
+        }
+        if installations.len() == 1 && existing_count == 1 {
+            let existing = existing_packages
+                .pop()
+                .expect("an existing Manifest has an existing Package");
+            if existing.path == package_paths[0] {
+                return Ok(vec![existing]);
+            }
+            let installation = installations
+                .into_iter()
+                .next()
+                .expect("one installation was validated");
+            let root = roots
+                .into_iter()
+                .next()
+                .expect("one Manifest root was validated");
+            let package_path = package_paths
+                .into_iter()
+                .next()
+                .expect("one Package path was validated");
+            return self
+                .update_package(installation, root, package_path, existing)
+                .map(|package| vec![package]);
         }
         if existing_count == installations.len() {
             return Ok(existing_packages);
@@ -378,10 +416,13 @@ impl Store {
         for ((installation, root), package_path) in
             installations.iter().zip(&roots).zip(&package_paths)
         {
+            let manifest_spec: ManifestSpec = decode(&root.spec, "Manifest spec")?;
             let package_spec = PackageSpec {
                 digest: installation.expansion.artifact_digest.clone(),
                 size_bytes: installation.size_bytes,
                 media_type: installation.media_type.clone(),
+                manifest: root.path.clone(),
+                manifest_version: manifest_spec.version,
             };
             let package = PlannedResource {
                 path: package_path.clone(),
@@ -419,6 +460,7 @@ impl Store {
                     &root.path,
                     now,
                 )?;
+                set_manifest_package_in(&tx, &root.path, package_path, now)?;
             }
         }
         for installation in &installations {
@@ -473,6 +515,246 @@ impl Store {
             self.schedule_reconcile_path(&path)?;
         }
         Ok(package_resources)
+    }
+
+    fn update_package(
+        &mut self,
+        installation: PackageInstallation,
+        root: PlannedResource,
+        package_path: String,
+        old_package: Resource,
+    ) -> Result<Resource, StoreError> {
+        let owner = format!("package:{}", root.path);
+        let old_members = self
+            .list_resources(None)?
+            .into_iter()
+            .filter(|resource| {
+                resource.metadata.kas.managed_by == owner && resource.manifest != PACKAGE_MANIFEST
+            })
+            .map(|resource| (resource.path.clone(), resource))
+            .collect::<BTreeMap<_, _>>();
+        let old_drivers = old_members
+            .values()
+            .filter(|resource| resource.manifest == DRIVER_MANIFEST)
+            .map(|resource| (resource.path.clone(), resource.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let new_paths = installation
+            .expansion
+            .resources
+            .iter()
+            .map(|resource| resource.path.clone())
+            .collect::<BTreeSet<_>>();
+        let removed_paths = old_members
+            .keys()
+            .filter(|path| !new_paths.contains(*path))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        let tx = self.connection.transaction()?;
+        let now = Utc::now();
+        let event_cursor = current_event_sequence_in(&tx)?;
+        let mut stored_paths = Vec::new();
+        let mut projections = Vec::new();
+
+        for roots_pass in [true, false] {
+            for planned in &installation.expansion.resources {
+                let owner_manifest = installation
+                    .expansion
+                    .resource_owners
+                    .get(&planned.path)
+                    .ok_or_else(|| {
+                        StoreError::Invalid(format!(
+                            "Resource {} has no owning Manifest",
+                            planned.path
+                        ))
+                    })?;
+                if (planned.path == *owner_manifest) != roots_pass {
+                    continue;
+                }
+                validate_resource_identity(planned)?;
+                let planned = normalized_initial_documents(&tx, planned)?;
+                if let Some(existing) = optional_resource_in(&tx, &planned.path)? {
+                    if !existing.metadata.kas.protected || existing.metadata.kas.managed_by != owner
+                    {
+                        return Err(StoreError::Conflict(format!(
+                            "Resource {} is not owned by Manifest package {}",
+                            planned.path, root.path
+                        )));
+                    }
+                    replace_packaged_resource_in(&tx, &existing, &planned, now)?;
+                } else {
+                    insert_resource_row(&tx, &planned, true, &owner, now)?;
+                    let created = resource_in(&tx, &planned.path)?;
+                    append_event(&tx, EventType::Created, &created, now)?;
+                    enqueue_if_drifted(&tx, &created, "package_member_added", now)?;
+                }
+                stored_paths.push(planned.path.clone());
+                projections.push((planned, owner_manifest.clone()));
+            }
+        }
+
+        projections.sort_by_key(|(planned, _)| match planned.manifest.as_str() {
+            MANIFEST_MANIFEST => 0,
+            LINK_MANIFEST => 2,
+            RUN_MANIFEST => 3,
+            _ => 1,
+        });
+        for (planned, owner_manifest) in &projections {
+            project_resource(&tx, planned, owner_manifest, now)?;
+        }
+
+        let mut deletion_paths = Vec::new();
+        for link in resources_for_manifest_in(&tx, LINK_MANIFEST)? {
+            let spec: LinkSpec = decode(&link.spec, "Link spec")?;
+            if removed_paths.contains(&spec.source)
+                || removed_paths.contains(&spec.target)
+                || spec.source == old_package.path
+            {
+                deletion_paths.push(link.path);
+            }
+        }
+        deletion_paths.extend(removed_paths.iter().cloned());
+        deletion_paths.sort();
+        deletion_paths.dedup();
+        deletion_paths.sort_by_key(|path| {
+            resource_in(&tx, path)
+                .map(|resource| resource.manifest != LINK_MANIFEST)
+                .unwrap_or(true)
+        });
+        for path in &deletion_paths {
+            if resource_in(&tx, path).is_ok() {
+                hard_delete_resource(&tx, path, now)?;
+            }
+        }
+
+        let manifest_spec: ManifestSpec = decode(&root.spec, "Manifest spec")?;
+        let package_spec = PackageSpec {
+            digest: installation.expansion.artifact_digest.clone(),
+            size_bytes: installation.size_bytes,
+            media_type: installation.media_type,
+            manifest: root.path.clone(),
+            manifest_version: manifest_spec.version,
+        };
+        let package = normalized_initial_documents(
+            &tx,
+            &PlannedResource {
+                path: package_path.clone(),
+                metadata: kas_core::PlannedResourceMetadata {
+                    manifest: PACKAGE_MANIFEST.into(),
+                    name: package_spec.digest.clone(),
+                    state: String::new(),
+                },
+                spec: serde_json::to_value(&package_spec)?,
+                status: ResourceStatus {
+                    metadata: ResourceStatusMetadata::default(),
+                    spec: serde_json::to_value(&package_spec)?,
+                },
+            },
+        )?;
+        validate_resource_identity(&package)?;
+        let package_resource = if let Some(existing) = optional_resource_in(&tx, &package.path)? {
+            if existing.manifest != PACKAGE_MANIFEST
+                || !existing.metadata.kas.protected
+                || existing.metadata.kas.managed_by != owner
+            {
+                return Err(StoreError::Conflict(format!(
+                    "Package {} is not owned by Manifest package {}",
+                    package.path, root.path
+                )));
+            }
+            replace_packaged_resource_in(&tx, &existing, &package, now)?
+        } else {
+            insert_resource_row(&tx, &package, true, &owner, now)?;
+            project_resource(&tx, &package, &root.path, now)?;
+            let created = resource_in(&tx, &package.path)?;
+            append_event(&tx, EventType::Created, &created, now)?;
+            created
+        };
+
+        if relation_path_for_role(&tx, RelationRole::PackageManifest)?.is_some() {
+            create_system_link(
+                &tx,
+                &format!("{package_path}/links/manifest"),
+                RelationRole::PackageManifest,
+                &package_path,
+                &root.path,
+                now,
+            )?;
+            set_manifest_package_in(&tx, &root.path, &package_path, now)?;
+        }
+        for planned in installation.expansion.resources.iter().filter(|resource| {
+            installation
+                .expansion
+                .resource_owners
+                .get(&resource.path)
+                .is_some_and(|owner_manifest| owner_manifest != &resource.path)
+        }) {
+            let owner_manifest = installation
+                .expansion
+                .resource_owners
+                .get(&planned.path)
+                .expect("filtered Resources have an owner");
+            if relation_path_for_role(&tx, RelationRole::ManifestResource)?.is_some() {
+                create_system_link(
+                    &tx,
+                    &format!("{}/links/manifest-resource", planned.path),
+                    RelationRole::ManifestResource,
+                    owner_manifest,
+                    &planned.path,
+                    now,
+                )?;
+            }
+        }
+        for path in &stored_paths {
+            let resource = resource_in(&tx, path)?;
+            project_declared_relationships(&tx, &planned_from_resource(resource), now)?;
+        }
+        deletion_paths.extend(gc_superseded_packages_for_manifest_in(
+            &tx, &root.path, now,
+        )?);
+
+        let new_drivers = stored_paths
+            .iter()
+            .filter_map(|path| resource_in(&tx, path).ok())
+            .filter(|resource| resource.manifest == DRIVER_MANIFEST)
+            .map(|resource| (resource.path.clone(), resource))
+            .collect::<BTreeMap<_, _>>();
+        let mut touched_paths = stored_paths.clone();
+        for driver_path in old_drivers
+            .keys()
+            .chain(new_drivers.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+        {
+            touched_paths.extend(reconcile_driver_change(
+                &tx,
+                old_drivers.get(&driver_path),
+                new_drivers.get(&driver_path),
+            )?);
+        }
+        touched_paths.extend(event_paths_since(&tx, event_cursor)?);
+        touched_paths.extend(deletion_paths);
+        touched_paths.sort();
+        touched_paths.dedup();
+        for path in &touched_paths {
+            if let Ok(resource) = resource_in(&tx, path) {
+                enqueue_if_drifted(&tx, &resource, "package_updated", now)?;
+            }
+        }
+        tx.commit()?;
+
+        let affected_drivers = old_drivers
+            .keys()
+            .chain(new_drivers.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.deliveries
+            .retain(|_, delivery| !affected_drivers.contains(&delivery.driver_path));
+        self.refresh_reconcile_drivers()?;
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
+        Ok(package_resource)
     }
 
     pub fn create_resource(&mut self, input: CreateResource) -> Result<Resource, StoreError> {
@@ -613,6 +895,7 @@ impl Store {
         let event_cursor = current_event_sequence_in(&tx)?;
         assert_driver_owns(&tx, path, driver_path, generation)?;
         let current = resource_in(&tx, path)?;
+        let package_changed = current.status.metadata.kas.package != current.metadata.kas.package;
         normalize_submitted_status(&current, &mut input.status);
         validate_against_manifest(
             &tx,
@@ -632,6 +915,9 @@ impl Store {
         refresh_projection(&tx, &resource, now)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         maybe_finish_deleted_resource(&tx, path, now)?;
+        if package_changed {
+            gc_superseded_packages_for_manifest_in(&tx, &current.manifest, now)?;
+        }
         let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
         for path in touched_paths {
@@ -852,8 +1138,43 @@ impl Store {
         let affected = reconcile_driver_change(&tx, Some(&previous), Some(&driver))?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
-        self.deliveries
-            .retain(|_, delivery| delivery.driver_path != path);
+        let delivery_ids = self
+            .deliveries
+            .values()
+            .filter(|delivery| delivery.driver_path == path)
+            .map(|delivery| delivery.id)
+            .collect::<Vec<_>>();
+        for id in delivery_ids {
+            let keep = self
+                .deliveries
+                .get(&id)
+                .and_then(|delivery| match &delivery.work {
+                    DriverWork::Reconcile {
+                        driver_revision,
+                        resource,
+                    } => self.get_resource(&resource.path).ok().map(|current| {
+                        current.metadata.kas.observed.get(path)
+                            == Some(&DriverObservation {
+                                driver_revision: *driver_revision,
+                                resource_revision: resource.revision,
+                            })
+                    }),
+                    DriverWork::Run { .. } => Some(false),
+                })
+                .unwrap_or(false);
+            if keep {
+                if let Some(delivery) = self.deliveries.get_mut(&id) {
+                    delivery.generation = generation;
+                    delivery.status = DeliveryStatus::Pending;
+                    delivery.lease_expires_at = now;
+                    delivery.acked_at = None;
+                }
+            } else {
+                self.deliveries.remove(&id);
+            }
+            self.mutation_results
+                .retain(|(delivery_id, _), _| *delivery_id != id);
+        }
         self.refresh_reconcile_drivers()?;
         for path in affected {
             self.schedule_reconcile_path(&path)?;
@@ -1045,9 +1366,15 @@ impl Store {
         generation: u64,
         operations: Vec<Mutation>,
     ) -> Result<Vec<Value>, StoreError> {
-        self.finish_delivery_with_mutations(delivery_id, driver_path, generation, operations, true)
+        let results =
+            self.apply_delivery_mutations(delivery_id, driver_path, generation, operations)?;
+        self.remove_completed_delivery(delivery_id);
+        Ok(results)
     }
 
+    /// Compatibility helper for callers that still perform a reconciliation in
+    /// one step. The WebSocket protocol uses `apply_reconciliation_mutations`
+    /// followed by the explicit `complete_reconciliation`.
     pub fn finish_reconciliation_with_mutations(
         &mut self,
         delivery_id: Uuid,
@@ -1055,16 +1382,47 @@ impl Store {
         generation: u64,
         operations: Vec<Mutation>,
     ) -> Result<Vec<Value>, StoreError> {
-        self.finish_delivery_with_mutations(delivery_id, driver_path, generation, operations, false)
+        let results = self.apply_reconciliation_mutations(
+            delivery_id,
+            delivery_id,
+            driver_path,
+            generation,
+            operations,
+        )?;
+        self.complete_reconciliation(delivery_id, driver_path, generation)?;
+        Ok(results)
     }
 
-    fn finish_delivery_with_mutations(
+    pub fn apply_reconciliation_mutations(
+        &mut self,
+        delivery_id: Uuid,
+        request_id: Uuid,
+        driver_path: &str,
+        generation: u64,
+        operations: Vec<Mutation>,
+    ) -> Result<Vec<Value>, StoreError> {
+        if let Some(results) = self.mutation_results.get(&(delivery_id, request_id)) {
+            return Ok(results.clone());
+        }
+        let delivery = self.get_driver_delivery(delivery_id)?;
+        if !matches!(delivery.work, DriverWork::Reconcile { .. }) {
+            return Err(StoreError::Conflict(
+                "Delivery is not a reconciliation".into(),
+            ));
+        }
+        let results =
+            self.apply_delivery_mutations(delivery_id, driver_path, generation, operations)?;
+        self.mutation_results
+            .insert((delivery_id, request_id), results.clone());
+        Ok(results)
+    }
+
+    fn apply_delivery_mutations(
         &mut self,
         delivery_id: Uuid,
         driver_path: &str,
         generation: u64,
         operations: Vec<Mutation>,
-        _run_delivery: bool,
     ) -> Result<Vec<Value>, StoreError> {
         let delivery = self
             .deliveries
@@ -1090,39 +1448,91 @@ impl Store {
                 now,
             )?);
         }
-        match &delivery.work {
-            DriverWork::Reconcile {
-                driver_revision,
-                resource,
-            } => {
-                if let Ok(mut current) = resource_in(&tx, &resource.path) {
-                    current.status.metadata.kas.observed.insert(
-                        driver_path.into(),
-                        DriverObservation {
-                            driver_revision: *driver_revision,
-                            resource_revision: resource.revision,
-                        },
-                    );
-                    save_resource_in(&tx, &current)?;
-                }
-                if let Ok(current) = resource_in(&tx, &resource.path) {
-                    enqueue_if_drifted(&tx, &current, "delivery_completed", now)?;
-                    maybe_finish_deleted_resource(&tx, &resource.path, now)?;
-                }
-            }
-            DriverWork::Run { .. } => {}
-        }
         let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
-        self.deliveries.remove(&delivery_id);
         self.schedule_reconcile_values(&results)?;
         for path in touched_paths {
             self.schedule_reconcile_path(&path)?;
         }
-        if let DriverWork::Reconcile { resource, .. } = &delivery.work {
-            self.schedule_reconcile_path(&resource.path)?;
-        }
         Ok(results)
+    }
+
+    pub fn complete_reconciliation(
+        &mut self,
+        delivery_id: Uuid,
+        driver_path: &str,
+        generation: u64,
+    ) -> Result<bool, StoreError> {
+        if self.completed_deliveries.contains(&delivery_id) {
+            return Ok(false);
+        }
+        let delivery = self
+            .deliveries
+            .get(&delivery_id)
+            .cloned()
+            .ok_or_else(|| StoreError::Conflict("Driver delivery is stale".into()))?;
+        if delivery.driver_path != driver_path
+            || delivery.generation != generation
+            || delivery.status != DeliveryStatus::Acked
+        {
+            return Err(StoreError::Conflict(
+                "Driver delivery is not acknowledged".into(),
+            ));
+        }
+        let DriverWork::Reconcile {
+            driver_revision,
+            resource,
+        } = &delivery.work
+        else {
+            return Err(StoreError::Conflict(
+                "Delivery is not a reconciliation".into(),
+            ));
+        };
+
+        let tx = self.connection.transaction()?;
+        let now = Utc::now();
+        let mut gc_manifest = None;
+        if let Ok(mut current) = resource_in(&tx, &resource.path) {
+            if driver_for_resource(&tx, &current)?.as_deref() == Some(driver_path) {
+                let package_changed =
+                    current.status.metadata.kas.package != current.metadata.kas.package;
+                current.status.metadata.kas.package = current.metadata.kas.package.clone();
+                if package_changed {
+                    gc_manifest = Some(current.manifest.clone());
+                }
+            }
+            current.status.metadata.kas.observed.insert(
+                driver_path.into(),
+                DriverObservation {
+                    driver_revision: *driver_revision,
+                    resource_revision: resource.revision,
+                },
+            );
+            save_resource_in(&tx, &current)?;
+            enqueue_if_drifted(&tx, &current, "delivery_completed", now)?;
+            maybe_finish_deleted_resource(&tx, &resource.path, now)?;
+        }
+        if let Some(manifest) = gc_manifest {
+            gc_superseded_packages_for_manifest_in(&tx, &manifest, now)?;
+        }
+        tx.commit()?;
+        self.remove_completed_delivery(delivery_id);
+        self.schedule_reconcile_path(&resource.path)?;
+        Ok(true)
+    }
+
+    fn remove_completed_delivery(&mut self, delivery_id: Uuid) {
+        self.deliveries.remove(&delivery_id);
+        self.mutation_results
+            .retain(|(id, _), _| *id != delivery_id);
+        if self.completed_deliveries.insert(delivery_id) {
+            self.completed_delivery_order.push_back(delivery_id);
+        }
+        while self.completed_delivery_order.len() > COMPLETED_DELIVERY_CACHE_SIZE {
+            if let Some(expired) = self.completed_delivery_order.pop_front() {
+                self.completed_deliveries.remove(&expired);
+            }
+        }
     }
 }
 
@@ -1132,24 +1542,67 @@ impl Store {
         driver_path: &str,
         generation: u64,
     ) -> Result<Option<DriverDelivery>, StoreError> {
+        Ok(self
+            .claim_driver_deliveries(driver_path, generation, 1)?
+            .into_iter()
+            .next())
+    }
+
+    pub fn claim_driver_deliveries(
+        &mut self,
+        driver_path: &str,
+        generation: u64,
+        limit: usize,
+    ) -> Result<Vec<DriverDelivery>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let tx = self.connection.transaction()?;
         assert_driver_generation(&tx, driver_path, generation)?;
+        let now = Utc::now();
+        let lease_expires_at = now + Duration::seconds(DRIVER_DELIVERY_LEASE_SECONDS);
+        let mut output = self
+            .deliveries
+            .values_mut()
+            .filter(|delivery| {
+                delivery.driver_path == driver_path
+                    && delivery.generation == generation
+                    && delivery.lease_expires_at <= now
+            })
+            .take(limit)
+            .map(|delivery| {
+                delivery.lease_expires_at = lease_expires_at;
+                delivery.clone()
+            })
+            .collect::<Vec<_>>();
 
-        if let Some(delivery) = self
+        let active_resources = self
             .deliveries
             .values()
-            .find(|delivery| {
+            .filter_map(|delivery| match &delivery.work {
+                DriverWork::Reconcile { resource, .. }
+                    if delivery.driver_path == driver_path && delivery.generation == generation =>
+                {
+                    Some(resource.path.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut active_resources = active_resources;
+        let mut active_count = self
+            .deliveries
+            .values()
+            .filter(|delivery| {
                 delivery.driver_path == driver_path && delivery.generation == generation
             })
-            .cloned()
-        {
-            tx.commit()?;
-            return Ok(Some(delivery));
-        }
-
-        let now = Utc::now();
-        let mut reconcile_work = None;
-        while let Some((path, expected)) = self.reconciliations.pop(driver_path) {
+            .count();
+        while active_count < limit {
+            let Some((path, expected)) = self
+                .reconciliations
+                .pop_excluding(driver_path, &active_resources)
+            else {
+                break;
+            };
             let Ok(resource) = resource_in(&tx, &path) else {
                 continue;
             };
@@ -1159,15 +1612,32 @@ impl Store {
             {
                 continue;
             }
-            reconcile_work = Some(DriverWork::Reconcile {
-                driver_revision: expected.driver_revision,
-                resource,
-            });
-            break;
+            active_resources.insert(resource.path.clone());
+            let delivery = DriverDelivery {
+                id: Uuid::new_v4(),
+                driver_path: driver_path.into(),
+                generation,
+                work: DriverWork::Reconcile {
+                    driver_revision: expected.driver_revision,
+                    resource,
+                },
+                status: DeliveryStatus::Pending,
+                created_at: now,
+                lease_expires_at,
+                acked_at: None,
+                completed_at: None,
+            };
+            self.deliveries.insert(delivery.id, delivery.clone());
+            output.push(delivery);
+            active_count += 1;
         }
-        let work = if reconcile_work.is_some() {
-            reconcile_work
-        } else {
+
+        let has_active_run = self.deliveries.values().any(|delivery| {
+            delivery.driver_path == driver_path
+                && delivery.generation == generation
+                && matches!(delivery.work, DriverWork::Run { .. })
+        });
+        if active_count < limit && !has_active_run {
             let run_path: Option<String> = tx
                 .query_row(
                     "SELECT path FROM resources
@@ -1190,32 +1660,68 @@ impl Store {
                     append_event(&tx, EventType::Updated, &resource_in(&tx, &path)?, now)?;
                 }
                 run = resource_in(&tx, &path)?;
-                Some(DriverWork::Run {
-                    run,
-                    resource: resource_in(&tx, &spec.resource)?,
-                    action: resource_in(&tx, &spec.action)?,
-                })
-            } else {
-                None
+                let delivery = DriverDelivery {
+                    id: Uuid::new_v4(),
+                    driver_path: driver_path.into(),
+                    generation,
+                    work: DriverWork::Run {
+                        run,
+                        resource: resource_in(&tx, &spec.resource)?,
+                        action: resource_in(&tx, &spec.action)?,
+                    },
+                    status: DeliveryStatus::Pending,
+                    created_at: now,
+                    lease_expires_at,
+                    acked_at: None,
+                    completed_at: None,
+                };
+                self.deliveries.insert(delivery.id, delivery.clone());
+                output.push(delivery);
             }
-        };
-        let Some(work) = work else {
-            tx.commit()?;
-            return Ok(None);
-        };
-        let delivery = DriverDelivery {
-            id: Uuid::new_v4(),
-            driver_path: driver_path.into(),
-            generation,
-            work,
-            status: DeliveryStatus::Pending,
-            created_at: now,
-            acked_at: None,
-            completed_at: None,
-        };
+        }
         tx.commit()?;
-        self.deliveries.insert(delivery.id, delivery.clone());
-        Ok(Some(delivery))
+        Ok(output)
+    }
+
+    pub fn reset_driver_delivery_leases(
+        &mut self,
+        driver_path: &str,
+        generation: u64,
+    ) -> Result<(), StoreError> {
+        let tx = self.connection.transaction()?;
+        let driver = resource_in(&tx, driver_path)?;
+        require_manifest(&driver, DRIVER_MANIFEST)?;
+        if driver.metadata.kas.generation != generation {
+            return Err(StoreError::Conflict("Driver generation is stale".into()));
+        }
+        tx.commit()?;
+        let now = Utc::now();
+        for delivery in self.deliveries.values_mut().filter(|delivery| {
+            delivery.driver_path == driver_path && delivery.generation == generation
+        }) {
+            delivery.lease_expires_at = now;
+        }
+        Ok(())
+    }
+
+    pub fn renew_driver_delivery_leases(
+        &mut self,
+        driver_path: &str,
+        generation: u64,
+        delivery_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        let expires_at = Utc::now() + Duration::seconds(DRIVER_DELIVERY_LEASE_SECONDS);
+        for id in delivery_ids {
+            let delivery = self
+                .deliveries
+                .get_mut(id)
+                .ok_or_else(|| StoreError::Conflict("Driver delivery is stale".into()))?;
+            if delivery.driver_path != driver_path || delivery.generation != generation {
+                return Err(StoreError::Conflict("Driver delivery is stale".into()));
+            }
+            delivery.lease_expires_at = expires_at;
+        }
+        Ok(())
     }
 
     pub fn acknowledge_driver_delivery(
@@ -1233,6 +1739,7 @@ impl Store {
         }
         delivery.status = DeliveryStatus::Acked;
         delivery.acked_at.get_or_insert_with(Utc::now);
+        delivery.lease_expires_at = Utc::now() + Duration::seconds(DRIVER_DELIVERY_LEASE_SECONDS);
         Ok(delivery.clone())
     }
 
@@ -1304,6 +1811,18 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound(format!("Package for Manifest {manifest_path}")))?;
         let spec: LinkSpec = decode(&link.spec, "PackageManifest Link spec")?;
         self.get_resource(&spec.source)
+    }
+
+    pub fn package_members_for_manifest(
+        &self,
+        manifest_path: &str,
+    ) -> Result<Vec<Resource>, StoreError> {
+        let owner = format!("package:{manifest_path}");
+        Ok(self
+            .list_resources(None)?
+            .into_iter()
+            .filter(|resource| resource.metadata.kas.managed_by == owner)
+            .collect())
     }
 
     pub fn package_for_driver(&self, driver_path: &str) -> Result<Resource, StoreError> {
@@ -1675,9 +2194,19 @@ fn migrate_connection(connection: &mut Connection) -> Result<u32, StoreError> {
                  path
              )
              WHERE (metadata::jsonb->>'manifest')='/builtin/link';
+             CREATE INDEX IF NOT EXISTS resources_by_package
+             ON resources (
+                 ((metadata::jsonb#>>'{\"[kas]\",package}')),
+                 path
+             );
+             CREATE INDEX IF NOT EXISTS resources_by_status_package
+             ON resources (
+                 ((status::jsonb#>>'{metadata,\"[kas]\",package}')),
+                 path
+             );
              CREATE INDEX IF NOT EXISTS events_by_resource_sequence
              ON events(resource_path,sequence);
-             UPDATE kas_schema SET version=15;",
+             UPDATE kas_schema SET version=16;",
         )?;
         return Ok(LATEST_SCHEMA_VERSION);
     }
@@ -1795,6 +2324,14 @@ fn resource_in(tx: &Transaction<'_>, path: &str) -> Result<Resource, StoreError>
     )
     .optional()?
     .ok_or_else(|| StoreError::NotFound(format!("Resource {path}")))
+}
+
+fn optional_resource_in(tx: &Transaction<'_>, path: &str) -> Result<Option<Resource>, StoreError> {
+    match resource_in(tx, path) {
+        Ok(resource) => Ok(Some(resource)),
+        Err(StoreError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn validate_resource_identity(resource: &PlannedResource) -> Result<(), StoreError> {
@@ -1949,6 +2486,7 @@ fn insert_resource_row(
     managed_by: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
+    let package = active_package_path_for_manifest_in(tx, &planned.manifest)?.unwrap_or_default();
     let metadata = ResourceMetadata {
         manifest: planned.manifest.clone(),
         name: planned.name.clone(),
@@ -1959,6 +2497,7 @@ fn insert_resource_row(
             observed: Default::default(),
             protected,
             managed_by: managed_by.into(),
+            package: package.clone(),
             created_at: now,
             updated_at: now,
         },
@@ -1972,6 +2511,7 @@ fn insert_resource_row(
         observed: Default::default(),
         protected,
         managed_by: managed_by.into(),
+        package,
         created_at: now,
         updated_at: now,
     };
@@ -1993,6 +2533,44 @@ fn insert_resource_row(
     )
     .map_err(|error| constraint(error, "Resource already exists"))?;
     Ok(())
+}
+
+fn replace_packaged_resource_in(
+    tx: &Transaction<'_>,
+    existing: &Resource,
+    planned: &PlannedResource,
+    now: DateTime<Utc>,
+) -> Result<Resource, StoreError> {
+    let mut updated = existing.clone();
+    updated.metadata.manifest = planned.manifest.clone();
+    updated.metadata.name = planned.name.clone();
+    updated.metadata.state = planned.metadata.state.clone();
+    updated.metadata.kas.revision += 1;
+    updated.metadata.kas.updated_at = now;
+    updated.spec = planned.spec.clone();
+
+    let platform_observed = existing.status.metadata.kas.observed.clone();
+    if planned.manifest != DRIVER_MANIFEST
+        && driver_path_for_manifest(tx, &planned.manifest)?.is_none()
+    {
+        updated.status = planned.status.clone();
+        updated.status.metadata.manifest = planned.manifest.clone();
+        updated.status.metadata.name = planned.name.clone();
+        updated.status.metadata.kas = updated.metadata.kas.clone();
+        updated.status.metadata.kas.observed = platform_observed;
+    }
+    validate_against_manifest(
+        tx,
+        &updated.manifest,
+        &updated.metadata.state,
+        &updated.spec,
+        &updated.status,
+    )?;
+    save_resource_in(tx, &updated)?;
+    let updated = resource_in(tx, &planned.path)?;
+    append_event(tx, EventType::Updated, &updated, now)?;
+    enqueue_if_drifted(tx, &updated, "package_member_updated", now)?;
+    Ok(updated)
 }
 
 fn project_resource(
@@ -2257,16 +2835,29 @@ fn create_system_link(
             spec: serde_json::to_value(&spec)?,
         },
     };
-    if tx
+    if let Some(mut existing) = tx
         .query_row(
-            "SELECT 1 FROM resources WHERE path=?",
+            &format!("{RESOURCE_SELECT} WHERE path=?"),
             db_params![path],
-            |_| Ok(()),
+            resource_from_row,
         )
         .optional()?
-        .is_some()
     {
-        return Ok(Some(resource_in(tx, path)?));
+        if existing.spec != planned.spec {
+            if !existing.metadata.kas.protected || existing.metadata.kas.managed_by != "system" {
+                return Err(StoreError::Conflict(format!(
+                    "System Link {path} is not managed by KAS"
+                )));
+            }
+            existing.spec = planned.spec;
+            existing.metadata.kas.revision += 1;
+            existing.metadata.kas.updated_at = now;
+            save_resource_in(tx, &existing)?;
+            existing = resource_in(tx, path)?;
+            append_event(tx, EventType::Updated, &existing, now)?;
+            enqueue_if_drifted(tx, &existing, "system_link_updated", now)?;
+        }
+        return Ok(Some(existing));
     }
     let planned = normalized_initial_documents(tx, &planned)?;
     insert_resource_row(tx, &planned, true, "system", now)?;
@@ -2287,6 +2878,112 @@ fn relation_path_for_role(
         }
     }
     Ok(None)
+}
+
+fn active_package_path_for_manifest_in(
+    tx: &Transaction<'_>,
+    manifest_path: &str,
+) -> Result<Option<String>, StoreError> {
+    let Some(relation) = relation_path_for_role(tx, RelationRole::PackageManifest)? else {
+        return Ok(None);
+    };
+    tx.query_row(
+        "SELECT json_extract(spec,'$.source')
+         FROM resources
+         WHERE json_extract(metadata,'$.manifest')=?
+           AND json_extract(spec,'$.relation')=?
+           AND json_extract(spec,'$.target')=?
+         ORDER BY path
+         LIMIT 1",
+        db_params![LINK_MANIFEST, relation, manifest_path],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn set_manifest_package_in(
+    tx: &Transaction<'_>,
+    manifest_path: &str,
+    package_path: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>, StoreError> {
+    let mut changed_paths = Vec::new();
+    for mut resource in resources_for_manifest_in(tx, manifest_path)? {
+        if resource.metadata.kas.package == package_path {
+            continue;
+        }
+        if resource.metadata.kas.package.is_empty() {
+            resource.metadata.kas.package = package_path.into();
+            resource.status.metadata.kas.package = package_path.into();
+            save_resource_in(tx, &resource)?;
+            changed_paths.push(resource.path);
+            continue;
+        }
+
+        resource.metadata.kas.package = package_path.into();
+        resource.metadata.kas.revision += 1;
+        resource.metadata.kas.updated_at = now;
+        if driver_for_resource(tx, &resource)?.is_none() {
+            let actual = resource.status.metadata.kas.observed.clone();
+            resource.status.metadata = resource.metadata.clone();
+            resource.status.metadata.kas.observed = actual;
+        }
+        save_resource_in(tx, &resource)?;
+        let updated = resource_in(tx, &resource.path)?;
+        append_event(tx, EventType::Updated, &updated, now)?;
+        enqueue_if_drifted(tx, &updated, "package_version_changed", now)?;
+        changed_paths.push(resource.path);
+    }
+    Ok(changed_paths)
+}
+
+fn gc_superseded_packages_for_manifest_in(
+    tx: &Transaction<'_>,
+    manifest_path: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>, StoreError> {
+    let Some(active_package) = active_package_path_for_manifest_in(tx, manifest_path)? else {
+        return Ok(Vec::new());
+    };
+    let mut candidates = Vec::new();
+    for resource in resources_for_manifest_in(tx, PACKAGE_MANIFEST)? {
+        let spec: PackageSpec = decode(&resource.spec, "Package spec")?;
+        if spec.manifest == manifest_path && resource.path != active_package {
+            candidates.push(resource.path.clone());
+        }
+    }
+    let mut deleted = Vec::new();
+    for package_path in candidates {
+        let referenced = tx
+            .query_row(
+                "SELECT 1 FROM resources
+                 WHERE json_extract(metadata,'$.\"[kas]\".package')=?
+                    OR json_extract(status,'$.metadata.\"[kas]\".package')=?
+                 LIMIT 1",
+                db_params![package_path, package_path],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if referenced {
+            continue;
+        }
+        let mut links = Vec::new();
+        for link in resources_for_manifest_in(tx, LINK_MANIFEST)? {
+            let spec: LinkSpec = decode(&link.spec, "Link spec")?;
+            if spec.source == package_path || spec.target == package_path {
+                links.push(link.path);
+            }
+        }
+        for link in links {
+            hard_delete_resource(tx, &link, now)?;
+            deleted.push(link);
+        }
+        hard_delete_resource(tx, &package_path, now)?;
+        deleted.push(package_path);
+    }
+    Ok(deleted)
 }
 
 fn owner_manifest_for_driver_in(
@@ -2466,6 +3163,51 @@ fn reconcile_platform_state(store: &mut Store) -> Result<(), StoreError> {
     let tx = store.connection.transaction()?;
     let now = Utc::now();
     reconcile_all_resources(&tx, "startup_resync", now)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn reconcile_package_metadata(store: &mut Store) -> Result<(), StoreError> {
+    let tx = store.connection.transaction()?;
+    let now = Utc::now();
+    let Some(relation) = relation_path_for_role(&tx, RelationRole::PackageManifest)? else {
+        tx.commit()?;
+        return Ok(());
+    };
+    let mut links = Vec::new();
+    for link in resources_for_manifest_in(&tx, LINK_MANIFEST)? {
+        let spec: LinkSpec = decode(&link.spec, "PackageManifest Link spec")?;
+        if spec.relation == relation {
+            links.push(spec);
+        }
+    }
+    let mut manifests = BTreeSet::new();
+    for link in links {
+        let manifest = resource_in(&tx, &link.target)?;
+        let manifest_spec: ManifestSpec = decode(&manifest.spec, "Manifest spec")?;
+        let mut package = resource_in(&tx, &link.source)?;
+        let mut package_spec: PackageSpec = decode(&package.spec, "Package spec")?;
+        if package_spec.manifest != manifest.path
+            || package_spec.manifest_version != manifest_spec.version
+        {
+            package_spec.manifest = manifest.path.clone();
+            package_spec.manifest_version = manifest_spec.version;
+            package.spec = serde_json::to_value(&package_spec)?;
+            package.status.spec = package.spec.clone();
+            package.metadata.kas.revision += 1;
+            package.metadata.kas.updated_at = now;
+            let actual = package.status.metadata.kas.observed.clone();
+            package.status.metadata = package.metadata.clone();
+            package.status.metadata.kas.observed = actual;
+            save_resource_in(&tx, &package)?;
+            append_event(&tx, EventType::Updated, &package, now)?;
+        }
+        set_manifest_package_in(&tx, &manifest.path, &package.path, now)?;
+        manifests.insert(manifest.path);
+    }
+    for manifest in manifests {
+        gc_superseded_packages_for_manifest_in(&tx, &manifest, now)?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -2665,6 +3407,7 @@ fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) 
     status.metadata.kas.generation = resource.metadata.kas.generation;
     status.metadata.kas.protected = resource.metadata.kas.protected;
     status.metadata.kas.managed_by = resource.metadata.kas.managed_by.clone();
+    status.metadata.kas.package = resource.metadata.kas.package.clone();
     status.metadata.kas.created_at = resource.metadata.kas.created_at;
     status.metadata.kas.updated_at = resource.metadata.kas.updated_at;
     status.metadata.kas.observed = resource.status.metadata.kas.observed.clone();
@@ -3016,6 +3759,69 @@ mod tests {
         .unwrap()
     }
 
+    fn echo_manifest_v2() -> PackageExpansion {
+        let mut expansion = echo_manifest();
+        expansion.artifact_digest = format!("sha256:{}", "feedface".repeat(8));
+        expansion.resources[0].spec["version"] = json!(2);
+        expansion.resources[0].spec["description"] = json!("Updated Store test Manifest");
+        expansion
+            .resources
+            .retain(|resource| resource.path == "/manifests/test/echo");
+        expansion
+            .resource_owners
+            .retain(|path, _| path == "/manifests/test/echo");
+        expansion
+    }
+
+    fn echo_manifest_with_driver(version: u32, digest_word: &str) -> PackageExpansion {
+        let mut expansion = echo_manifest();
+        expansion.artifact_digest = format!("sha256:{}", digest_word.repeat(8));
+        expansion.resources[0].spec["version"] = json!(version);
+        expansion.resources.push(PlannedResource {
+            path: "/manifests/test/echo/service-accounts/driver".into(),
+            metadata: PlannedResourceMetadata {
+                manifest: SERVICE_ACCOUNT_MANIFEST.into(),
+                name: "echo-driver".into(),
+                state: String::new(),
+            },
+            spec: json!({}),
+            status: ResourceStatus::default(),
+        });
+        expansion.resources.push(PlannedResource {
+            path: "/manifests/test/echo/driver".into(),
+            metadata: PlannedResourceMetadata {
+                manifest: DRIVER_MANIFEST.into(),
+                name: "echo-driver".into(),
+                state: "running".into(),
+            },
+            spec: json!({
+                "runtime": "process",
+                "entrypoint": "./driver/test",
+                "service_account": "/manifests/test/echo/service-accounts/driver",
+                "manages": ["/manifests/test/echo"],
+                "args": [],
+                "watches": [],
+                "restart": "never"
+            }),
+            status: ResourceStatus {
+                metadata: ResourceStatusMetadata {
+                    state: "stopped".into(),
+                    ..Default::default()
+                },
+                spec: json!({}),
+            },
+        });
+        expansion.resource_owners.insert(
+            "/manifests/test/echo/service-accounts/driver".into(),
+            "/manifests/test/echo".into(),
+        );
+        expansion.resource_owners.insert(
+            "/manifests/test/echo/driver".into(),
+            "/manifests/test/echo".into(),
+        );
+        expansion
+    }
+
     #[test]
     fn bootstraps_the_self_describing_resource_universe() {
         let store = Store::memory().unwrap();
@@ -3030,10 +3836,10 @@ mod tests {
             .any(|resource| resource.path == LINK_MANIFEST));
         let package = store.package_for_manifest(MANIFEST_MANIFEST).unwrap();
         assert_eq!(package.manifest, PACKAGE_MANIFEST);
-        assert!(decode::<PackageSpec>(&package.spec, "Package spec")
-            .unwrap()
-            .digest
-            .starts_with("sha256:"));
+        let package_spec = decode::<PackageSpec>(&package.spec, "Package spec").unwrap();
+        assert!(package_spec.digest.starts_with("sha256:"));
+        assert_eq!(package_spec.manifest, MANIFEST_MANIFEST);
+        assert_eq!(package_spec.manifest_version, 1);
         let mut builtin_packages = std::collections::BTreeSet::from([package.path.clone()]);
         for manifest_path in [
             ACTION_MANIFEST,
@@ -3098,6 +3904,9 @@ mod tests {
         assert_eq!(created.status.metadata.state, kas_core::STATE_PENDING);
         assert_eq!(created.status.metadata.manifest, created.metadata.manifest);
         assert_eq!(created.status.metadata.name, created.metadata.name);
+        let package = store.package_for_manifest("/manifests/test/echo").unwrap();
+        assert_eq!(created.metadata.kas.package, package.path);
+        assert_eq!(created.status.metadata.kas.package, package.path);
         assert_eq!(
             created.status.metadata.kas.revision,
             created.metadata.kas.revision
@@ -3143,6 +3952,144 @@ mod tests {
         unknown.metadata.state = "mystery".into();
         let unknown_state = store.create_resource(unknown);
         assert!(matches!(unknown_state, Err(StoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn package_update_replaces_definition_members_without_deleting_instances() {
+        let mut store = Store::memory().unwrap();
+        let first_package = store
+            .install_package(echo_manifest(), 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE)
+            .unwrap();
+        let instance = store
+            .create_resource(planned(
+                "/resources/test/echo-1",
+                "/manifests/test/echo",
+                "echo-1",
+                json!({"label": "one"}),
+            ))
+            .unwrap();
+        let first_manifest_revision = store
+            .get_resource("/manifests/test/echo")
+            .unwrap()
+            .metadata
+            .kas
+            .revision;
+
+        let second_package = store
+            .install_package(
+                echo_manifest_v2(),
+                456,
+                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
+            )
+            .unwrap();
+
+        assert_ne!(second_package.path, first_package.path);
+        assert_eq!(
+            store
+                .package_for_manifest("/manifests/test/echo")
+                .unwrap()
+                .path,
+            second_package.path
+        );
+        assert!(matches!(
+            store.get_resource(&first_package.path),
+            Err(StoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.get_resource("/manifests/test/echo/relations/peer"),
+            Err(StoreError::NotFound(_))
+        ));
+        let updated_manifest = store.get_resource("/manifests/test/echo").unwrap();
+        assert_eq!(updated_manifest.spec["version"], 2);
+        assert!(updated_manifest.metadata.kas.revision > first_manifest_revision);
+        assert_eq!(
+            store.get_resource(&instance.path).unwrap().spec,
+            json!({"label": "one"})
+        );
+        let updated_instance = store.get_resource(&instance.path).unwrap();
+        assert_eq!(updated_instance.metadata.kas.package, second_package.path);
+        assert_eq!(
+            updated_instance.status.metadata.kas.package,
+            second_package.path
+        );
+
+        let idempotent = store
+            .install_package(
+                echo_manifest_v2(),
+                456,
+                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
+            )
+            .unwrap();
+        assert_eq!(idempotent.path, second_package.path);
+    }
+
+    #[test]
+    fn package_update_reconciles_business_instances_before_collecting_old_package() {
+        let mut store = Store::memory().unwrap();
+        let first_package = store
+            .install_package(
+                echo_manifest_with_driver(1, "deadbeef"),
+                123,
+                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
+            )
+            .unwrap();
+        let driver_path = "/manifests/test/echo/driver";
+        store.start_driver(driver_path).unwrap();
+        let generation = store.driver_generation(driver_path).unwrap();
+        store
+            .mark_driver_ready(
+                driver_path,
+                DriverReady {
+                    generation,
+                    process_id: 1,
+                    metadata: json!({}),
+                },
+            )
+            .unwrap();
+        let instance = store
+            .create_resource(planned(
+                "/resources/test/echo-package-version",
+                "/manifests/test/echo",
+                "echo-package-version",
+                json!({"label": "one"}),
+            ))
+            .unwrap();
+        assert_eq!(instance.metadata.kas.package, first_package.path);
+        assert_eq!(instance.status.metadata.kas.package, first_package.path);
+
+        let second_package = store
+            .install_package(
+                echo_manifest_with_driver(2, "feedface"),
+                456,
+                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
+            )
+            .unwrap();
+        let pending = store.get_resource(&instance.path).unwrap();
+        assert_eq!(pending.metadata.kas.package, second_package.path);
+        assert_eq!(pending.status.metadata.kas.package, first_package.path);
+        assert!(store.get_resource(&first_package.path).is_ok());
+
+        let delivery = store
+            .claim_driver_delivery(driver_path, generation)
+            .unwrap()
+            .expect("Package version drift produces reconciliation work");
+        assert!(matches!(
+            &delivery.work,
+            DriverWork::Reconcile { resource, .. } if resource.path == instance.path
+        ));
+        store
+            .acknowledge_driver_delivery(delivery.id, driver_path, generation)
+            .unwrap();
+        store
+            .finish_reconciliation_with_mutations(delivery.id, driver_path, generation, Vec::new())
+            .unwrap();
+
+        let converged = store.get_resource(&instance.path).unwrap();
+        assert_eq!(converged.status.metadata.kas.package, second_package.path);
+        assert!(matches!(
+            store.get_resource(&first_package.path),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -3262,6 +4209,115 @@ mod tests {
             store.get_driver_delivery(delivery.id),
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn reconciliation_mutation_does_not_complete_and_redelivery_keeps_id() {
+        let mut store = Store::memory().unwrap();
+        let driver_path = "/builtin/link/driver";
+        store.start_driver(driver_path).unwrap();
+        let generation = store.driver_generation(driver_path).unwrap();
+        store
+            .mark_driver_ready(
+                driver_path,
+                DriverReady {
+                    generation,
+                    process_id: 1,
+                    metadata: json!({}),
+                },
+            )
+            .unwrap();
+
+        let delivery = store
+            .claim_driver_delivery(driver_path, generation)
+            .unwrap()
+            .expect("running Driver has reconciliation work");
+        let DriverWork::Reconcile { resource, .. } = &delivery.work else {
+            panic!("expected reconciliation work");
+        };
+        let resource_path = resource.path.clone();
+        store
+            .acknowledge_driver_delivery(delivery.id, driver_path, generation)
+            .unwrap();
+        let request_id = Uuid::new_v4();
+        store
+            .apply_reconciliation_mutations(
+                delivery.id,
+                request_id,
+                driver_path,
+                generation,
+                Vec::new(),
+            )
+            .unwrap();
+        store
+            .apply_reconciliation_mutations(
+                delivery.id,
+                request_id,
+                driver_path,
+                generation,
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(store.get_driver_delivery(delivery.id).is_ok());
+        assert_ne!(
+            store
+                .get_resource(&resource_path)
+                .unwrap()
+                .status
+                .metadata
+                .kas
+                .observed
+                .get(driver_path),
+            resource.metadata.kas.observed.get(driver_path)
+        );
+
+        store
+            .reset_driver_delivery_leases(driver_path, generation)
+            .unwrap();
+        let redelivered = store
+            .claim_driver_deliveries(driver_path, generation, 16)
+            .unwrap();
+        assert!(redelivered.iter().any(|item| item.id == delivery.id));
+
+        store
+            .mark_driver_failed(driver_path, generation, "test process exit")
+            .unwrap();
+        store.start_driver(driver_path).unwrap();
+        let restarted_generation = store.driver_generation(driver_path).unwrap();
+        store
+            .mark_driver_ready(
+                driver_path,
+                DriverReady {
+                    generation: restarted_generation,
+                    process_id: 2,
+                    metadata: json!({}),
+                },
+            )
+            .unwrap();
+        let after_restart = store
+            .claim_driver_deliveries(driver_path, restarted_generation, 16)
+            .unwrap();
+        assert!(after_restart.iter().any(|item| item.id == delivery.id));
+        store
+            .acknowledge_driver_delivery(delivery.id, driver_path, restarted_generation)
+            .unwrap();
+        assert!(store
+            .complete_reconciliation(delivery.id, driver_path, restarted_generation)
+            .unwrap());
+        assert!(!store
+            .complete_reconciliation(delivery.id, driver_path, restarted_generation)
+            .unwrap());
+        assert_eq!(
+            store
+                .get_resource(&resource_path)
+                .unwrap()
+                .status
+                .metadata
+                .kas
+                .observed
+                .get(driver_path),
+            resource.metadata.kas.observed.get(driver_path)
+        );
     }
 
     #[test]

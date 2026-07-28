@@ -233,16 +233,25 @@ impl ReconcileQueue {
         notified
     }
 
-    pub(crate) fn pop(&mut self, driver_path: &str) -> Option<(String, DriverObservation)> {
-        loop {
-            let queue = self.pending.get_mut(driver_path)?;
-            let key = queue.pop_front()?;
-            if queue.is_empty() {
-                self.pending.remove(driver_path);
+    pub(crate) fn pop_excluding(
+        &mut self,
+        driver_path: &str,
+        excluded_resources: &HashSet<String>,
+    ) -> Option<(String, DriverObservation)> {
+        let mut queue = self.pending.remove(driver_path)?;
+        let mut deferred = VecDeque::new();
+        while let Some(key) = queue.pop_front() {
+            if excluded_resources.contains(&key.resource_path) {
+                deferred.push_back(key);
+                continue;
             }
             let pair = (key.driver_path.clone(), key.resource_path.clone());
             if self.latest.get(&pair) != Some(&key) {
                 continue;
+            }
+            deferred.extend(queue);
+            if !deferred.is_empty() {
+                self.pending.insert(driver_path.to_owned(), deferred);
             }
             self.latest.remove(&pair);
             return Some((
@@ -253,6 +262,15 @@ impl ReconcileQueue {
                 },
             ));
         }
+        if !deferred.is_empty() {
+            self.pending.insert(driver_path.to_owned(), deferred);
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pop(&mut self, driver_path: &str) -> Option<(String, DriverObservation)> {
+        self.pop_excluding(driver_path, &HashSet::new())
     }
 
     pub(crate) fn is_pending(

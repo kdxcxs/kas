@@ -54,6 +54,12 @@ pub struct KasMetadata {
     pub protected: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub managed_by: String,
+    /// Content-addressed Package that defines this Resource's Manifest.
+    ///
+    /// The desired document points at the active Package. The status document
+    /// retains the Package used by the last successful owner reconciliation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub package: String,
     #[serde(default)]
     pub created_at: DateTime<Utc>,
     #[serde(default)]
@@ -259,6 +265,10 @@ pub struct PackageSpec {
     pub digest: String,
     pub size_bytes: u64,
     pub media_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manifest: String,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub manifest_version: u32,
 }
 
 pub fn package_path_for_digest(digest: &str) -> Option<String> {
@@ -493,6 +503,10 @@ fn default_document() -> Value {
 }
 
 fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
@@ -1024,6 +1038,7 @@ pub struct DriverDelivery {
     pub work: DriverWork,
     pub status: DeliveryStatus,
     pub created_at: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
     pub acked_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -1054,6 +1069,7 @@ mod tests {
                 observed: BTreeMap::new(),
                 protected: false,
                 managed_by: "user".into(),
+                package: "/packages/sha256/example".into(),
                 created_at: now,
                 updated_at: now,
             },
