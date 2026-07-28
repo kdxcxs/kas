@@ -66,16 +66,14 @@ while IFS= read -r commit; do
       git diff-tree --root --no-commit-id --name-only -r "$commit"
     )"
   fi
-  INVALID_PATHS="$(
-    printf '%s\n' "$CHANGED_PATHS" |
-      while IFS= read -r path; do
-        [[ -n "$path" ]] || continue
-        case "$path" in
-          platform/*) ;;
-          *) echo "$path" ;;
-        esac
-      done
-  )"
+  INVALID_PATHS=""
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      platform/*) ;;
+      *) INVALID_PATHS+="${path}"$'\n' ;;
+    esac
+  done <<<"$CHANGED_PATHS"
   if [[ -n "$INVALID_PATHS" ]]; then
     echo "master-only commit $commit modifies core-owned paths:" >&2
     echo "$INVALID_PATHS" >&2
