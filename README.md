@@ -251,9 +251,12 @@ platform/
 scripts/install-git-hooks.sh
 ```
 
-该检查要求 `core` 不包含 `platform/**`，要求 `master` 已合并最新 `core`
-历史，并要求两个分支在 `platform/**` 之外的文件树完全相同。因此核心改动
-需要先提交到 `core`，在本地合并进 `master` 后再一起 push。
+pre-commit 检查禁止 `core` 提交 `platform/**`，也禁止 `master` 直接提交
+`platform/**` 之外的路径；正式 merge `core` 到 `master` 时允许核心文件随
+merge 进入。pre-push 进一步要求 `master` 已合并最新 `core` 历史、两个分支
+在 `platform/**` 之外的文件树完全相同，并检查策略启用后的 master-only
+提交只能修改 `platform/**`。因此核心改动需要先提交到 `core`，在本地合并进
+`master` 后再一起 push。
 
 启动顺序：
 

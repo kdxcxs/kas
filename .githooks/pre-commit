@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
+
+reject_paths() {
+  local mode="$1"
+  local invalid=""
+  local path
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    case "$mode:$path" in
+      core:platform/*) invalid+="${path}"$'\n' ;;
+      master:platform/*) ;;
+      master:*) invalid+="${path}"$'\n' ;;
+    esac
+  done < <(git diff --cached --name-only --diff-filter=ACMRDTUXB)
+  if [[ -n "$invalid" ]]; then
+    echo "branch ownership violation on $BRANCH:" >&2
+    printf '%s' "$invalid" >&2
+    return 1
+  fi
+}
+
+case "$BRANCH" in
+  core)
+    reject_paths core
+    ;;
+  master)
+    MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD)"
+    if [[ -f "$MERGE_HEAD_PATH" ]] &&
+      git merge-base --is-ancestor core "$(cat "$MERGE_HEAD_PATH")"; then
+      exit 0
+    fi
+    reject_paths master
+    ;;
+esac
