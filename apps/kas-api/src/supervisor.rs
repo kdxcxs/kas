@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use kas_core::{DriverSpec, DriverState, Resource, RestartPolicy};
 use kas_store::Store;
@@ -51,7 +46,7 @@ enum SupervisorCommand {
 }
 
 impl Supervisor {
-    pub fn spawn(store: Arc<Mutex<Store>>, api_url: String, data_dir: PathBuf) -> Self {
+    pub fn spawn(store: Store, api_url: String, data_dir: PathBuf) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         tokio::spawn(run_supervisor(
             receiver,
@@ -85,7 +80,7 @@ impl Supervisor {
 async fn run_supervisor(
     mut receiver: mpsc::UnboundedReceiver<SupervisorCommand>,
     commands: mpsc::UnboundedSender<SupervisorCommand>,
-    store: Arc<Mutex<Store>>,
+    store: Store,
     api_url: String,
     data_dir: PathBuf,
 ) {
@@ -125,7 +120,7 @@ async fn run_supervisor(
             SupervisorCommand::Stop(driver_path) => {
                 if let Some(current) = drivers.remove(&driver_path) {
                     let _ = current.desired.send(false);
-                } else if let Ok(mut store) = store.lock() {
+                } else {
                     let _ = store.stop_driver(&driver_path);
                 }
             }
@@ -168,7 +163,7 @@ struct SupervisedDriver {
 fn start_supervised_driver(
     drivers: &mut HashMap<String, SupervisedDriver>,
     commands: &mpsc::UnboundedSender<SupervisorCommand>,
-    store: &Arc<Mutex<Store>>,
+    store: &Store,
     api_url: &str,
     data_dir: &std::path::Path,
     launch: DriverLaunch,
@@ -205,7 +200,7 @@ fn start_supervised_driver(
 }
 
 async fn run_driver(
-    store: Arc<Mutex<Store>>,
+    store: Store,
     api_url: String,
     data_dir: PathBuf,
     launch: DriverLaunch,
@@ -321,13 +316,10 @@ async fn run_driver(
 }
 
 fn prepare_generation(
-    store: &Arc<Mutex<Store>>,
+    store: &Store,
     driver_path: &str,
     prepared_generation: Option<u64>,
 ) -> anyhow::Result<(u64, String)> {
-    let mut store = store
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Store lock is poisoned"))?;
     let current = store.get_driver(driver_path)?;
     let current_state = driver_state(&current)?;
     let current_generation = store.driver_generation(driver_path)?;
@@ -384,7 +376,7 @@ enum ReadyOutcome {
 }
 
 async fn wait_until_ready(
-    store: &Arc<Mutex<Store>>,
+    store: &Store,
     driver_path: &str,
     generation: u64,
     child: &mut Child,
@@ -393,14 +385,12 @@ async fn wait_until_ready(
     let ready = async {
         loop {
             sleep(Duration::from_millis(50)).await;
-            let running = store.lock().ok().is_some_and(|store| {
-                store.driver_generation(driver_path).ok() == Some(generation)
-                    && store
-                        .get_driver(driver_path)
-                        .ok()
-                        .and_then(|driver| driver_state(&driver).ok())
-                        == Some(DriverState::Running)
-            });
+            let running = store.driver_generation(driver_path).ok() == Some(generation)
+                && store
+                    .get_driver(driver_path)
+                    .ok()
+                    .and_then(|driver| driver_state(&driver).ok())
+                    == Some(DriverState::Running);
             if running {
                 return ReadyOutcome::Ready;
             }
@@ -416,72 +406,53 @@ async fn wait_until_ready(
     }
 }
 
-async fn stop_child(
-    store: &Arc<Mutex<Store>>,
-    driver_path: &str,
-    generation: u64,
-    child: &mut Child,
-) {
-    if let Ok(mut store) = store.lock() {
-        if store
-            .get_driver(driver_path)
-            .ok()
-            .and_then(|driver| driver_state(&driver).ok())
-            .is_some_and(|state| matches!(state, DriverState::Starting | DriverState::Running))
-        {
-            let _ = store.stop_driver(driver_path);
-        }
+async fn stop_child(store: &Store, driver_path: &str, generation: u64, child: &mut Child) {
+    if store
+        .get_driver(driver_path)
+        .ok()
+        .and_then(|driver| driver_state(&driver).ok())
+        .is_some_and(|state| matches!(state, DriverState::Starting | DriverState::Running))
+    {
+        let _ = store.stop_driver(driver_path);
     }
     if timeout(STOP_TIMEOUT, child.wait()).await.is_err() {
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
-    if let Ok(mut store) = store.lock() {
-        if store
-            .get_driver(driver_path)
-            .ok()
-            .and_then(|driver| driver_state(&driver).ok())
-            .is_some_and(|state| state == DriverState::Stopping)
-        {
-            let _ = store.mark_driver_stopped(driver_path, generation);
-        }
+    if store
+        .get_driver(driver_path)
+        .ok()
+        .and_then(|driver| driver_state(&driver).ok())
+        .is_some_and(|state| state == DriverState::Stopping)
+    {
+        let _ = store.mark_driver_stopped(driver_path, generation);
     }
 }
 
-fn mark_failed(store: &Arc<Mutex<Store>>, driver_path: &str, generation: u64, message: &str) {
-    if let Ok(mut store) = store.lock() {
-        let _ = store.mark_driver_failed(driver_path, generation, message);
-    }
+fn mark_failed(store: &Store, driver_path: &str, generation: u64, message: &str) {
+    let _ = store.mark_driver_failed(driver_path, generation, message);
 }
 
-fn record_exit(
-    store: &Arc<Mutex<Store>>,
-    driver_path: &str,
-    generation: u64,
-    success: bool,
-    message: &str,
-) {
+fn record_exit(store: &Store, driver_path: &str, generation: u64, success: bool, message: &str) {
     if !success {
         mark_failed(store, driver_path, generation, message);
         return;
     }
-    if let Ok(mut store) = store.lock() {
-        if store
-            .get_driver(driver_path)
-            .ok()
-            .and_then(|driver| driver_state(&driver).ok())
-            .is_some_and(|state| matches!(state, DriverState::Starting | DriverState::Running))
-        {
-            let _ = store.stop_driver(driver_path);
-        }
-        if store
-            .get_driver(driver_path)
-            .ok()
-            .and_then(|driver| driver_state(&driver).ok())
-            .is_some_and(|state| state == DriverState::Stopping)
-        {
-            let _ = store.mark_driver_stopped(driver_path, generation);
-        }
+    if store
+        .get_driver(driver_path)
+        .ok()
+        .and_then(|driver| driver_state(&driver).ok())
+        .is_some_and(|state| matches!(state, DriverState::Starting | DriverState::Running))
+    {
+        let _ = store.stop_driver(driver_path);
+    }
+    if store
+        .get_driver(driver_path)
+        .ok()
+        .and_then(|driver| driver_state(&driver).ok())
+        .is_some_and(|state| state == DriverState::Stopping)
+    {
+        let _ = store.mark_driver_stopped(driver_path, generation);
     }
 }
 

@@ -45,7 +45,7 @@ const MAX_IN_FLIGHT_DELIVERIES: usize = 16;
 
 #[derive(Clone)]
 struct AppState {
-    store: Arc<Mutex<Store>>,
+    store: Store,
     driver_connections: Arc<Mutex<HashMap<String, Uuid>>>,
     data_dir: PathBuf,
     supervisor: Supervisor,
@@ -75,7 +75,6 @@ pub fn app(store: Store) -> Router {
 }
 
 pub fn app_with_config(store: Store, config: AppConfig) -> Router {
-    let store = Arc::new(Mutex::new(store));
     let reconcile_notify = Arc::new(Notify::new());
     let supervisor = Supervisor::spawn(
         store.clone(),
@@ -372,7 +371,7 @@ async fn install_package(
     }
     let (previous_package, previous_members, existing_resources) = {
         let store = lock(&state)?;
-        let previous_package = match optional_resource(&store, &manifest_path)? {
+        let previous_package = match optional_resource(store, &manifest_path)? {
             Some(_) => Some(store.package_for_manifest(&manifest_path)?),
             None => None,
         };
@@ -385,7 +384,7 @@ async fn install_package(
             .resources
             .iter()
             .filter_map(|planned| {
-                optional_resource(&store, &planned.path)
+                optional_resource(store, &planned.path)
                     .transpose()
                     .map(|result| result.map(|resource| (planned.path.clone(), resource)))
             })
@@ -449,7 +448,7 @@ async fn install_package(
             .map_err(internal_error)?;
     }
     for driver_path in &next_drivers {
-        let driver = lock(&state)?.get_driver(&driver_path)?;
+        let driver = lock(&state)?.get_driver(driver_path)?;
         if driver.metadata.state == "running" {
             let launch = driver_launch(&state, driver, None)?;
             if is_update && previous_drivers.contains(driver_path) {
@@ -664,7 +663,7 @@ async fn serve_driver_socket(
         eprintln!("Driver {driver_path} WebSocket hello send failed");
         return;
     }
-    if let Err(error) = lock(&state).and_then(|mut store| {
+    if let Err(error) = lock(&state).and_then(|store| {
         store
             .reset_driver_delivery_leases(&driver_path, generation)
             .map_err(Into::into)
@@ -737,40 +736,46 @@ async fn serve_driver_socket(
         };
         match current_state {
             DriverState::Running => {
-                let deliveries = match lock(&state).and_then(|mut store| {
-                    store
-                        .claim_driver_deliveries(&driver_path, generation, MAX_IN_FLIGHT_DELIVERIES)
-                        .map_err(Into::into)
-                }) {
-                    Ok(deliveries) => deliveries,
-                    Err(error) => {
-                        eprintln!("Driver {driver_path} delivery claim failed: {}", error.1);
-                        break;
-                    }
-                };
-                for delivery in deliveries {
-                    let delivery_id = delivery.id;
-                    let message = match delivery.work {
-                        DriverWork::Reconcile { resource, .. } => ServerMessage::Reconcile {
-                            delivery_id,
-                            resource,
-                        },
-                        DriverWork::Run {
-                            run,
-                            resource,
-                            action,
-                        } => ServerMessage::Run {
-                            delivery_id,
-                            run,
-                            resource,
-                            action,
-                        },
+                let available = MAX_IN_FLIGHT_DELIVERIES.saturating_sub(in_flight.len());
+                if available > 0 {
+                    let deliveries = match lock(&state).and_then(|store| {
+                        store
+                            .claim_driver_deliveries(&driver_path, generation, available)
+                            .map_err(Into::into)
+                    }) {
+                        Ok(deliveries) => deliveries,
+                        Err(error) => {
+                            eprintln!("Driver {driver_path} delivery claim failed: {}", error.1);
+                            break;
+                        }
                     };
-                    if send_server_message(&mut socket, &message).await.is_err() {
-                        eprintln!("Driver {driver_path} WebSocket delivery send failed");
-                        break 'connection;
+                    for delivery in deliveries {
+                        let delivery_id = delivery.id;
+                        if in_flight.contains(&delivery_id) {
+                            continue;
+                        }
+                        let message = match delivery.work {
+                            DriverWork::Reconcile { resource, .. } => ServerMessage::Reconcile {
+                                delivery_id,
+                                resource,
+                            },
+                            DriverWork::Run {
+                                run,
+                                resource,
+                                action,
+                            } => ServerMessage::Run {
+                                delivery_id,
+                                run,
+                                resource,
+                                action,
+                            },
+                        };
+                        if send_server_message(&mut socket, &message).await.is_err() {
+                            eprintln!("Driver {driver_path} WebSocket delivery send failed");
+                            break 'connection;
+                        }
+                        in_flight.insert(delivery_id);
                     }
-                    in_flight.insert(delivery_id);
                 }
             }
             DriverState::Stopping if stop_delivery.is_none() => {
@@ -797,7 +802,7 @@ async fn serve_driver_socket(
         }
 
         tokio::select! {
-            _ = &mut notified => {}
+            _ = &mut notified, if in_flight.len() < MAX_IN_FLIGHT_DELIVERIES => {}
             _ = lease_scan.tick() => {}
             _ = ping.tick() => {
                 if send_server_message(&mut socket, &ServerMessage::Ping).await.is_err() {
@@ -948,18 +953,17 @@ fn handle_driver_message(
                     (MutationStatus::Committed, outcome.results, None)
                 }
                 Err(error) => {
-                    if error.0 == StatusCode::CONFLICT {
-                        if lock(state)
-                            .and_then(|mut store| {
+                    let abandoned = error.0 == StatusCode::CONFLICT
+                        && lock(state)
+                            .and_then(|store| {
                                 store
                                     .abandon_reconciliation(delivery_id, driver_path, generation)
                                     .map_err(Into::into)
                             })
-                            .is_ok()
-                        {
-                            in_flight.remove(&delivery_id);
-                            notify_reconcile(state);
-                        }
+                            .is_ok();
+                    if abandoned {
+                        in_flight.remove(&delivery_id);
+                        notify_reconcile(state);
                     }
                     (
                         MutationStatus::Rejected,
@@ -1299,11 +1303,8 @@ fn internal_error(error: impl std::fmt::Display) -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
-fn lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Store>, ApiError> {
-    state
-        .store
-        .lock()
-        .map_err(|_| internal_error("store lock poisoned"))
+fn lock(state: &AppState) -> Result<&Store, ApiError> {
+    Ok(&state.store)
 }
 
 fn optional_resource(store: &Store, path: &str) -> Result<Option<Resource>, StoreError> {
@@ -1326,6 +1327,7 @@ impl From<StoreError> for ApiError {
             StoreError::Conflict(_) => StatusCode::CONFLICT,
             StoreError::Database(_)
             | StoreError::Serialization(_)
+            | StoreError::Internal(_)
             | StoreError::MigrationRequired { .. }
             | StoreError::UnsupportedSchema { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
