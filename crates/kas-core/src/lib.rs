@@ -306,6 +306,7 @@ pub enum RelationRole {
     RunAction,
     RunDriver,
     DriverServiceAccount,
+    DriverCredential,
     RoleBinding,
 }
 

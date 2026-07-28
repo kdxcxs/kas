@@ -321,6 +321,44 @@ echo "$DRIVER" | jq -e '
   and .status.spec == .spec
 ' >/dev/null
 
+DRIVER_SERVICE_ACCOUNT="$(jq -r '.spec.service_account' <<<"$DRIVER")"
+DRIVER_GENERATION="$(jq -r '.metadata["[kas]"].generation' <<<"$DRIVER")"
+DRIVER_CREDENTIAL_PATH="$(
+  curl --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "manifest=/builtin/credential" \
+    "$API/resources" |
+    jq -er \
+      --arg subject "$DRIVER_SERVICE_ACCOUNT" \
+      --argjson generation "$DRIVER_GENERATION" '
+        [
+          .[] | select(
+            .spec.subject == $subject
+            and .spec.driver_generation == $generation
+            and (.spec | has("expires_at") | not)
+            and (.spec | has("revoked_at") | not)
+          )
+        ] | if length == 1 then .[0].path else error("expected one active Driver Credential") end
+      '
+)"
+curl --fail --silent --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/link" \
+  "$API/resources" |
+  jq -e \
+    --arg driver "$DRIVER_PATH" \
+    --arg credential "$DRIVER_CREDENTIAL_PATH" '
+      [
+        .[] | select(
+          .spec.relation == "/builtin/relations/driver-credential"
+          and .spec.source == $driver
+          and .spec.target == $credential
+          and .metadata["[kas]"].protected == true
+          and .metadata["[kas]"].managed_by == "system"
+        )
+      ] | length == 1
+    ' >/dev/null
+
 # The single built-in Relationship Driver owns Relation status as well as Link
 # status, even though its Driver Resource belongs to the Link package.
 PEER_RELATION=""

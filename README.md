@@ -556,7 +556,9 @@ delete；原 path 随后可以重新使用。
 
 Action、Relation、Driver、ServiceAccount 和 Role 都拥有 Manifest 下的独立
 Path。Manifest 安装时，KAS 根据 built-in Relation 的语义 role 自动创建
-Manifest 到初始化 Resource、Driver 到 ServiceAccount 的受保护 Link；RBAC
+Manifest 到初始化 Resource、Driver 到 ServiceAccount 的受保护 Link；签发
+Driver Credential 时还会在同一事务中创建 Driver 到 Credential 的受保护
+Link；RBAC
 授权本身直接由 Subject 到 Role 的 role-binding Link 表达。创建 Run 时，KAS 同样创建 Run 到目标
 Resource、Action 和 Driver 的受保护 Link。Resource 的类型身份直接由
 envelope 中不可变的 `manifest` path 表达，不再重复创建类型 Link。
@@ -587,7 +589,11 @@ Event 是平台维护的内部持久化审计日志，只能随业务对象事�
 Driver 使用 `/drivers/connect?path=...&generation=N` 建立带 Bearer Token 的
 WebSocket，不再依赖 claim 轮询。控制面主动推送 reconcile、Run 和 stop，
 Driver 在同一连接上返回 ack、mutation、`reconcile_complete` 和自动
-heartbeat。每个 reconcile delivery 只包含一个 Resource；一个连接默认最多
+heartbeat。Driver Credential 默认不设置时间过期点，它仅在对应的受保护
+Driver→Credential Link 仍存在、Driver generation 相同且进程处于可连接状态
+时有效；停止、重启或撤销 Credential 会使 REST 请求和既有 WebSocket
+连接失效。普通 Credential 的 `expires_at` 仍是可选字段。每个 reconcile
+delivery 只包含一个 Resource；一个连接默认最多
 并行处理 16 个 delivery，因此一个慢 Resource 不会阻塞其他 Resource。
 in-flight delivery 仅存在于当前 API 进程内；连接断开、Driver 内部任务退出
 或进程重启时，KAS 在 15 秒租约到期后使用同一个 `delivery_id` 重投。

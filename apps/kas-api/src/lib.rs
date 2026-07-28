@@ -633,7 +633,7 @@ async fn connect_driver(
 
 async fn serve_driver_socket(
     state: AppState,
-    auth: AuthContext,
+    mut auth: AuthContext,
     driver_path: String,
     generation: u64,
     connection_id: Uuid,
@@ -694,6 +694,22 @@ async fn serve_driver_socket(
             eprintln!("Driver {driver_path} WebSocket superseded by a newer connection");
             break;
         }
+        auth = match lock(&state).and_then(|store| {
+            store
+                .authenticate_credential(&auth.credential_path)
+                .map_err(Into::into)
+        }) {
+            Ok(refreshed)
+                if refreshed.driver_path.as_deref() == Some(driver_path.as_str())
+                    && refreshed.driver_generation == Some(generation) =>
+            {
+                refreshed
+            }
+            _ => {
+                eprintln!("Driver {driver_path} WebSocket credential is no longer valid");
+                break;
+            }
+        };
         let driver = match lock(&state)
             .and_then(|store| store.get_driver(&driver_path).map_err(Into::into))
         {
