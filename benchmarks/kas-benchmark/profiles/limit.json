@@ -1,0 +1,29 @@
+{
+  "name": "limit",
+  "scenario": {
+    "resources": 1000,
+    "manifests": 20,
+    "drivers": 8,
+    "resource_bytes": 1024,
+    "spec_fields": 16,
+    "spec_depth": 3,
+    "watch_fanout": 2,
+    "write_concurrency": 16,
+    "read_concurrency": 16,
+    "duration_seconds": 15,
+    "reconcile_delay_ms": 0,
+    "get_ratio": 70,
+    "list_ratio": 10,
+    "update_ratio": 20,
+    "convergence_timeout_seconds": 300,
+    "keep_data": false
+  },
+  "limit": {
+    "dimension": "resources",
+    "start": 1000,
+    "max": 1000000,
+    "multiplier": 2,
+    "repetitions": 3,
+    "required_passes": 2
+  }
+}

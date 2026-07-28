@@ -1,0 +1,30 @@
+{
+  "name": "smoke",
+  "scenario": {
+    "resources": 100,
+    "manifests": 4,
+    "drivers": 2,
+    "resource_bytes": 1024,
+    "spec_fields": 8,
+    "spec_depth": 3,
+    "watch_fanout": 1,
+    "write_concurrency": 4,
+    "read_concurrency": 4,
+    "duration_seconds": 2,
+    "reconcile_delay_ms": 0,
+    "get_ratio": 70,
+    "list_ratio": 10,
+    "update_ratio": 20,
+    "convergence_timeout_seconds": 30,
+    "keep_data": false
+  },
+  "slo": {
+    "max_error_rate": 0.01,
+    "get_p95_ms": 200,
+    "write_p95_ms": 500,
+    "reconcile_p95_ms": 2000,
+    "reconcile_p99_ms": 5000,
+    "idle_api_cpu_percent": 60,
+    "steady_api_cpu_percent": 120
+  }
+}

@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     }
     let name = arguments.next().unwrap_or_else(|| "admin".into());
     let database = env::var("KAS_DATABASE").unwrap_or_else(|_| ".data/kas.db".into());
-    let credential = Store::open(database)?.bootstrap_admin(&name)?;
+    let credential = Store::open_database(&database)?.bootstrap_admin(&name)?;
     println!("{}", credential.token);
     Ok(())
 }

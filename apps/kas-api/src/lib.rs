@@ -28,6 +28,7 @@ use kas_driver::{ClientMessage, MutationError, MutationStatus, ServerMessage};
 use kas_store::{Store, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod package;
@@ -47,6 +48,7 @@ struct AppState {
     driver_connections: Arc<Mutex<HashMap<String, Uuid>>>,
     data_dir: PathBuf,
     supervisor: Supervisor,
+    reconcile_notify: Arc<Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +75,7 @@ pub fn app(store: Store) -> Router {
 
 pub fn app_with_config(store: Store, config: AppConfig) -> Router {
     let store = Arc::new(Mutex::new(store));
+    let reconcile_notify = Arc::new(Notify::new());
     let supervisor = Supervisor::spawn(
         store.clone(),
         config.api_url.clone(),
@@ -83,6 +86,7 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
         driver_connections: Arc::new(Mutex::new(HashMap::new())),
         data_dir: config.data_dir,
         supervisor,
+        reconcile_notify,
     };
     recover_drivers(&state);
     let protected = Router::new()
@@ -270,10 +274,9 @@ async fn create_resource(
 ) -> ApiResult<(StatusCode, Json<Resource>)> {
     let auth = authenticate(&state, &headers)?;
     authorize_planned_resource(&auth, &input, "create")?;
-    Ok((
-        StatusCode::CREATED,
-        Json(lock(&state)?.create_resource(input)?),
-    ))
+    let resource = lock(&state)?.create_resource(input)?;
+    notify_reconcile(&state);
+    Ok((StatusCode::CREATED, Json(resource)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,7 +317,9 @@ async fn update_resource(
         return Err(forbidden());
     }
     authorize_role_binding(&auth, &current.manifest, &input.spec)?;
-    Ok(Json(lock(&state)?.update_resource(&query.path, input)?))
+    let resource = lock(&state)?.update_resource(&query.path, input)?;
+    notify_reconcile(&state);
+    Ok(Json(resource))
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,9 +341,9 @@ async fn delete_resource(
         "delete",
         Some(&current.path),
     )?;
-    Ok(Json(
-        lock(&state)?.delete_resource(&query.path, query.expected_revision)?,
-    ))
+    let resource = lock(&state)?.delete_resource(&query.path, query.expected_revision)?;
+    notify_reconcile(&state);
+    Ok(Json(resource))
 }
 
 async fn install_package(
@@ -378,6 +383,7 @@ async fn install_package(
         installed.size_bytes,
         MANIFEST_PACKAGE_MEDIA_TYPE,
     )?;
+    notify_reconcile(&state);
     if let Some(driver_path) = driver_path {
         let driver = lock(&state)?.get_driver(&driver_path)?;
         if driver.metadata.state == "running" {
@@ -412,6 +418,7 @@ async fn control_driver(
     match input.state {
         DriverControlState::Running => {
             let driver = lock(&state)?.start_driver(&input.path)?;
+            notify_reconcile(&state);
             let generation = lock(&state)?.driver_generation(&input.path)?;
             let launch = driver_launch(&state, driver.clone(), Some(generation))?;
             state
@@ -422,6 +429,7 @@ async fn control_driver(
         }
         DriverControlState::Stopped => {
             let driver = lock(&state)?.stop_driver(&input.path)?;
+            notify_reconcile(&state);
             state.supervisor.stop(input.path).map_err(internal_error)?;
             Ok(Json(driver))
         }
@@ -445,10 +453,9 @@ async fn issue_driver_credential(
         "update",
         Some(&input.path),
     )?;
-    Ok((
-        StatusCode::CREATED,
-        Json(lock(&state)?.issue_driver_credential(&input.path)?),
-    ))
+    let credential = lock(&state)?.issue_driver_credential(&input.path)?;
+    notify_reconcile(&state);
+    Ok((StatusCode::CREATED, Json(credential)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,10 +477,9 @@ async fn issue_credential(
         "update",
         Some(&subject.path),
     )?;
-    Ok((
-        StatusCode::CREATED,
-        Json(lock(&state)?.issue_credential(&input.subject, input.expires_at)?),
-    ))
+    let credential = lock(&state)?.issue_credential(&input.subject, input.expires_at)?;
+    notify_reconcile(&state);
+    Ok((StatusCode::CREATED, Json(credential)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -551,76 +557,95 @@ async fn serve_driver_socket(
         return;
     }
 
-    let mut interval = tokio::time::interval(Duration::from_millis(25));
     let mut ping = tokio::time::interval(Duration::from_secs(30));
     ping.tick().await;
     let mut in_flight = None;
     let mut stop_delivery = None;
     let mut stop_acked = false;
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                if !is_current_connection(&state, &driver_path, connection_id) {
-                    break;
-                }
-                let driver = match lock(&state).and_then(|store| store.get_driver(&driver_path).map_err(Into::into)) {
-                    Ok(driver) => driver,
-                    Err(_) => break,
-                };
-                let current_state = match decode_driver_state(&driver) {
-                    Ok(driver_state)
-                        if lock(&state)
-                            .and_then(|store| store.driver_generation(&driver_path).map_err(Into::into))
-                            .is_ok_and(|current| current == generation) => driver_state,
-                    _ => break,
-                };
-                match current_state {
-                    DriverState::Running if in_flight.is_none() => {
-                        let delivery = match lock(&state).and_then(|mut store| {
-                            store.claim_driver_delivery(&driver_path, generation).map_err(Into::into)
-                        }) {
-                            Ok(delivery) => delivery,
-                            Err(error) => {
-                                eprintln!("Driver {driver_path} delivery claim failed: {}", error.1);
-                                break;
-                            }
-                        };
-                        if let Some(delivery) = delivery {
-                            let message = match delivery.work {
-                                DriverWork::Reconcile { resource, .. } => ServerMessage::Reconcile {
-                                    delivery_id: delivery.id,
-                                    resource,
-                                },
-                                DriverWork::Run { run, resource, action } => ServerMessage::Run {
-                                    delivery_id: delivery.id,
-                                    run,
-                                    resource,
-                                    action,
-                                },
-                            };
-                            if send_server_message(&mut socket, &message).await.is_err() {
-                                break;
-                            }
-                            in_flight = Some(delivery.id);
-                        }
+        // Register before checking the queue so a write between the claim and
+        // `select!` cannot be missed by this connection.
+        let notified = state.reconcile_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        if !is_current_connection(&state, &driver_path, connection_id) {
+            break;
+        }
+        let driver = match lock(&state)
+            .and_then(|store| store.get_driver(&driver_path).map_err(Into::into))
+        {
+            Ok(driver) => driver,
+            Err(_) => break,
+        };
+        let current_state = match decode_driver_state(&driver) {
+            Ok(driver_state)
+                if lock(&state)
+                    .and_then(|store| store.driver_generation(&driver_path).map_err(Into::into))
+                    .is_ok_and(|current| current == generation) =>
+            {
+                driver_state
+            }
+            _ => break,
+        };
+        match current_state {
+            DriverState::Running if in_flight.is_none() => {
+                let delivery = match lock(&state).and_then(|mut store| {
+                    store
+                        .claim_driver_delivery(&driver_path, generation)
+                        .map_err(Into::into)
+                }) {
+                    Ok(delivery) => delivery,
+                    Err(error) => {
+                        eprintln!("Driver {driver_path} delivery claim failed: {}", error.1);
+                        break;
                     }
-                    DriverState::Stopping if stop_delivery.is_none() => {
-                        let delivery_id = Uuid::new_v4();
-                        if send_server_message(
-                            &mut socket,
-                            &ServerMessage::Stop { delivery_id, generation },
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                        stop_delivery = Some(delivery_id);
+                };
+                if let Some(delivery) = delivery {
+                    let message = match delivery.work {
+                        DriverWork::Reconcile { resource, .. } => ServerMessage::Reconcile {
+                            delivery_id: delivery.id,
+                            resource,
+                        },
+                        DriverWork::Run {
+                            run,
+                            resource,
+                            action,
+                        } => ServerMessage::Run {
+                            delivery_id: delivery.id,
+                            run,
+                            resource,
+                            action,
+                        },
+                    };
+                    if send_server_message(&mut socket, &message).await.is_err() {
+                        break;
                     }
-                    DriverState::Stopped | DriverState::Failed => break,
-                    _ => {}
+                    in_flight = Some(delivery.id);
                 }
             }
+            DriverState::Stopping if stop_delivery.is_none() => {
+                let delivery_id = Uuid::new_v4();
+                if send_server_message(
+                    &mut socket,
+                    &ServerMessage::Stop {
+                        delivery_id,
+                        generation,
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+                stop_delivery = Some(delivery_id);
+            }
+            DriverState::Stopped | DriverState::Failed => break,
+            _ => {}
+        }
+
+        tokio::select! {
+            _ = &mut notified => {}
             _ = ping.tick() => {
                 if send_server_message(&mut socket, &ServerMessage::Ping).await.is_err() {
                     break;
@@ -723,6 +748,7 @@ fn handle_driver_message(
                         metadata,
                     },
                 )?;
+                notify_reconcile(state);
             } else if current_state == DriverState::Running {
                 lock(state)?.heartbeat_driver(driver_path, generation)?;
             } else {
@@ -760,6 +786,7 @@ fn handle_driver_message(
             let (status, results, error) = match outcome {
                 Ok(results) => {
                     *in_flight = None;
+                    notify_reconcile(state);
                     (MutationStatus::Committed, results, None)
                 }
                 Err(error) => (
@@ -784,6 +811,7 @@ fn handle_driver_message(
                 return Err(forbidden());
             }
             lock(state)?.mark_driver_stopped(driver_path, generation)?;
+            notify_reconcile(state);
         }
         ClientMessage::Pong => {
             lock(state)?.heartbeat_driver(driver_path, generation)?;
@@ -973,6 +1001,10 @@ fn is_current_connection(state: &AppState, driver_path: &str, connection_id: Uui
         .ok()
         .and_then(|connections| connections.get(driver_path).copied())
         == Some(connection_id)
+}
+
+fn notify_reconcile(state: &AppState) {
+    state.reconcile_notify.notify_waiters();
 }
 
 async fn send_server_message(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
