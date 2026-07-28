@@ -644,6 +644,78 @@ post_resource "$(
     }'
 )" >/dev/null
 wait_for_state "$TELEGRAM_CONFIG_PATH" available >/dev/null
+jq -e '
+  .spec.bot_username == "kas_e2e_bot"
+' <<<"$(get_resource "$TELEGRAM_CONFIG_PATH")" >/dev/null
+
+# A KAS User generates a one-time challenge and proves control of a Telegram
+# account by opening the Bot deep link in a private chat. The resulting Link is
+# the durable identity mapping; Telegram usernames are display-only.
+TELEGRAM_USER_ID=9001
+TELEGRAM_PRIVATE_CHAT_ID=9001
+TELEGRAM_BINDING_TOKEN="telegram-binding-e2e-token"
+TELEGRAM_BINDING_HASH="$(
+  printf '%s' "$TELEGRAM_BINDING_TOKEN" | shasum -a 256 | awk '{print $1}'
+)"
+TELEGRAM_BINDING_CHALLENGE="/users/platform-admin/links/telegram-bindings/e2e"
+TELEGRAM_USER_PATH="/users/telegram/$TELEGRAM_USER_ID"
+TELEGRAM_USER_BINDING="/users/platform-admin/links/telegram/telegram-e2e"
+create_link \
+  "$TELEGRAM_BINDING_CHALLENGE" \
+  "/manifests/telegram/relations/binding-request" \
+  "/users/platform-admin" \
+  "$TELEGRAM_CONFIG_PATH" \
+  "$(
+    jq -cn \
+      --arg token_hash "$TELEGRAM_BINDING_HASH" \
+      --arg expires_at "2099-01-01T00:00:00Z" '{
+        token_hash: $token_hash,
+        expires_at: $expires_at
+      }'
+  )"
+request --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n \
+      --arg token "$TELEGRAM_BINDING_TOKEN" \
+      --argjson user_id "$TELEGRAM_USER_ID" \
+      --argjson chat_id "$TELEGRAM_PRIVATE_CHAT_ID" '{
+        update_id: 4999,
+        message: {
+          message_id: 1,
+          chat: {id: $chat_id},
+          from: {
+            id: $user_id,
+            is_bot: false,
+            first_name: "Telegram",
+            last_name: "Admin",
+            username: "telegram_admin"
+          },
+          text: ("/start " + $token)
+        }
+      }'
+  )" \
+  "$TELEGRAM_API/test/enqueue" >/dev/null
+for path in "$TELEGRAM_USER_PATH" "$TELEGRAM_USER_BINDING"; do
+  for _ in $(seq 1 800); do
+    if get_resource "$path" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.05
+  done
+  get_resource "$path" >/dev/null
+done
+jq -e \
+  --arg config "$TELEGRAM_CONFIG_PATH" \
+  --arg target "$TELEGRAM_USER_PATH" \
+  --argjson user_id "$TELEGRAM_USER_ID" '
+    .spec.relation == "/manifests/telegram/relations/user-binding"
+    and .spec.source == "/users/platform-admin"
+    and .spec.target == $target
+    and .spec.metadata.configuration == $config
+    and .spec.metadata.user_id == $user_id
+    and .spec.metadata.private_chat_id == $user_id
+  ' <<<"$(get_resource "$TELEGRAM_USER_BINDING")" >/dev/null
 
 TELEGRAM_THREAD_PATH="/threads/telegram-e2e"
 TELEGRAM_TOPIC_LINK="$TELEGRAM_THREAD_PATH/links/telegram/telegram-e2e"
@@ -798,6 +870,13 @@ jq -e '
   }
 ' <<<"$(get_resource "$TELEGRAM_MESSAGE_PATH")" >/dev/null
 jq -e \
+  --arg message "$TELEGRAM_MESSAGE_PATH" '
+    .spec.relation == "/manifests/message/relations/authored-by"
+    and .spec.source == $message
+    and .spec.target == "/users/platform-admin"
+  ' \
+  <<<"$(get_resource "$TELEGRAM_MESSAGE_PATH/links/author")" >/dev/null
+jq -e \
   --arg message "$TELEGRAM_MESSAGE_PATH" \
   --arg agent "$PREVIEW_AGENT_PATH" '
     .spec.relation == "/manifests/message/relations/mentioned"
@@ -870,6 +949,58 @@ jq -e \
 wait_for_state \
   "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e" \
   available >/dev/null
+
+# Attachments may be created after the Message has already been copied. The
+# attachment Link must trigger another reconcile without duplicating the text.
+create_link "$TELEGRAM_OUTBOUND_PATH/links/attachments/e2e-input" \
+  "/manifests/file/relations/attached-to" \
+  "$FILE_PATH" \
+  "$TELEGRAM_OUTBOUND_PATH"
+for _ in $(seq 1 800); do
+  TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+  if jq -e \
+    --arg chat "$TELEGRAM_CHAT_ID" \
+    --arg topic "$TELEGRAM_TOPIC_ID" '
+      any(.[ ];
+        .method == "sendDocument"
+        and .request.chat_id == $chat
+        and .request.message_thread_id == $topic
+        and .request.document.filename == "attachment.bin"
+        and .request.document.content_type == "application/octet-stream"
+        and .request.document.size > 0
+      )
+    ' <<<"$TELEGRAM_REQUESTS" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  --arg chat "$TELEGRAM_CHAT_ID" \
+  --arg topic "$TELEGRAM_TOPIC_ID" '
+    any(.[ ];
+      .method == "sendDocument"
+      and .request.chat_id == $chat
+      and .request.message_thread_id == $topic
+      and .request.document.filename == "attachment.bin"
+      and .request.document.content_type == "application/octet-stream"
+      and .request.document.size > 0
+    )
+  ' <<<"$TELEGRAM_REQUESTS" >/dev/null
+for _ in $(seq 1 800); do
+  TELEGRAM_COPY="$(get_resource \
+    "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e")"
+  if jq -e --arg file "$FILE_PATH" '
+    (.spec.metadata.attachment_paths | index($file)) != null
+    and (.spec.metadata.message_ids | length) == 2
+  ' <<<"$TELEGRAM_COPY" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e --arg file "$FILE_PATH" '
+  (.spec.metadata.attachment_paths | index($file)) != null
+  and (.spec.metadata.message_ids | length) == 2
+' <<<"$TELEGRAM_COPY" >/dev/null
 
 # The KAS Thread is authoritative for a managed Topic's display name.
 TELEGRAM_RENAMED_TOPIC="E2E Renamed Topic"
@@ -1078,15 +1209,96 @@ assert_approval_link \
   "$OBSERVER_PATH"
 assert_no_per_approval_rbac "$APPROVAL_PATH"
 
-APPROVAL_DECISION="$(
-  request --fail-with-body --silent --show-error \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"decision":"approve"}' \
-    "$APPROVAL_API/approvals/decide?path=$APPROVAL_PATH&expected_revision=$APPROVAL_REVISION"
+# The bound Telegram account receives a private inline keyboard. Its callback is
+# executed as the mapped KAS User through a short-lived Credential, which is
+# revoked immediately after the Approval API returns.
+TELEGRAM_APPROVAL_SENT=""
+for _ in $(seq 1 800); do
+  TELEGRAM_APPROVAL_SENT="$(
+    request --fail --silent "$TELEGRAM_API/test/sent" |
+      jq -c \
+        --argjson chat "$TELEGRAM_PRIVATE_CHAT_ID" '
+          first(
+            .[]
+            | select(
+                .request.chat_id == $chat
+                and (.request.text | startswith("KAS Approval"))
+                and (.request.reply_markup.inline_keyboard | length) == 1
+              )
+          ) // empty
+        '
+  )"
+  if [[ -n "$TELEGRAM_APPROVAL_SENT" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+[[ -n "$TELEGRAM_APPROVAL_SENT" ]]
+TELEGRAM_APPROVAL_MESSAGE_ID="$(jq -r '.message_id' <<<"$TELEGRAM_APPROVAL_SENT")"
+TELEGRAM_APPROVAL_TEXT="$(jq -r '.request.text' <<<"$TELEGRAM_APPROVAL_SENT")"
+TELEGRAM_APPROVAL_CALLBACK="$(
+  jq -r '.request.reply_markup.inline_keyboard[0][0].callback_data' \
+    <<<"$TELEGRAM_APPROVAL_SENT"
 )"
-APPROVAL_DECISION_PATH="$(jq -r '.path' <<<"$APPROVAL_DECISION")"
-jq -e \
+[[ "$TELEGRAM_APPROVAL_CALLBACK" == kas-approval:approve:* ]]
+request --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n \
+      --arg id "approval-e2e-callback" \
+      --arg data "$TELEGRAM_APPROVAL_CALLBACK" \
+      --arg text "$TELEGRAM_APPROVAL_TEXT" \
+      --argjson user_id "$TELEGRAM_USER_ID" \
+      --argjson chat_id "$TELEGRAM_PRIVATE_CHAT_ID" \
+      --argjson message_id "$TELEGRAM_APPROVAL_MESSAGE_ID" '{
+        update_id: 6000,
+        callback_query: {
+          id: $id,
+          from: {
+            id: $user_id,
+            is_bot: false,
+            first_name: "Telegram",
+            last_name: "Admin",
+            username: "telegram_admin"
+          },
+          message: {
+            message_id: $message_id,
+            chat: {id: $chat_id},
+            from: {
+              id: 7000001,
+              is_bot: true,
+              first_name: "KAS E2E",
+              username: "kas_e2e_bot"
+            },
+            text: $text
+          },
+          data: $data
+        }
+      }'
+  )" \
+  "$TELEGRAM_API/test/enqueue" >/dev/null
+APPROVAL_DECISION_PATH=""
+for _ in $(seq 1 800); do
+  APPROVAL_DECISION_PATH="$(
+    approval_link_source \
+      "/manifests/approval/relations/decides" \
+      "$APPROVAL_PATH" 2>/dev/null || true
+  )"
+  if [[ -n "$APPROVAL_DECISION_PATH" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+[[ -n "$APPROVAL_DECISION_PATH" ]]
+APPROVAL_DECISION=""
+for _ in $(seq 1 800); do
+  APPROVAL_DECISION="$(get_resource "$APPROVAL_DECISION_PATH")"
+  if [[ "$(jq -r '.spec.outcome' <<<"$APPROVAL_DECISION")" == "succeeded" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if ! jq -e \
   --arg decision_prefix "/approvals/users/platform-admin/decisions/" '
     (.path | startswith($decision_prefix))
     and .metadata.manifest == "/manifests/approval"
@@ -1096,7 +1308,35 @@ jq -e \
     and (.spec | has("decided_by") | not)
     and (.spec | has("result_path") | not)
     and .spec.error == null
-  ' <<<"$APPROVAL_DECISION" >/dev/null
+  ' <<<"$APPROVAL_DECISION" >/dev/null; then
+  echo "Unexpected Telegram Approval Decision:" >&2
+  jq . <<<"$APPROVAL_DECISION" >&2
+  false
+fi
+TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+jq -e '
+  any(.[];
+    .method == "answerCallbackQuery"
+    and .request.callback_query_id == "approval-e2e-callback"
+  )
+  and any(.[];
+    .method == "editMessageText"
+    and (.request.text | endswith("Result: succeeded"))
+    and .request.reply_markup.inline_keyboard == []
+  )
+' <<<"$TELEGRAM_REQUESTS" >/dev/null
+request --fail-with-body --silent --show-error --get \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode "manifest=/builtin/credential" \
+  "$API/resources" |
+  jq -e '
+    any(.[];
+      .spec.subject == "/users/platform-admin"
+      and .spec.expires_at != null
+      and .spec.revoked_at != null
+      and .metadata.state == "revoked"
+    )
+  ' >/dev/null
 assert_approval_link \
   "/manifests/approval/relations/decides" \
   "$APPROVAL_DECISION_PATH" \

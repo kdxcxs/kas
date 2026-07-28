@@ -1,0 +1,57 @@
+{
+  "path": "./relations/user-binding",
+  "metadata": {
+    "manifest": "/builtin/relation",
+    "name": "telegram-user-binding"
+  },
+  "spec": {
+    "inverse_name": "bound-kas-user",
+    "sources": [
+      {
+        "manifest": "/builtin/user",
+        "paths": [
+          "/users/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/builtin/user",
+        "paths": [
+          "/users/telegram/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "on_target_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "required": [
+        "configuration",
+        "user_id",
+        "private_chat_id",
+        "bound_at"
+      ],
+      "properties": {
+        "configuration": {
+          "type": "string",
+          "pattern": "^/telegram/"
+        },
+        "user_id": {
+          "type": "integer"
+        },
+        "private_chat_id": {
+          "type": "integer"
+        },
+        "username": {
+          "type": "string"
+        },
+        "bound_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -13,6 +13,7 @@
           "/manifests/thread",
           "/manifests/message",
           "/manifests/agent",
+          "/manifests/approval",
           "/builtin/user"
         ],
         "verbs": [
@@ -26,7 +27,20 @@
           "/threads/**",
           "/messages/**",
           "/agents/**",
-          "/users/telegram/**"
+          "/users/**",
+          "/approvals/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/manifests/file"
+        ],
+        "verbs": [
+          "get",
+          "download"
+        ],
+        "paths": [
+          "/files/**"
         ]
       },
       {
@@ -37,13 +51,15 @@
           "get",
           "list",
           "create",
-          "update"
+          "update",
+          "delete"
         ],
         "paths": [
           "/telegram/**",
           "/threads/**",
           "/messages/**",
-          "/users/telegram/**"
+          "/users/**",
+          "/approvals/**"
         ]
       }
     ]

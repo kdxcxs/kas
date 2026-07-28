@@ -1,0 +1,46 @@
+{
+  "path": "./relations/binding-request",
+  "metadata": {
+    "manifest": "/builtin/relation",
+    "name": "telegram-binding-request"
+  },
+  "spec": {
+    "inverse_name": "requested-telegram-binding",
+    "sources": [
+      {
+        "manifest": "/builtin/user",
+        "paths": [
+          "/users/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/telegram/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "on_target_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "required": [
+        "token_hash",
+        "expires_at"
+      ],
+      "properties": {
+        "token_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

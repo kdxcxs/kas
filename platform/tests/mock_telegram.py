@@ -7,6 +7,8 @@ import argparse
 import json
 import threading
 import time
+from email.parser import BytesParser
+from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -32,11 +34,33 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
-    def read_json(self) -> dict[str, Any]:
+    def read_request(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length == 0:
             return {}
-        value = json.loads(self.rfile.read(length))
+        content_type = self.headers.get("Content-Type", "")
+        payload = self.rfile.read(length)
+        if content_type.startswith("multipart/form-data"):
+            message = BytesParser(policy=default).parsebytes(
+                f"Content-Type: {content_type}\r\n\r\n".encode() + payload
+            )
+            value: dict[str, Any] = {}
+            for part in message.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                if not name:
+                    continue
+                content = part.get_payload(decode=True) or b""
+                filename = part.get_filename()
+                if filename is None:
+                    value[name] = content.decode()
+                else:
+                    value[name] = {
+                        "filename": filename,
+                        "content_type": part.get_content_type(),
+                        "size": len(content),
+                    }
+            return value
+        value = json.loads(payload)
         if not isinstance(value, dict):
             raise ValueError("request body must be a JSON object")
         return value
@@ -74,7 +98,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         try:
-            body = self.read_json()
+            body = self.read_request()
         except (json.JSONDecodeError, ValueError) as error:
             self.write_json(400, {"ok": False, "description": str(error)})
             return
@@ -127,7 +151,14 @@ class Handler(BaseHTTPRequestHandler):
                     ]
             self.write_json(200, {"ok": True, "result": updates})
             return
-        if method == "sendMessage":
+        if method in {
+            "sendMessage",
+            "sendPhoto",
+            "sendVideo",
+            "sendAudio",
+            "sendAnimation",
+            "sendDocument",
+        }:
             with STATE.condition:
                 message_id = STATE.next_message_id
                 STATE.next_message_id += 1
@@ -139,8 +170,47 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "result": {
                         "message_id": message_id,
-                        "message_thread_id": body.get("message_thread_id"),
+                        "message_thread_id": (
+                            int(body["message_thread_id"])
+                            if body.get("message_thread_id") is not None
+                            else None
+                        ),
                         "chat": {"id": int(body["chat_id"])},
+                        "from": {
+                            "id": 7_000_001,
+                            "is_bot": True,
+                            "first_name": "KAS E2E",
+                            "username": "kas_e2e_bot",
+                        },
+                        "text": body.get("text", ""),
+                        "caption": body.get("caption"),
+                    },
+                },
+            )
+            return
+        if method == "answerCallbackQuery":
+            self.write_json(200, {"ok": True, "result": True})
+            return
+        if method == "editMessageText":
+            message_id = int(body["message_id"])
+            chat_id = int(body["chat_id"])
+            with STATE.condition:
+                for sent in STATE.sent:
+                    if (
+                        int(sent["message_id"]) == message_id
+                        and int(sent["request"]["chat_id"]) == chat_id
+                    ):
+                        sent["request"]["text"] = body.get("text", "")
+                        sent["request"]["reply_markup"] = body.get("reply_markup")
+                        break
+                STATE.condition.notify_all()
+            self.write_json(
+                200,
+                {
+                    "ok": True,
+                    "result": {
+                        "message_id": message_id,
+                        "chat": {"id": chat_id},
                         "from": {
                             "id": 7_000_001,
                             "is_bot": True,

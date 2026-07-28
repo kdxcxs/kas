@@ -1,0 +1,60 @@
+{
+  "path": "./relations/approval-delivery",
+  "metadata": {
+    "manifest": "/builtin/relation",
+    "name": "telegram-approval-delivery"
+  },
+  "spec": {
+    "inverse_name": "telegram-approval-recipient",
+    "sources": [
+      {
+        "manifest": "/manifests/approval",
+        "paths": [
+          "/approvals/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/builtin/user",
+        "paths": [
+          "/users/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "on_target_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "required": [
+        "configuration",
+        "telegram_user_id",
+        "private_chat_id",
+        "callback_token_hash"
+      ],
+      "properties": {
+        "configuration": {
+          "type": "string",
+          "pattern": "^/telegram/"
+        },
+        "telegram_user_id": {
+          "type": "integer"
+        },
+        "private_chat_id": {
+          "type": "integer"
+        },
+        "callback_token_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "message_id": {
+          "type": "integer"
+        },
+        "outcome": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

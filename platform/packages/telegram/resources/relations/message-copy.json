@@ -45,6 +45,14 @@
             "minimum": 1
           }
         },
+        "attachment_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/files/"
+          },
+          "uniqueItems": true
+        },
         "update_id": {
           "type": "integer",
           "minimum": 0

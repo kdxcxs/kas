@@ -35,6 +35,10 @@
       "api_base": {
         "type": "string",
         "minLength": 1
+      },
+      "bot_username": {
+        "type": "string",
+        "minLength": 1
       }
     },
     "additionalProperties": false

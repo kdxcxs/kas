@@ -60,6 +60,8 @@
     import.meta.env.VITE_KAS_APPROVAL_API_URL || '/approvals-api';
   const TELEGRAM_MANIFEST = '/manifests/telegram';
   const TELEGRAM_THREAD_TOPIC = '/manifests/telegram/relations/thread-topic';
+  const TELEGRAM_BINDING_REQUEST = '/manifests/telegram/relations/binding-request';
+  const TELEGRAM_USER_BINDING = '/manifests/telegram/relations/user-binding';
 
   interface Settings {
     apiBase: string;
@@ -108,6 +110,7 @@
   let approvalResults: Resource[] = [];
   let frontendPlugins: Resource[] = [];
   let telegramConfigurations: Resource[] = [];
+  let currentUser: Resource | null = null;
   let selectedTelegramPath = '';
   let createTelegramName = '';
   let createTelegramPath = '';
@@ -120,6 +123,8 @@
   let editTelegramMode = 'bidirectional';
   let editTelegramApiBase = '';
   let telegramMappingThreadPath = '';
+  let telegramBindingUrl = '';
+  let bindingTelegram = false;
   let savingTelegram = false;
   let deleteTelegramTarget: Resource | null = null;
   let selectedPlugin: FrontendPluginEntry | null = null;
@@ -198,6 +203,15 @@
         )
         .sort((left, right) => left.source.path.localeCompare(right.source.path))
     : [];
+  $: selectedTelegramBinding =
+    selectedTelegram && currentUser
+      ? (currentUser.links ?? []).find(
+          (link) =>
+            link.relation_path === TELEGRAM_USER_BINDING &&
+            link.source.path === currentUser?.path &&
+            link.metadata.configuration === selectedTelegram?.path
+        ) ?? null
+      : null;
   $: approvalRequests = approvals.filter((approval) => approval.spec.kind === 'request');
   $: selectedApproval =
     approvalRequests.find((approval) => approval.path === selectedApprovalPath) ?? null;
@@ -549,7 +563,8 @@
         approvalResources,
         approvalResultResources,
         frontendPluginResources,
-        telegramResources
+        telegramResources,
+        currentUserResource
       ] =
         await Promise.all([
           api.listResources(AGENT_MANIFEST),
@@ -561,8 +576,10 @@
           api.listResources(APPROVAL_MANIFEST),
           api.listResources(APPROVAL_RESULT_MANIFEST),
           api.listResources(FRONTEND_PLUGIN_MANIFEST),
-          api.listResources(TELEGRAM_MANIFEST)
+          api.listResources(TELEGRAM_MANIFEST),
+          api.getResource(settings.userPath, true)
         ]);
+      currentUser = currentUserResource;
       agents = agentResources
         .filter((resource) => resource.manifest === AGENT_MANIFEST)
         .sort((left, right) => left.name.localeCompare(right.name));
@@ -855,6 +872,7 @@
 
   function selectTelegramConfiguration(path: string): void {
     selectedTelegramPath = path;
+    telegramBindingUrl = '';
     const configuration = telegramConfigurations.find((candidate) => candidate.path === path);
     editTelegramToken = '';
     editTelegramChatId = configuration ? stringSpec(configuration, 'chat_id') : '';
@@ -873,13 +891,15 @@
     botToken: string,
     chatId: string,
     mode: string,
-    apiBase: string
+    apiBase: string,
+    botUsername = ''
   ): Record<string, unknown> {
     return {
       bot_token: botToken,
       chat_id: chatId,
       mode,
-      ...(apiBase ? { api_base: apiBase } : {})
+      ...(apiBase ? { api_base: apiBase } : {}),
+      ...(botUsername ? { bot_username: botUsername } : {})
     };
   }
 
@@ -950,7 +970,8 @@
           replacementToken || stringSpec(selectedTelegram, 'bot_token'),
           chatId,
           editTelegramMode,
-          apiBase
+          apiBase,
+          stringSpec(selectedTelegram, 'bot_username')
         )
       });
       await loadData();
@@ -1039,6 +1060,83 @@
       error = messageOf(cause);
     } finally {
       savingTelegram = false;
+    }
+  }
+
+  function randomTelegramBindingToken(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+  }
+
+  async function sha256Hex(value: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  async function createTelegramBindingRequest(): Promise<void> {
+    if (!selectedTelegram || !currentUser || bindingTelegram) return;
+    const botUsername = stringSpec(selectedTelegram, 'bot_username');
+    const configurationPath = selectedTelegram.path;
+    if (!botUsername) {
+      error = 'The Telegram Driver is still discovering the Bot username. Refresh and try again.';
+      return;
+    }
+    bindingTelegram = true;
+    error = '';
+    try {
+      const api = client();
+      const existingChallenges = (currentUser.links ?? []).filter(
+        (link) =>
+          link.relation_path === TELEGRAM_BINDING_REQUEST &&
+          link.target.path === configurationPath
+      );
+      await Promise.all(
+        existingChallenges.map((link) => api.deleteResource(link.path, link.revision))
+      );
+      const token = randomTelegramBindingToken();
+      await api.createLink({
+        path: `${currentUser.path}/links/telegram-bindings/${crypto.randomUUID()}`,
+        source: { kind: 'user', path: currentUser.path },
+        relation_path: TELEGRAM_BINDING_REQUEST,
+        target: { kind: 'resource', path: configurationPath },
+        metadata: {
+          token_hash: await sha256Hex(token),
+          expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+        }
+      });
+      telegramBindingUrl = `https://t.me/${botUsername}?start=${token}`;
+      await loadData(api);
+      selectTelegramConfiguration(configurationPath);
+      telegramBindingUrl = `https://t.me/${botUsername}?start=${token}`;
+      notice = 'Binding link created. Open it in Telegram within 10 minutes.';
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      bindingTelegram = false;
+    }
+  }
+
+  async function deleteTelegramBinding(): Promise<void> {
+    if (!selectedTelegramBinding || bindingTelegram) return;
+    bindingTelegram = true;
+    error = '';
+    const configurationPath = selectedTelegramPath;
+    try {
+      await client().deleteResource(
+        selectedTelegramBinding.path,
+        selectedTelegramBinding.revision
+      );
+      await loadData();
+      selectTelegramConfiguration(configurationPath);
+      notice = 'Telegram account was unbound';
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      bindingTelegram = false;
     }
   }
 
@@ -2770,6 +2868,74 @@
                   </button>
                 </div>
               </form>
+
+              <section class="telegram-account-binding" aria-label="Telegram account binding">
+                <header>
+                  <div>
+                    <strong>Your Telegram account</strong>
+                    <small>
+                      Bind Telegram to <code>{settings.userPath}</code> for attributed messages and
+                      private Approval buttons.
+                    </small>
+                  </div>
+                  {#if selectedTelegramBinding}
+                    <span class="state-pill">bound</span>
+                  {:else}
+                    <span class="state-pill pending">not bound</span>
+                  {/if}
+                </header>
+
+                {#if selectedTelegramBinding}
+                  <div class="telegram-binding-card">
+                    <div>
+                      <strong>
+                        {typeof selectedTelegramBinding.metadata.username === 'string' &&
+                        selectedTelegramBinding.metadata.username
+                          ? `@${selectedTelegramBinding.metadata.username}`
+                          : `Telegram ${selectedTelegramBinding.metadata.user_id}`}
+                      </strong>
+                      <code>{selectedTelegramBinding.target.path}</code>
+                      <small>
+                        Telegram user ID {String(selectedTelegramBinding.metadata.user_id)}
+                      </small>
+                    </div>
+                    <button
+                      class="danger-button"
+                      type="button"
+                      disabled={bindingTelegram}
+                      onclick={() => void deleteTelegramBinding()}
+                    >
+                      {bindingTelegram ? 'Unbinding…' : 'Unbind'}
+                    </button>
+                  </div>
+                {:else}
+                  <p class="telegram-managed-note">
+                    The link must be opened by you in a private chat with the Bot. Telegram usernames
+                    are display-only; the numeric Telegram user ID is bound to your KAS User.
+                  </p>
+                  <div class="telegram-binding-actions">
+                    <button
+                      class="quiet-button"
+                      type="button"
+                      disabled={bindingTelegram}
+                      onclick={() => void createTelegramBindingRequest()}
+                    >
+                      {bindingTelegram ? 'Generating…' : 'Generate binding link'}
+                    </button>
+                    {#if telegramBindingUrl}
+                      <a
+                        class="primary-button telegram-open-link"
+                        href={telegramBindingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open Telegram
+                      </a>
+                      <small>Expires in 10 minutes. Refresh after the Bot confirms the binding.</small>
+                    {/if}
+                  </div>
+                {/if}
+              </section>
 
               <section class="telegram-mappings" aria-label="Thread to Telegram Topic mappings">
                 <header>
