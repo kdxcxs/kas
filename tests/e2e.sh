@@ -22,6 +22,7 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+POLL_ATTEMPTS="${KAS_E2E_POLL_ATTEMPTS:-600}"
 E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-e2e.XXXXXX")"
 API_PID=""
 API_LOG="$E2E_DIR/kas-api.log"
@@ -166,7 +167,7 @@ cargo build -j 1 \
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
 export KAS_DATA_DIR="$E2E_DIR/data"
-export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
+export KAS_DATABASE="${KAS_E2E_DATABASE:-$KAS_DATA_DIR/kas.db}"
 export KAS_ADDRESS="127.0.0.1:$PORT"
 export KAS_API_URL="$API"
 
@@ -186,7 +187,7 @@ curl --fail --silent "$API/health" | jq -e '.ok == true' >/dev/null
 
 BUILTIN_DRIVER_PATH="/builtin/link/driver"
 BUILTIN_DRIVER=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   BUILTIN_DRIVER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -301,7 +302,7 @@ curl --fail --silent --get \
 DRIVER_PATH="/manifests/echo/driver"
 
 DRIVER=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   DRIVER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -362,7 +363,7 @@ curl --fail --silent --get \
 # The single built-in Relationship Driver owns Relation status as well as Link
 # status, even though its Driver Resource belongs to the Link package.
 PEER_RELATION=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   PEER_RELATION="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -386,7 +387,7 @@ echo "$PEER_RELATION" | jq -e '
 # A newly registered Driver must backfill Resources that already match its
 # watches. The admin User existed before the Echo package was installed.
 ADMIN_USER=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   ADMIN_USER="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -417,7 +418,7 @@ curl --fail --silent \
   "$API/packages" >/dev/null
 
 INTEGRATION_RESOURCE=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   INTEGRATION_RESOURCE="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -458,14 +459,21 @@ curl --fail --silent \
   ' >/dev/null
 
 RESOURCE=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   RESOURCE="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       --data-urlencode "path=$RESOURCE_PATH" \
       "$API/resources/by-path"
   )"
-  if [[ "$(echo "$RESOURCE" | jq -r '.status.metadata.state')" == "available" ]]; then
+  if echo "$RESOURCE" | jq -e --arg package "$PACKAGE_PATH" '
+    .spec == .status.spec
+    and .status.metadata.state == "available"
+    and .metadata["[kas]"].package == $package
+    and .status.metadata["[kas]"].package == $package
+    and .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
+    and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
+  ' >/dev/null; then
     break
   fi
   sleep 0.05
@@ -477,7 +485,10 @@ echo "$RESOURCE" | jq -e --arg package "$PACKAGE_PATH" '
   and .status.metadata["[kas]"].package == $package
   and .metadata["[kas]"].observed["/manifests/echo/driver"] == .status.metadata["[kas]"].observed["/manifests/echo/driver"]
   and .status.metadata["[kas]"].observed["/manifests/echo/driver"].resource_revision == .metadata["[kas]"].revision
-' >/dev/null
+' >/dev/null || {
+  echo "Resource reconciliation failed: $RESOURCE" >&2
+  false
+}
 
 LINK_PATH="/links/e2e/echo-self"
 curl --fail --silent \
@@ -500,7 +511,7 @@ curl --fail --silent \
   )" \
   "$API/resources" >/dev/null
 LINK=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   LINK="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -548,7 +559,7 @@ curl --fail --silent \
   )" \
   "$API/resources" >/dev/null
 INVALID_LINK=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   INVALID_LINK="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -600,7 +611,7 @@ curl --fail --silent \
   jq -e '.status.metadata.state == "queued"' >/dev/null
 
 RUN=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   RUN="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -712,7 +723,7 @@ echo "$UPDATED_RESOURCE" | jq -e \
   false
 }
 OLD_PACKAGE_STATUS=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   OLD_PACKAGE_STATUS="$(
     curl --silent --output "$E2E_DIR/old-package.json" --write-out "%{http_code}" \
       --get \
@@ -764,7 +775,7 @@ curl --fail --silent \
   )" \
   "$API/resources" >/dev/null
 UPDATED_RUN=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   UPDATED_RUN="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -807,7 +818,7 @@ curl --fail --silent --request DELETE \
   "$API/resources/by-path" |
   jq -e '.metadata.state == "deleted"' >/dev/null
 
-for _ in $(seq 1 200); do
+for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   RESOURCE_STATUS="$(
     curl --silent --output "$E2E_DIR/deleted-resource.json" --write-out "%{http_code}" \
       --get \
@@ -824,7 +835,7 @@ done
 
 for LINK_TO_DELETE in "$LINK_PATH" "$INVALID_LINK_PATH"; do
   LINK_STATUS=""
-  for _ in $(seq 1 200); do
+  for _ in $(seq 1 "$POLL_ATTEMPTS"); do
     LINK_STATUS="$(
       curl --silent --output "$E2E_DIR/deleted-link.json" --write-out "%{http_code}" \
         --get \
@@ -964,8 +975,10 @@ echo "$DRIVER" | jq -e '
   and .status.spec == .spec
 ' >/dev/null
 
-TABLES="$(sqlite3 "$KAS_DATABASE" \
-  "SELECT group_concat(name, ',') FROM (SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name)")"
-[[ "$TABLES" == "events,resources" ]]
+if [[ "${KAS_E2E_SKIP_STORAGE_ASSERT:-false}" != true ]]; then
+  TABLES="$(sqlite3 "$KAS_DATABASE" \
+    "SELECT group_concat(name, ',') FROM (SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name)")"
+  [[ "$TABLES" == "events,resources" ]]
+fi
 
 echo "KAS end-to-end test passed"

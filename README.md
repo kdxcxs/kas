@@ -37,9 +37,10 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 `spec` 只保存业务期望；生命周期状态、revision 和 Driver 消费进度都是
 平台 metadata。
 
-SQLite 中的 `resources` 表也严格保持这一形状，只包含 `path`、`metadata`、
-`spec`、`status` 四列；后三列是 JSON 文档。Manifest、Run、Link 等查询通过
-JSON expression index 加速，不再为平台字段维护平行列。
+数据库中的 `resources` 表也严格保持这一形状，只包含 `path`、`metadata`、
+`spec`、`status` 四列；后三列是 JSON 文档。SQLite 使用 JSON text，
+PostgreSQL 原生使用 `jsonb`。Manifest、Run、Link 等查询通过各后端的 JSON
+expression index 加速，不再为平台字段维护平行列。
 
 ## Manifest 是定义 Resource 的 Resource
 
@@ -104,7 +105,7 @@ Action、Relation、Link、Driver、Run、User、ServiceAccount、Role 和 Crede
 
 具体 Relation、Link、Role 或 Run 并不是 built-in；built-in 的是定义它们结构
 和平台语义的 Manifest。Relation 和 Link 都按普通 Resource 持久化，不在
-Store 中维护专用关系投影。SQLite 只保留 `resources` 和 `events` 两张表；
+Store 中维护专用关系投影。数据库只保留 `resources` 和 `events` 两张业务表；
 Driver、Run、RBAC、Package ownership 与 Credential 哈希均直接由 Resource
 表达。
 
@@ -207,7 +208,7 @@ Stopped → Starting → Ready → Stopping → Stopped
 ```text
 crates/kas-core    核心数据结构
 crates/kas-auth    数据库驱动的认证与 RBAC 模型
-crates/kas-store   SQLite 持久化
+crates/kas-store   SQLite/PostgreSQL 持久化、migration 与连接池
 crates/kas-driver  Driver 通用接口与持续运行的 Runtime
 apps/kas-admin     初始管理员工具
 apps/kas-migrate   独立数据库 Migration
@@ -267,6 +268,24 @@ cargo run -p kas-api
 ```
 
 `kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
+默认数据库是 `KAS_DATA_DIR/kas.db` 中的 SQLite；把三个命令的
+`KAS_DATABASE` 统一设置为 `postgres://` 或 `postgresql://` URL 即可使用
+PostgreSQL。例如：
+
+```bash
+export KAS_DATABASE=postgresql://kas:password@127.0.0.1:5432/kas
+export KAS_DATABASE_POOL_SIZE=16
+
+cargo run -p kas-migrate
+cargo run -p kas-admin -- bootstrap admin
+cargo run -p kas-api
+```
+
+PostgreSQL 使用原生 `jsonb`、`timestamptz`、expression/partial index 和
+连接池；SQLite 使用 WAL 和连接池。`KAS_DATABASE_POOL_SIZE` 默认是 16。
+Store 的 clone 共享短生命周期的内存 reconcile 状态，但数据库操作不再经过
+进程级全局 Store mutex。
+
 Store 打开数据库时会自动安装随 KAS 发布的
 [`builtins/`](builtins/) 中的独立 Manifest 文件。每个 built-in Manifest
 都由自己的 `builtins/{name}/manifest.json` 定义，初始化 Resource 分别保存于
@@ -368,7 +387,7 @@ entrypoint。Supervisor 管理 singleton、generation、临时 Credential、hell
 
 ## 权限
 
-权限规则同样以 Resource 保存到 SQLite，不从配置文件加载。User、
+权限规则同样以 Resource 保存到数据库，不从配置文件加载。User、
 ServiceAccount、Role 和 Credential 分别由对应的系统 Manifest 定义；授权
 关系是 `/builtin/relations/role-binding` 下的普通 Link。所有 API 默认拒绝，
 `/health` 除外。
@@ -645,6 +664,14 @@ cargo test --workspace
 tests/e2e.sh
 ```
 
+安装 Docker 后还可以用同一套黑盒流程验证 PostgreSQL；该脚本会启动临时
+PostgreSQL 17、验证新库原生 schema，并验证旧版 text schema 到
+`jsonb`/`timestamptz` 的升级：
+
+```bash
+tests/e2e-postgres.sh
+```
+
 脚本使用临时数据库和数据目录完成：
 
 ```text
@@ -689,7 +716,7 @@ WebSocket、执行 reconciliation、接收 Run 和上报结果，不会在完成
 `benchmarks/kas-benchmark` 是独立的黑盒 Benchmark crate。它启动真实
 `kas-api`、内置 Driver 和动态生成的 singleton Driver 进程，通过正式 HTTP
 接口安装 Package 和创建 Resource，并通过正式 WebSocket 协议完成 reconcile；
-测试代码不会直接访问 SQLite。
+测试代码不会直接访问数据库。
 
 运行短 smoke：
 
