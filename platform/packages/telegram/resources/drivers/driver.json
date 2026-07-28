@@ -31,7 +31,16 @@
         "paths": [
           "/threads/**/links/telegram/**",
           "/messages/**/links/telegram/**",
-          "/messages/**/links/message-thread"
+          "/messages/**/links/message-thread",
+          "/users/**/links/telegram/**",
+          "/users/**/links/telegram-bindings/**",
+          "/approvals/**/links/telegram/**"
+        ]
+      },
+      {
+        "manifest": "/manifests/approval",
+        "paths": [
+          "/approvals/**"
         ]
       }
     ],

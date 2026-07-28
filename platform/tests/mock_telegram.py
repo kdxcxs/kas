@@ -152,6 +152,40 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if method == "answerCallbackQuery":
+            self.write_json(200, {"ok": True, "result": True})
+            return
+        if method == "editMessageText":
+            message_id = int(body["message_id"])
+            chat_id = int(body["chat_id"])
+            with STATE.condition:
+                for sent in STATE.sent:
+                    if (
+                        int(sent["message_id"]) == message_id
+                        and int(sent["request"]["chat_id"]) == chat_id
+                    ):
+                        sent["request"]["text"] = body.get("text", "")
+                        sent["request"]["reply_markup"] = body.get("reply_markup")
+                        break
+                STATE.condition.notify_all()
+            self.write_json(
+                200,
+                {
+                    "ok": True,
+                    "result": {
+                        "message_id": message_id,
+                        "chat": {"id": chat_id},
+                        "from": {
+                            "id": 7_000_001,
+                            "is_bot": True,
+                            "first_name": "KAS E2E",
+                            "username": "kas_e2e_bot",
+                        },
+                        "text": body.get("text", ""),
+                    },
+                },
+            )
+            return
         if method == "createForumTopic":
             with STATE.condition:
                 topic_id = STATE.next_topic_id

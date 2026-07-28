@@ -105,6 +105,7 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
         .route("/drivers/credentials", post(issue_driver_credential))
         .route("/drivers/connect", get(connect_driver))
         .route("/credentials/issue", post(issue_credential))
+        .route("/credentials/revoke", post(revoke_credential))
         .route("/auth", get(auth_context))
         .route("/auth/check", post(check_authorization))
         .route_layer(middleware::from_fn_with_state(
@@ -480,6 +481,32 @@ async fn issue_credential(
     let credential = lock(&state)?.issue_credential(&input.subject, input.expires_at)?;
     notify_reconcile(&state);
     Ok((StatusCode::CREATED, Json(credential)))
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeCredential {
+    path: String,
+}
+
+async fn revoke_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RevokeCredential>,
+) -> ApiResult<Json<Resource>> {
+    let credential = lock(&state)?.get_resource(&input.path)?;
+    let spec: kas_core::CredentialSpec = serde_json::from_value(credential.spec)
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let subject = lock(&state)?.get_resource(&spec.subject)?;
+    require(
+        &state,
+        &headers,
+        &subject.manifest,
+        "update",
+        Some(&subject.path),
+    )?;
+    let credential = lock(&state)?.revoke_credential(&input.path)?;
+    notify_reconcile(&state);
+    Ok(Json(credential))
 }
 
 #[derive(Debug, Deserialize)]

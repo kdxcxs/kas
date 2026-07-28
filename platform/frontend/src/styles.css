@@ -1178,6 +1178,69 @@ button:disabled {
   font-size: 10px;
 }
 
+.telegram-account-binding {
+  display: grid;
+  gap: 12px;
+  padding: 15px;
+  background: #11140f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.telegram-account-binding > header,
+.telegram-binding-card,
+.telegram-binding-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.telegram-account-binding > header strong,
+.telegram-account-binding > header small,
+.telegram-binding-card strong,
+.telegram-binding-card code,
+.telegram-binding-card small {
+  display: block;
+}
+
+.telegram-account-binding > header small,
+.telegram-binding-card small {
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.telegram-binding-card {
+  padding: 11px 12px;
+  background: #171b14;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.telegram-binding-card code {
+  margin-top: 4px;
+  color: var(--quiet);
+  font-size: 9px;
+}
+
+.telegram-binding-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.telegram-binding-actions small {
+  flex-basis: 100%;
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.telegram-open-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .telegram-mappings {
   display: grid;
   gap: 12px;
