@@ -6,6 +6,7 @@ members = [
     "packages/frontend/driver",
     "packages/message/driver",
     "packages/skill/driver",
+    "packages/telegram/driver",
 ]
 resolver = "2"
 

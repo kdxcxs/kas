@@ -28,7 +28,8 @@ case "$PROFILE" in
       -p kas-file-driver \
       -p kas-frontend-driver \
       -p kas-message-driver \
-      -p kas-skill-driver
+      -p kas-skill-driver \
+      -p kas-telegram-driver
     ;;
   release)
     cargo build \
@@ -39,6 +40,7 @@ case "$PROFILE" in
       -p kas-frontend-driver \
       -p kas-message-driver \
       -p kas-skill-driver \
+      -p kas-telegram-driver \
       --release
     ;;
   *)
@@ -58,6 +60,7 @@ mkdir -p \
   "$STAGING_ROOT/message/driver/bin" \
   "$STAGING_ROOT/proxy" \
   "$STAGING_ROOT/skill/driver/bin" \
+  "$STAGING_ROOT/telegram/driver/bin" \
   "$STAGING_ROOT/thread" \
   "$STAGING_ROOT/session"
 cp "$PLATFORM_ROOT/packages/agent/manifest.json" "$STAGING_ROOT/agent/manifest.json"
@@ -101,6 +104,12 @@ cp \
 chmod 755 "$STAGING_ROOT/skill/driver/bin/kas-skill-driver"
 cp "$PLATFORM_ROOT/packages/thread/manifest.json" "$STAGING_ROOT/thread/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/thread/resources" "$STAGING_ROOT/thread/resources"
+cp "$PLATFORM_ROOT/packages/telegram/manifest.json" "$STAGING_ROOT/telegram/manifest.json"
+cp -R "$PLATFORM_ROOT/packages/telegram/resources" "$STAGING_ROOT/telegram/resources"
+cp \
+  "$TARGET_DIR/$PROFILE/kas-telegram-driver" \
+  "$STAGING_ROOT/telegram/driver/bin/kas-telegram-driver"
+chmod 755 "$STAGING_ROOT/telegram/driver/bin/kas-telegram-driver"
 cp "$PLATFORM_ROOT/packages/session/manifest.json" "$STAGING_ROOT/session/manifest.json"
 cp -R "$PLATFORM_ROOT/packages/session/resources" "$STAGING_ROOT/session/resources"
 
@@ -113,10 +122,12 @@ COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/message" -cf "$OUTPUT_DIR/message.kas" 
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/proxy" -cf "$OUTPUT_DIR/proxy.kas" manifest.json
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/skill" -cf "$OUTPUT_DIR/skill.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/thread" -cf "$OUTPUT_DIR/thread.kas" manifest.json resources
+COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/telegram" -cf "$OUTPUT_DIR/telegram.kas" manifest.json resources driver
 COPYFILE_DISABLE=1 tar -C "$STAGING_ROOT/session" -cf "$OUTPUT_DIR/session.kas" manifest.json resources
 
 echo "$OUTPUT_DIR/thread.kas"
 echo "$OUTPUT_DIR/session.kas"
+echo "$OUTPUT_DIR/telegram.kas"
 echo "$OUTPUT_DIR/file.kas"
 echo "$OUTPUT_DIR/frontend.kas"
 echo "$OUTPUT_DIR/skill.kas"

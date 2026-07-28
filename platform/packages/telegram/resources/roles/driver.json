@@ -1,0 +1,51 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/builtin/role",
+    "name": "telegram-driver"
+  },
+  "spec": {
+    "description": "Synchronize Telegram forum topics and messages with KAS.",
+    "rules": [
+      {
+        "manifests": [
+          "/manifests/telegram",
+          "/manifests/thread",
+          "/manifests/message",
+          "/manifests/agent",
+          "/builtin/user"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update"
+        ],
+        "paths": [
+          "/telegram/**",
+          "/threads/**",
+          "/messages/**",
+          "/agents/**",
+          "/users/telegram/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/builtin/link"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update"
+        ],
+        "paths": [
+          "/telegram/**",
+          "/threads/**",
+          "/messages/**",
+          "/users/telegram/**"
+        ]
+      }
+    ]
+  }
+}

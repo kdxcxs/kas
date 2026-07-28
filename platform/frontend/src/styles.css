@@ -34,6 +34,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -44,6 +45,7 @@ button {
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--lime);
   outline-offset: 2px;
@@ -576,7 +578,8 @@ button:disabled {
 .agent-management,
 .skill-management,
 .approval-management,
-.thread-management {
+.thread-management,
+.telegram-management {
   grid-row: 4;
   min-height: 0;
   padding: 8px 34px 36px;
@@ -1005,6 +1008,284 @@ button:disabled {
 
 .skill-actions small {
   color: var(--quiet);
+}
+
+.telegram-manager-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.8fr) minmax(440px, 1.2fr);
+  gap: 16px;
+  min-height: 560px;
+}
+
+.telegram-index,
+.telegram-editor {
+  min-width: 0;
+  padding: 16px;
+  background: #151912;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+}
+
+.telegram-create,
+.telegram-settings {
+  display: grid;
+  gap: 11px;
+}
+
+.telegram-create {
+  padding-bottom: 17px;
+  border-bottom: 1px solid var(--line);
+}
+
+.telegram-create > div strong,
+.telegram-create > div small {
+  display: block;
+}
+
+.telegram-create > div small {
+  margin-top: 4px;
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.telegram-create label,
+.telegram-settings label,
+.telegram-mapping-create label {
+  display: grid;
+  gap: 6px;
+  color: #adb5a5;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.telegram-create label > small,
+.telegram-settings label > small {
+  color: var(--quiet);
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.telegram-create input,
+.telegram-create select,
+.telegram-settings input,
+.telegram-settings select,
+.telegram-mapping-create input,
+.telegram-mapping-create select {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  color: var(--warm);
+  background: #10130f;
+  border: 1px solid #30372a;
+  border-radius: 9px;
+}
+
+.telegram-index nav {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.telegram-index nav button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px;
+  color: var(--muted);
+  text-align: left;
+  background: #191d16;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.telegram-index nav button.active {
+  color: var(--warm);
+  background: #20261b;
+  border-color: #3d4834;
+}
+
+.telegram-index nav strong,
+.telegram-index nav code,
+.telegram-index nav small {
+  display: block;
+}
+
+.telegram-index nav code {
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.telegram-index nav small {
+  color: var(--lime-deep);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.telegram-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 19px;
+}
+
+.telegram-editor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 17px;
+  border-bottom: 1px solid var(--line);
+}
+
+.telegram-editor h2 {
+  margin: 3px 0 5px;
+  color: var(--warm);
+}
+
+.telegram-editor header code {
+  color: var(--quiet);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.telegram-settings {
+  padding: 15px;
+  background: #11140f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.telegram-field-grid,
+.telegram-mapping-create {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.telegram-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.telegram-form-actions span {
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.telegram-mappings {
+  display: grid;
+  gap: 12px;
+}
+
+.telegram-mappings > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.telegram-mappings > header strong,
+.telegram-mappings > header small {
+  display: block;
+}
+
+.telegram-mappings > header small {
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.telegram-mappings > header > span {
+  display: grid;
+  place-items: center;
+  min-width: 27px;
+  min-height: 27px;
+  color: var(--lime);
+  background: rgba(197, 246, 107, 0.08);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.telegram-mapping-create {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  padding: 12px;
+  background: #11140f;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+
+.telegram-managed-note {
+  margin: 0;
+  padding: 10px 12px;
+  color: #aeb7a4;
+  background: rgba(197, 246, 107, 0.05);
+  border: 1px solid rgba(197, 246, 107, 0.14);
+  border-radius: 9px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.telegram-mapping-empty {
+  margin: 0;
+  padding: 14px;
+  color: var(--quiet);
+  background: #12150f;
+  border: 1px dashed #333a2e;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.telegram-mapping-list {
+  display: grid;
+  gap: 8px;
+}
+
+.telegram-mapping-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(90px, 0.4fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 11px;
+  background: #171b14;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.telegram-mapping-list strong,
+.telegram-mapping-list code,
+.telegram-mapping-list small {
+  display: block;
+}
+
+.telegram-mapping-list code,
+.telegram-mapping-list small {
+  margin-top: 3px;
+  color: var(--quiet);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
+.telegram-provisioning {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 5px;
+  padding: 3px 7px;
+  color: #d8e9b8;
+  background: rgba(197, 246, 107, 0.08);
+  border: 1px solid rgba(197, 246, 107, 0.16);
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .thread-manager-layout {
@@ -2685,7 +2966,8 @@ button:disabled {
   .agent-management,
   .skill-management,
   .approval-management,
-  .thread-management {
+  .thread-management,
+  .telegram-management {
     padding: 4px 18px 24px;
     overflow-y: visible;
   }
@@ -2696,6 +2978,16 @@ button:disabled {
 
   .skill-manager-layout {
     grid-template-columns: 1fr;
+  }
+
+  .telegram-manager-layout,
+  .telegram-field-grid,
+  .telegram-mapping-create {
+    grid-template-columns: 1fr;
+  }
+
+  .telegram-mapping-list article {
+    grid-template-columns: 1fr auto;
   }
 
   .approval-layout,

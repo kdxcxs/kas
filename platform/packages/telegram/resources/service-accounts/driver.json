@@ -1,0 +1,8 @@
+{
+  "path": "./service-accounts/driver",
+  "metadata": {
+    "manifest": "/builtin/service-account",
+    "name": "telegram-driver"
+  },
+  "spec": {}
+}

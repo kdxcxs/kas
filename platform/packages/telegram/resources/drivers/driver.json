@@ -2,12 +2,12 @@
   "path": "./driver",
   "metadata": {
     "manifest": "/builtin/driver",
-    "name": "message-driver",
+    "name": "telegram-driver",
     "state": "running"
   },
   "spec": {
     "runtime": "process",
-    "entrypoint": "./driver/bin/kas-message-driver",
+    "entrypoint": "./driver/bin/kas-telegram-driver",
     "service_account": "./service-accounts/driver",
     "manages": [
       "."
@@ -15,12 +15,23 @@
     "args": [],
     "watches": [
       {
+        "manifest": "/manifests/message",
+        "paths": [
+          "/messages/**"
+        ]
+      },
+      {
+        "manifest": "/manifests/thread",
+        "paths": [
+          "/threads/**"
+        ]
+      },
+      {
         "manifest": "/builtin/link",
         "paths": [
-          "/messages/**/links/message-thread",
-          "/messages/**/links/mentioned/*",
-          "/messages/**/links/attachments/*",
-          "/threads/**/links/participants/*"
+          "/threads/**/links/telegram/**",
+          "/messages/**/links/telegram/**",
+          "/messages/**/links/message-thread"
         ]
       }
     ],

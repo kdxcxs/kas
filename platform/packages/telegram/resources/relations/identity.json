@@ -1,0 +1,42 @@
+{
+  "path": "./relations/identity",
+  "metadata": {
+    "manifest": "/builtin/relation",
+    "name": "telegram-identity"
+  },
+  "spec": {
+    "inverse_name": "kas-user",
+    "sources": [
+      {
+        "manifest": "/builtin/user",
+        "paths": [
+          "/users/telegram/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/telegram/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "required": [
+        "user_id"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

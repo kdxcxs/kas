@@ -150,6 +150,7 @@ install_package "$PACKAGES_DIR/approval-result.kas" >/dev/null
 install_package "$PACKAGES_DIR/approval.kas" >/dev/null
 install_package "$PACKAGES_DIR/agent.kas" >/dev/null
 install_package "$PACKAGES_DIR/message.kas" >/dev/null
+install_package "$PACKAGES_DIR/telegram.kas" >/dev/null
 
 create_proxy() {
   local path="$1" name="$2" prefix="$3" upstream="$4"
@@ -205,6 +206,7 @@ wait_for_driver "/manifests/frontend-plugin/driver"
 wait_for_driver "/manifests/skill/driver"
 wait_for_driver "/manifests/approval/driver"
 wait_for_driver "/manifests/message/driver"
+wait_for_driver "/manifests/telegram/driver"
 for proxy_path in /proxies/file /proxies/skill /proxies/approval; do
   for _ in $(seq 1 200); do
     proxy="$(
@@ -256,6 +258,7 @@ install_workspace_plugin threads Threads "#" 10
 install_workspace_plugin agents Agents A 20
 install_workspace_plugin skills Skills "⌁" 30
 install_workspace_plugin approvals Approvals "✓" 40
+install_workspace_plugin telegram Telegram "✈" 45
 
 KAS_API_URL="$API" \
 KAS_FILE_API_URL="$FILE_API" \
@@ -293,7 +296,8 @@ for plugin_path in \
   /frontend-plugins/threads \
   /frontend-plugins/agents \
   /frontend-plugins/skills \
-  /frontend-plugins/approvals; do
+  /frontend-plugins/approvals \
+  /frontend-plugins/telegram; do
   for _ in $(seq 1 200); do
     PLUGIN="$(
       curl --fail --silent --get \

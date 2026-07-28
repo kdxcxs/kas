@@ -1,0 +1,13 @@
+{
+  "path": "./links/driver-role",
+  "metadata": {
+    "manifest": "/builtin/link",
+    "name": "telegram-driver-role"
+  },
+  "spec": {
+    "relation": "/builtin/relations/role-binding",
+    "source": "./service-accounts/driver",
+    "target": "./roles/driver",
+    "metadata": {}
+  }
+}

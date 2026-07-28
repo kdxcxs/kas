@@ -18,9 +18,15 @@ E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kas-platform-e2e.XXXXXX")"
 CORE_TARGET="${KAS_CORE_TARGET_DIR:-$E2E_DIR/core-target}"
 PLATFORM_TARGET="${KAS_PLATFORM_TARGET_DIR:-$E2E_DIR/platform-target}"
 API_PID=""
+TELEGRAM_MOCK_PID=""
 API_LOG="$E2E_DIR/kas-api.log"
+TELEGRAM_MOCK_LOG="$E2E_DIR/telegram-mock.log"
 
 cleanup() {
+  if [[ -n "$TELEGRAM_MOCK_PID" ]] && kill -0 "$TELEGRAM_MOCK_PID" 2>/dev/null; then
+    kill "$TELEGRAM_MOCK_PID" 2>/dev/null || true
+    wait "$TELEGRAM_MOCK_PID" 2>/dev/null || true
+  fi
   if [[ -n "$API_PID" ]] && kill -0 "$API_PID" 2>/dev/null; then
     kill "$API_PID" 2>/dev/null || true
     wait "$API_PID" 2>/dev/null || true
@@ -34,6 +40,8 @@ cleanup() {
 failed() {
   echo "Platform E2E failed at line $1" >&2
   [[ -f "$API_LOG" ]] && sed -n '1,360p' "$API_LOG" >&2
+  [[ -f "$TELEGRAM_MOCK_LOG" ]] &&
+    sed -n '1,360p' "$TELEGRAM_MOCK_LOG" >&2
 }
 
 trap 'failed "$LINENO"' ERR
@@ -106,13 +114,15 @@ wait_for_state() {
 }
 
 create_link() {
-  local path="$1" relation="$2" source="$3" target="$4"
+  local path="$1" relation="$2" source="$3" target="$4" metadata="${5:-}"
+  [[ -n "$metadata" ]] || metadata='{}'
   post_resource "$(
     jq -n \
       --arg path "$path" \
       --arg relation "$relation" \
       --arg source "$source" \
-      --arg target "$target" '{
+      --arg target "$target" \
+      --argjson metadata "$metadata" '{
         path: $path,
         metadata: {
           manifest: "/builtin/link",
@@ -122,7 +132,7 @@ create_link() {
           relation: $relation,
           source: $source,
           target: $target,
-          metadata: {}
+          metadata: $metadata
         }
       }'
   )" >/dev/null
@@ -162,11 +172,13 @@ FILE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 
 SKILL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 APPROVAL_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 FRONTEND_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+TELEGRAM_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 API="http://127.0.0.1:$PORT"
 FILE_API="http://127.0.0.1:$FILE_PORT"
 SKILL_API="http://127.0.0.1:$SKILL_PORT"
 APPROVAL_API="http://127.0.0.1:$APPROVAL_PORT"
 FRONTEND="http://127.0.0.1:$FRONTEND_PORT"
+TELEGRAM_API="http://127.0.0.1:$TELEGRAM_PORT"
 export KAS_DATA_DIR="$E2E_DIR/data"
 export KAS_DATABASE="$KAS_DATA_DIR/kas.db"
 export KAS_ADDRESS="127.0.0.1:$PORT"
@@ -204,6 +216,17 @@ done
 trap 'failed "$LINENO"' ERR
 command curl --fail --silent "$API/health" | jq -e '.ok == true' >/dev/null
 
+python3 "$PLATFORM_ROOT/tests/mock_telegram.py" \
+  --port "$TELEGRAM_PORT" >"$TELEGRAM_MOCK_LOG" 2>&1 &
+TELEGRAM_MOCK_PID="$!"
+for _ in $(seq 1 200); do
+  if command curl --fail --silent "$TELEGRAM_API/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+command curl --fail --silent "$TELEGRAM_API/health" | jq -e '.ok == true' >/dev/null
+
 install_package() {
   request --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -220,9 +243,10 @@ FRONTEND_PACKAGE="$(install_package "$E2E_DIR/packages/frontend.kas")"
 SKILL_PACKAGE="$(install_package "$E2E_DIR/packages/skill.kas")"
 AGENT_PACKAGE="$(install_package "$E2E_DIR/packages/agent.kas")"
 MESSAGE_PACKAGE="$(install_package "$E2E_DIR/packages/message.kas")"
+TELEGRAM_PACKAGE="$(install_package "$E2E_DIR/packages/telegram.kas")"
 APPROVAL_RESULT_PACKAGE="$(install_package "$E2E_DIR/packages/approval-result.kas")"
 APPROVAL_PACKAGE="$(install_package "$E2E_DIR/packages/approval.kas")"
-for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$PROXY_PACKAGE" "$FRONTEND_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE" "$APPROVAL_RESULT_PACKAGE" "$APPROVAL_PACKAGE"; do
+for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$PROXY_PACKAGE" "$FRONTEND_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE" "$TELEGRAM_PACKAGE" "$APPROVAL_RESULT_PACKAGE" "$APPROVAL_PACKAGE"; do
   jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
 done
 
@@ -279,6 +303,10 @@ for path in \
   /manifests/message/relations/message-thread \
   /manifests/message/relations/mentioned \
   /manifests/message/relations/replies-to \
+  /manifests/telegram \
+  /manifests/telegram/relations/thread-topic \
+  /manifests/telegram/relations/message-copy \
+  /manifests/telegram/relations/identity \
   /manifests/approval \
   /manifests/approval-result \
   /manifests/approval/relations/requested-by \
@@ -298,6 +326,7 @@ FILE_DRIVER="$(wait_for_state "/manifests/file/driver" running)"
 FRONTEND_DRIVER="$(wait_for_state "/manifests/frontend-plugin/driver" running)"
 SKILL_DRIVER="$(wait_for_state "/manifests/skill/driver" running)"
 MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
+TELEGRAM_DRIVER="$(wait_for_state "/manifests/telegram/driver" running)"
 APPROVAL_DRIVER="$(wait_for_state "/manifests/approval/driver" running)"
 FILE_PROXY="$(wait_for_state "/proxies/file" available)"
 SKILL_PROXY="$(wait_for_state "/proxies/skill" available)"
@@ -307,6 +336,7 @@ jq -e '.spec == .status.spec' <<<"$FILE_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FRONTEND_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$SKILL_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$MESSAGE_DRIVER" >/dev/null
+jq -e '.spec == .status.spec' <<<"$TELEGRAM_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$APPROVAL_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FILE_PROXY" >/dev/null
 jq -e '.spec == .status.spec' <<<"$SKILL_PROXY" >/dev/null
@@ -419,6 +449,7 @@ jq -e '
 mkdir -p "$E2E_DIR/workspace"
 AGENT_PATH="/agents/e2e"
 OBSERVER_PATH="/agents/observer"
+PREVIEW_AGENT_PATH="/agents/preview"
 PROOF_PATH="/messages/e2e-agent-network-proof"
 SKILL_PROOF_PATH="/messages/e2e-agent-skill-proof"
 FILE_PROOF="KAS_FILE_$(uuidgen | tr '[:lower:]' '[:upper:]')"
@@ -531,8 +562,10 @@ create_agent() {
 
 create_agent "$AGENT_PATH" "e2e-agent"
 create_agent "$OBSERVER_PATH" "observer"
+create_agent "$PREVIEW_AGENT_PATH" "preview"
 wait_for_state "$AGENT_PATH" available >/dev/null
 wait_for_state "$OBSERVER_PATH" available >/dev/null
+wait_for_state "$PREVIEW_AGENT_PATH" available >/dev/null
 
 for path in \
   "$AGENT_PATH/service-account" \
@@ -583,6 +616,336 @@ AGENT_TOKEN="$(
     "$API/credentials/issue" |
     jq -r '.token'
 )"
+
+# KAS owns every synchronized Telegram Topic. Creating a managed Link without a
+# topic_id asks the Telegram driver to create the Topic and write the returned ID
+# back to the same Link. Existing, General, and otherwise unknown Topics stay out
+# of KAS.
+TELEGRAM_CONFIG_PATH="/telegram/e2e"
+TELEGRAM_TOKEN="123456789:abcdefghijklmnopqrstuvwxyz"
+TELEGRAM_CHAT_ID="-1001234567890"
+post_resource "$(
+  jq -n \
+    --arg path "$TELEGRAM_CONFIG_PATH" \
+    --arg token "$TELEGRAM_TOKEN" \
+    --arg chat_id "$TELEGRAM_CHAT_ID" \
+    --arg api_base "$TELEGRAM_API" '{
+      path: $path,
+      metadata: {
+        manifest: "/manifests/telegram",
+        name: "E2E Telegram"
+      },
+      spec: {
+        bot_token: $token,
+        chat_id: $chat_id,
+        mode: "bidirectional",
+        api_base: $api_base
+      }
+    }'
+)" >/dev/null
+wait_for_state "$TELEGRAM_CONFIG_PATH" available >/dev/null
+
+TELEGRAM_THREAD_PATH="/threads/telegram-e2e"
+TELEGRAM_TOPIC_LINK="$TELEGRAM_THREAD_PATH/links/telegram/telegram-e2e"
+TELEGRAM_TOPIC_NAME="E2E Managed Topic"
+post_resource "$(
+  jq -n \
+    --arg path "$TELEGRAM_THREAD_PATH" \
+    --arg title "$TELEGRAM_TOPIC_NAME" '{
+      path: $path,
+      metadata: {
+        manifest: "/manifests/thread",
+        name: "telegram-e2e"
+      },
+      spec: {title: $title}
+    }'
+)" >/dev/null
+create_link \
+  "$TELEGRAM_TOPIC_LINK" \
+  "/manifests/telegram/relations/thread-topic" \
+  "$TELEGRAM_THREAD_PATH" \
+  "$TELEGRAM_CONFIG_PATH" \
+  "$(jq -cn --arg name "$TELEGRAM_TOPIC_NAME" '{managed: true, topic_name: $name}')"
+
+TELEGRAM_TOPIC_ID=""
+TELEGRAM_TOPIC_LINK_RESOURCE=""
+for _ in $(seq 1 800); do
+  TELEGRAM_TOPIC_LINK_RESOURCE="$(get_resource "$TELEGRAM_TOPIC_LINK" 2>/dev/null || true)"
+  TELEGRAM_TOPIC_ID="$(jq -r '.spec.metadata.topic_id // empty' <<<"$TELEGRAM_TOPIC_LINK_RESOURCE")"
+  if [[ "$TELEGRAM_TOPIC_ID" =~ ^[0-9]+$ ]]; then
+    break
+  fi
+  sleep 0.05
+done
+[[ "$TELEGRAM_TOPIC_ID" =~ ^[0-9]+$ ]]
+jq -e \
+  --arg thread "$TELEGRAM_THREAD_PATH" \
+  --arg config "$TELEGRAM_CONFIG_PATH" \
+  --arg name "$TELEGRAM_TOPIC_NAME" \
+  --argjson topic "$TELEGRAM_TOPIC_ID" '
+    .spec.relation == "/manifests/telegram/relations/thread-topic"
+    and .spec.source == $thread
+    and .spec.target == $config
+    and .spec.metadata == {
+      managed: true,
+      topic_name: $name,
+      topic_id: $topic
+    }
+  ' <<<"$TELEGRAM_TOPIC_LINK_RESOURCE" >/dev/null
+TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+jq -e \
+  --arg chat "$TELEGRAM_CHAT_ID" \
+  --arg name "$TELEGRAM_TOPIC_NAME" '
+    any(.[ ];
+      .method == "createForumTopic"
+      and .request.chat_id == $chat
+      and .request.name == $name
+    )
+  ' <<<"$TELEGRAM_REQUESTS" >/dev/null
+
+# Updates from the General Topic and an unmanaged Topic are delivered before the
+# managed update. Waiting for the last update proves the first two were consumed
+# and ignored, rather than merely not polled yet.
+TELEGRAM_GENERAL_MESSAGE_ID=99
+TELEGRAM_UNKNOWN_MESSAGE_ID=100
+TELEGRAM_INBOUND_MESSAGE_ID=101
+request --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n \
+      --argjson chat_id "$TELEGRAM_CHAT_ID" '{
+        update_id: 5000,
+        message: {
+          message_id: 99,
+          chat: {id: $chat_id},
+          from: {id: 9001, is_bot: false, first_name: "Telegram"},
+          text: "General Topic must be ignored @preview"
+        }
+      }'
+  )" \
+  "$TELEGRAM_API/test/enqueue" >/dev/null
+request --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n \
+      --argjson chat_id "$TELEGRAM_CHAT_ID" '{
+        update_id: 5001,
+        message: {
+          message_id: 100,
+          message_thread_id: 999,
+          chat: {id: $chat_id},
+          from: {id: 9001, is_bot: false, first_name: "Telegram"},
+          text: "Unknown Topic must be ignored @preview"
+        }
+      }'
+  )" \
+  "$TELEGRAM_API/test/enqueue" >/dev/null
+request --fail-with-body --silent --show-error \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -n \
+      --argjson topic_id "$TELEGRAM_TOPIC_ID" \
+      --argjson chat_id "$TELEGRAM_CHAT_ID" '{
+        update_id: 5002,
+        message: {
+          message_id: 101,
+          message_thread_id: $topic_id,
+          chat: {id: $chat_id},
+          from: {
+            id: 9001,
+            is_bot: false,
+            first_name: "Telegram",
+            last_name: "User",
+            username: "telegram_e2e"
+          },
+          text: "hello from Telegram @preview"
+        }
+      }'
+  )" \
+  "$TELEGRAM_API/test/enqueue" >/dev/null
+
+TELEGRAM_GENERAL_MESSAGE_PATH="/messages/telegram/telegram-e2e/$TELEGRAM_GENERAL_MESSAGE_ID"
+TELEGRAM_UNKNOWN_MESSAGE_PATH="/messages/telegram/telegram-e2e/$TELEGRAM_UNKNOWN_MESSAGE_ID"
+TELEGRAM_MESSAGE_PATH="/messages/telegram/telegram-e2e/$TELEGRAM_INBOUND_MESSAGE_ID"
+TELEGRAM_MENTION_LINK="$TELEGRAM_MESSAGE_PATH/links/mentioned/agents-preview"
+TELEGRAM_RUN_PATH="$TELEGRAM_MENTION_LINK/run"
+for path in \
+  "$TELEGRAM_MESSAGE_PATH" \
+  "$TELEGRAM_MENTION_LINK" \
+  "$TELEGRAM_THREAD_PATH/links/participants/agents-preview" \
+  "$TELEGRAM_RUN_PATH"; do
+  for _ in $(seq 1 800); do
+    if get_resource "$path" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.05
+  done
+  get_resource "$path" >/dev/null
+done
+if get_resource "$TELEGRAM_GENERAL_MESSAGE_PATH" >/dev/null 2>&1; then
+  echo "Telegram General Topic message was unexpectedly imported" >&2
+  false
+fi
+if get_resource "$TELEGRAM_UNKNOWN_MESSAGE_PATH" >/dev/null 2>&1; then
+  echo "unmanaged Telegram Topic message was unexpectedly imported" >&2
+  false
+fi
+jq -e '
+  .metadata.manifest == "/manifests/message"
+  and .spec == {
+    role: "user",
+    body: "hello from Telegram @preview"
+  }
+' <<<"$(get_resource "$TELEGRAM_MESSAGE_PATH")" >/dev/null
+jq -e \
+  --arg message "$TELEGRAM_MESSAGE_PATH" \
+  --arg agent "$PREVIEW_AGENT_PATH" '
+    .spec.relation == "/manifests/message/relations/mentioned"
+    and .spec.source == $message
+    and .spec.target == $agent
+  ' <<<"$(get_resource "$TELEGRAM_MENTION_LINK")" >/dev/null
+jq -e \
+  --arg message "$TELEGRAM_MESSAGE_PATH" \
+  --arg thread "$TELEGRAM_THREAD_PATH" \
+  --arg agent "$PREVIEW_AGENT_PATH" '
+    .spec.resource == $agent
+    and .spec.input == {
+      message_path: $message,
+      thread_path: $thread
+    }
+  ' <<<"$(get_resource "$TELEGRAM_RUN_PATH")" >/dev/null
+
+TELEGRAM_OUTBOUND_PATH="/messages/telegram-e2e-outbound"
+TELEGRAM_OUTBOUND_BODY="KAS to Telegram E2E"
+post_resource "$(
+  jq -n \
+    --arg path "$TELEGRAM_OUTBOUND_PATH" \
+    --arg body "$TELEGRAM_OUTBOUND_BODY" '{
+      path: $path,
+      metadata: {
+        manifest: "/manifests/message",
+        name: "telegram-e2e-outbound"
+      },
+      spec: {
+        role: "user",
+        body: $body
+      }
+    }'
+)" >/dev/null
+create_link "$TELEGRAM_OUTBOUND_PATH/links/authored-by" \
+  "/manifests/message/relations/authored-by" \
+  "$TELEGRAM_OUTBOUND_PATH" \
+  "/users/platform-admin"
+create_link "$TELEGRAM_OUTBOUND_PATH/links/message-thread" \
+  "/manifests/message/relations/message-thread" \
+  "$TELEGRAM_OUTBOUND_PATH" \
+  "$TELEGRAM_THREAD_PATH"
+TELEGRAM_SENT=""
+for _ in $(seq 1 800); do
+  TELEGRAM_SENT="$(request --fail --silent "$TELEGRAM_API/test/sent")"
+  if jq -e \
+    --arg body "$TELEGRAM_OUTBOUND_BODY" \
+    --arg chat "$TELEGRAM_CHAT_ID" \
+    --argjson topic "$TELEGRAM_TOPIC_ID" '
+      any(.[ ];
+        .request.text == $body
+        and .request.chat_id == $chat
+        and .request.message_thread_id == $topic
+      )
+    ' <<<"$TELEGRAM_SENT" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  --arg body "$TELEGRAM_OUTBOUND_BODY" \
+  --arg chat "$TELEGRAM_CHAT_ID" \
+  --argjson topic "$TELEGRAM_TOPIC_ID" '
+    any(.[ ];
+      .request.text == $body
+      and .request.chat_id == $chat
+      and .request.message_thread_id == $topic
+    )
+  ' <<<"$TELEGRAM_SENT" >/dev/null
+wait_for_state \
+  "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e" \
+  available >/dev/null
+
+# The KAS Thread is authoritative for a managed Topic's display name.
+TELEGRAM_RENAMED_TOPIC="E2E Renamed Topic"
+TELEGRAM_THREAD_RESOURCE="$(get_resource "$TELEGRAM_THREAD_PATH")"
+request --fail-with-body --silent --show-error \
+  -X PATCH \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(
+    jq -cn \
+      --argjson revision "$(jq -r '.metadata["[kas]"].revision' <<<"$TELEGRAM_THREAD_RESOURCE")" \
+      --arg title "$TELEGRAM_RENAMED_TOPIC" '{
+        expected_revision: $revision,
+        spec: {title: $title}
+      }'
+  )" \
+  "$API/resources/by-path?path=$TELEGRAM_THREAD_PATH" >/dev/null
+TELEGRAM_REQUESTS=""
+for _ in $(seq 1 800); do
+  TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+  if jq -e \
+    --arg name "$TELEGRAM_RENAMED_TOPIC" \
+    --argjson topic "$TELEGRAM_TOPIC_ID" '
+      any(.[ ];
+        .method == "editForumTopic"
+        and .request.message_thread_id == $topic
+        and .request.name == $name
+      )
+    ' <<<"$TELEGRAM_REQUESTS" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  --arg name "$TELEGRAM_RENAMED_TOPIC" \
+  --argjson topic "$TELEGRAM_TOPIC_ID" '
+    any(.[ ];
+      .method == "editForumTopic"
+      and .request.message_thread_id == $topic
+      and .request.name == $name
+    )
+  ' <<<"$TELEGRAM_REQUESTS" >/dev/null
+
+# Removing a managed mapping closes the Telegram Topic but preserves its history.
+TELEGRAM_TOPIC_LINK_RESOURCE="$(get_resource "$TELEGRAM_TOPIC_LINK")"
+TELEGRAM_TOPIC_LINK_REVISION="$(
+  jq -r '.metadata["[kas]"].revision' <<<"$TELEGRAM_TOPIC_LINK_RESOURCE"
+)"
+request --fail-with-body --silent --show-error \
+  -X DELETE \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --get \
+  --data-urlencode "path=$TELEGRAM_TOPIC_LINK" \
+  --data-urlencode "expected_revision=$TELEGRAM_TOPIC_LINK_REVISION" \
+  "$API/resources/by-path" \
+  >/dev/null
+for _ in $(seq 1 800); do
+  TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+  if jq -e \
+    --argjson topic "$TELEGRAM_TOPIC_ID" '
+      any(.[ ];
+        .method == "closeForumTopic"
+        and .request.message_thread_id == $topic
+      )
+    ' <<<"$TELEGRAM_REQUESTS" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  --argjson topic "$TELEGRAM_TOPIC_ID" '
+    any(.[ ];
+      .method == "closeForumTopic"
+      and .request.message_thread_id == $topic
+    )
+  ' <<<"$TELEGRAM_REQUESTS" >/dev/null
 
 # Approval objects use their owning principal's path as their authorization
 # boundary. Their business relationships are represented only by Links.
@@ -1371,5 +1734,6 @@ control_driver "/manifests/agent/driver" stopped
 control_driver "/manifests/skill/driver" stopped
 control_driver "/manifests/file/driver" stopped
 control_driver "/manifests/approval/driver" stopped
+control_driver "/manifests/telegram/driver" stopped
 
-echo "KAS platform Approval, Skill, File, and persistent Session end-to-end test passed"
+echo "KAS platform Telegram, Approval, Skill, File, and persistent Session end-to-end test passed"
