@@ -904,11 +904,26 @@ fn handle_driver_message(
                     notify_reconcile(state);
                     (MutationStatus::Committed, outcome.results, None)
                 }
-                Err(error) => (
-                    MutationStatus::Rejected,
-                    Vec::new(),
-                    Some(mutation_error(error)),
-                ),
+                Err(error) => {
+                    if error.0 == StatusCode::CONFLICT {
+                        if lock(state)
+                            .and_then(|mut store| {
+                                store
+                                    .abandon_reconciliation(delivery_id, driver_path, generation)
+                                    .map_err(Into::into)
+                            })
+                            .is_ok()
+                        {
+                            in_flight.remove(&delivery_id);
+                            notify_reconcile(state);
+                        }
+                    }
+                    (
+                        MutationStatus::Rejected,
+                        Vec::new(),
+                        Some(mutation_error(error)),
+                    )
+                }
             };
             return Ok(Some(ServerMessage::MutationResult {
                 request_id,
