@@ -1,0 +1,42 @@
+{
+  "path": "/manifests/telegram",
+  "manifest": "/builtin/manifest",
+  "name": "telegram",
+  "version": 1,
+  "description": "A bidirectional bridge between one Telegram forum group and KAS Threads.",
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "bot_token",
+      "chat_id",
+      "mode"
+    ],
+    "properties": {
+      "bot_token": {
+        "type": "string",
+        "minLength": 20
+      },
+      "chat_id": {
+        "type": "string",
+        "pattern": "^-?[0-9]+$"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "bidirectional",
+          "telegram-to-kas",
+          "kas-to-telegram"
+        ]
+      },
+      "api_base": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  }
+}

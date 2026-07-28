@@ -58,6 +58,8 @@
   const DEFAULT_SKILL_API_BASE = import.meta.env.VITE_KAS_SKILL_API_URL || '/skills-api';
   const DEFAULT_APPROVAL_API_BASE =
     import.meta.env.VITE_KAS_APPROVAL_API_URL || '/approvals-api';
+  const TELEGRAM_MANIFEST = '/manifests/telegram';
+  const TELEGRAM_THREAD_TOPIC = '/manifests/telegram/relations/thread-topic';
 
   interface Settings {
     apiBase: string;
@@ -65,7 +67,15 @@
     userPath: string;
   }
 
-  type View = 'chat' | 'agents' | 'skills' | 'approvals' | 'threads' | 'objects' | 'plugin';
+  type View =
+    | 'chat'
+    | 'agents'
+    | 'skills'
+    | 'approvals'
+    | 'threads'
+    | 'telegram'
+    | 'objects'
+    | 'plugin';
 
   const OBJECT_KINDS: ObjectKind[] = [
     'resource',
@@ -97,6 +107,21 @@
   let approvals: Resource[] = [];
   let approvalResults: Resource[] = [];
   let frontendPlugins: Resource[] = [];
+  let telegramConfigurations: Resource[] = [];
+  let selectedTelegramPath = '';
+  let createTelegramName = '';
+  let createTelegramPath = '';
+  let createTelegramToken = '';
+  let createTelegramChatId = '';
+  let createTelegramMode = 'bidirectional';
+  let createTelegramApiBase = '';
+  let editTelegramToken = '';
+  let editTelegramChatId = '';
+  let editTelegramMode = 'bidirectional';
+  let editTelegramApiBase = '';
+  let telegramMappingThreadPath = '';
+  let savingTelegram = false;
+  let deleteTelegramTarget: Resource | null = null;
   let selectedPlugin: FrontendPluginEntry | null = null;
   let pluginUrl = '';
   let pluginFrame: HTMLIFrameElement;
@@ -161,6 +186,18 @@
   $: managedThread =
     threads.find((thread) => thread.path === selectedManagedThreadPath) ?? null;
   $: selectedSkill = skills.find((skill) => skill.path === selectedSkillPath) ?? null;
+  $: selectedTelegram =
+    telegramConfigurations.find((configuration) => configuration.path === selectedTelegramPath) ??
+    null;
+  $: telegramTopicLinks = selectedTelegram
+    ? (selectedTelegram.links ?? [])
+        .filter(
+          (link) =>
+            link.relation_path === TELEGRAM_THREAD_TOPIC &&
+            link.target.path === selectedTelegram?.path
+        )
+        .sort((left, right) => left.source.path.localeCompare(right.source.path))
+    : [];
   $: approvalRequests = approvals.filter((approval) => approval.spec.kind === 'request');
   $: selectedApproval =
     approvalRequests.find((approval) => approval.path === selectedApprovalPath) ?? null;
@@ -204,6 +241,8 @@
           ? 'Approval management'
           : view === 'threads'
             ? 'Thread management'
+            : view === 'telegram'
+              ? 'Telegram bridge'
             : view === 'objects'
               ? 'Resource management'
               : view === 'plugin'
@@ -509,7 +548,8 @@
         skillResources,
         approvalResources,
         approvalResultResources,
-        frontendPluginResources
+        frontendPluginResources,
+        telegramResources
       ] =
         await Promise.all([
           api.listResources(AGENT_MANIFEST),
@@ -520,7 +560,8 @@
           api.listResources(SKILL_MANIFEST),
           api.listResources(APPROVAL_MANIFEST),
           api.listResources(APPROVAL_RESULT_MANIFEST),
-          api.listResources(FRONTEND_PLUGIN_MANIFEST)
+          api.listResources(FRONTEND_PLUGIN_MANIFEST),
+          api.listResources(TELEGRAM_MANIFEST)
         ]);
       agents = agentResources
         .filter((resource) => resource.manifest === AGENT_MANIFEST)
@@ -573,6 +614,22 @@
           .filter((resource) => resource.manifest === FRONTEND_PLUGIN_MANIFEST)
           .map((resource) => api.getResource(resource.path, true))
       );
+      telegramConfigurations = (
+        await Promise.all(
+          telegramResources
+            .filter((resource) => resource.manifest === TELEGRAM_MANIFEST)
+            .map((resource) => api.getResource(resource.path, true))
+        )
+      ).sort((left, right) => left.name.localeCompare(right.name));
+      if (
+        !telegramConfigurations.some(
+          (configuration) => configuration.path === selectedTelegramPath
+        )
+      ) {
+        selectTelegramConfiguration(telegramConfigurations[0]?.path ?? '');
+      } else {
+        selectTelegramConfiguration(selectedTelegramPath);
+      }
       if (!skills.some((skill) => skill.path === selectedSkillPath)) {
         selectedSkillPath = skills[0]?.path ?? '';
       }
@@ -777,6 +834,211 @@
       error = messageOf(cause);
     } finally {
       savingSkill = false;
+    }
+  }
+
+  function openTelegramManagement(path = selectedTelegramPath): void {
+    if (!embeddedView && openBuiltInPlugin('telegram')) return;
+    view = 'telegram';
+    selectTelegramConfiguration(
+      telegramConfigurations.some((configuration) => configuration.path === path)
+        ? path
+        : telegramConfigurations[0]?.path ?? ''
+    );
+    error = '';
+    notice = '';
+  }
+
+  function updateTelegramCreatePath(): void {
+    createTelegramPath = `/telegram/${slugify(createTelegramName)}`;
+  }
+
+  function selectTelegramConfiguration(path: string): void {
+    selectedTelegramPath = path;
+    const configuration = telegramConfigurations.find((candidate) => candidate.path === path);
+    editTelegramToken = '';
+    editTelegramChatId = configuration ? stringSpec(configuration, 'chat_id') : '';
+    editTelegramMode = configuration
+      ? stringSpec(configuration, 'mode') || 'bidirectional'
+      : 'bidirectional';
+    editTelegramApiBase = configuration ? stringSpec(configuration, 'api_base') : '';
+    telegramMappingThreadPath = threads[0]?.path ?? '';
+  }
+
+  function selectTelegramMappingThread(path: string): void {
+    telegramMappingThreadPath = path;
+  }
+
+  function telegramSpec(
+    botToken: string,
+    chatId: string,
+    mode: string,
+    apiBase: string
+  ): Record<string, unknown> {
+    return {
+      bot_token: botToken,
+      chat_id: chatId,
+      mode,
+      ...(apiBase ? { api_base: apiBase } : {})
+    };
+  }
+
+  function validTelegramChatId(value: string): boolean {
+    return /^-?[0-9]+$/.test(value);
+  }
+
+  async function createTelegramConfiguration(): Promise<void> {
+    const name = createTelegramName.trim();
+    const path = createTelegramPath.trim();
+    const botToken = createTelegramToken.trim();
+    const chatId = createTelegramChatId.trim();
+    const apiBase = createTelegramApiBase.trim();
+    if (!name || !path || savingTelegram) return;
+    if (botToken.length < 20) {
+      error = 'The Telegram bot token must contain at least 20 characters.';
+      return;
+    }
+    if (!validTelegramChatId(chatId)) {
+      error = 'Telegram chat ID must be an integer, optionally beginning with a minus sign.';
+      return;
+    }
+    savingTelegram = true;
+    error = '';
+    try {
+      const created = await client().createResource({
+        path,
+        manifest: TELEGRAM_MANIFEST,
+        name,
+        spec: telegramSpec(botToken, chatId, createTelegramMode, apiBase)
+      });
+      await loadData();
+      selectTelegramConfiguration(created.path);
+      createTelegramName = '';
+      createTelegramPath = '';
+      createTelegramToken = '';
+      createTelegramChatId = '';
+      createTelegramMode = 'bidirectional';
+      createTelegramApiBase = '';
+      notice = `Telegram bridge ${created.name} was created`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingTelegram = false;
+    }
+  }
+
+  async function saveTelegramConfiguration(): Promise<void> {
+    if (!selectedTelegram || savingTelegram) return;
+    const replacementToken = editTelegramToken.trim();
+    const chatId = editTelegramChatId.trim();
+    const apiBase = editTelegramApiBase.trim();
+    if (replacementToken && replacementToken.length < 20) {
+      error = 'A replacement Telegram bot token must contain at least 20 characters.';
+      return;
+    }
+    if (!validTelegramChatId(chatId)) {
+      error = 'Telegram chat ID must be an integer, optionally beginning with a minus sign.';
+      return;
+    }
+    savingTelegram = true;
+    error = '';
+    const path = selectedTelegram.path;
+    try {
+      await client().updateResource(path, {
+        expected_revision: selectedTelegram.revision,
+        spec: telegramSpec(
+          replacementToken || stringSpec(selectedTelegram, 'bot_token'),
+          chatId,
+          editTelegramMode,
+          apiBase
+        )
+      });
+      await loadData();
+      selectTelegramConfiguration(path);
+      notice = `Telegram bridge ${selectedTelegram.name} was updated`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingTelegram = false;
+    }
+  }
+
+  async function deleteTelegramConfiguration(): Promise<void> {
+    const configuration = deleteTelegramTarget;
+    if (!configuration || savingTelegram) return;
+    savingTelegram = true;
+    error = '';
+    try {
+      const api = client();
+      const links =
+        configuration.links?.filter(
+          (link) =>
+            link.relation_path === TELEGRAM_THREAD_TOPIC &&
+            link.target.path === configuration.path
+        ) ?? [];
+      await Promise.all(
+        links.map((link) => api.deleteResource(link.path, link.revision))
+      );
+      await api.deleteResource(configuration.path, configuration.revision);
+      deleteTelegramTarget = null;
+      await loadData(api);
+      notice = `Telegram bridge ${configuration.name} is being deleted`;
+    } catch (cause) {
+      error = messageOf(cause);
+      await loadData().catch(() => undefined);
+    } finally {
+      savingTelegram = false;
+    }
+  }
+
+  async function createTelegramTopicLink(): Promise<void> {
+    if (!selectedTelegram || savingTelegram) return;
+    const threadPath = telegramMappingThreadPath;
+    const thread = threads.find((candidate) => candidate.path === threadPath);
+    if (!thread) {
+      error = 'Choose a Thread to create its Telegram Topic.';
+      return;
+    }
+    const topicName = titleOf(thread);
+    if (telegramTopicLinks.some((link) => link.source.path === threadPath)) {
+      error = 'This Thread already has a managed Topic for the selected bridge.';
+      return;
+    }
+    savingTelegram = true;
+    error = '';
+    const configurationPath = selectedTelegram.path;
+    try {
+      await client().createLink({
+        path: `${threadPath}/links/telegram/${slugify(configurationPath)}`,
+        source: { kind: 'resource', path: threadPath },
+        relation_path: TELEGRAM_THREAD_TOPIC,
+        target: { kind: 'resource', path: configurationPath },
+        metadata: { managed: true, topic_name: topicName }
+      });
+      await loadData();
+      selectTelegramConfiguration(configurationPath);
+      notice = `Telegram Topic “${topicName}” is being created`;
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingTelegram = false;
+    }
+  }
+
+  async function deleteTelegramTopicLink(linkPath: string, revision: number): Promise<void> {
+    if (!selectedTelegram || savingTelegram) return;
+    savingTelegram = true;
+    error = '';
+    const configurationPath = selectedTelegram.path;
+    try {
+      await client().deleteResource(linkPath, revision);
+      await loadData();
+      selectTelegramConfiguration(configurationPath);
+      notice = 'Telegram Topic mapping removed';
+    } catch (cause) {
+      error = messageOf(cause);
+    } finally {
+      savingTelegram = false;
     }
   }
 
@@ -1659,6 +1921,8 @@
                 ? 'Delegated authority'
                 : view === 'threads'
                   ? 'Conversations'
+                  : view === 'telegram'
+                    ? 'Integrations'
                 : view === 'objects'
                     ? 'KAS Registry'
                     : view === 'plugin'
@@ -1676,6 +1940,14 @@
           </button>
           <button class="primary-button" disabled={agents.length === 0} onclick={startThread}>
             New Thread
+          </button>
+        {:else if view === 'telegram'}
+          <button
+            class="danger-button"
+            disabled={!selectedTelegram || savingTelegram}
+            onclick={() => (deleteTelegramTarget = selectedTelegram)}
+          >
+            Delete bridge
           </button>
         {:else if view === 'chat'}
           <button
@@ -2330,6 +2602,275 @@
           </div>
         {/if}
       </section>
+    {:else if view === 'telegram'}
+      <section class="telegram-management" aria-label="Telegram bridge management">
+        <div class="management-summary">
+          <div>
+            <strong>{telegramConfigurations.length}</strong>
+            <span>Bridges</span>
+          </div>
+          <div>
+            <strong>{telegramConfigurations.filter(resourceConverged).length}</strong>
+            <span>Converged</span>
+          </div>
+          <div>
+            <strong>{telegramTopicLinks.length}</strong>
+            <span>Topic mappings</span>
+          </div>
+        </div>
+
+        <div class="telegram-manager-layout">
+          <aside class="telegram-index">
+            <form
+              class="telegram-create"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void createTelegramConfiguration();
+              }}
+            >
+              <div>
+                <strong>New Telegram bridge</strong>
+                <small>Connect one forum group to KAS Threads.</small>
+              </div>
+              <label>
+                Name
+                <input
+                  bind:value={createTelegramName}
+                  oninput={updateTelegramCreatePath}
+                  placeholder="Team Telegram"
+                  required
+                />
+              </label>
+              <label>
+                Resource path
+                <input bind:value={createTelegramPath} placeholder="/telegram/team" required />
+              </label>
+              <label>
+                Bot token
+                <input
+                  bind:value={createTelegramToken}
+                  type="password"
+                  minlength="20"
+                  autocomplete="new-password"
+                  placeholder="Token from BotFather"
+                  required
+                />
+              </label>
+              <label>
+                Forum group chat ID
+                <input
+                  bind:value={createTelegramChatId}
+                  inputmode="numeric"
+                  pattern="-?[0-9]+"
+                  placeholder="-1001234567890"
+                  required
+                />
+              </label>
+              <label>
+                Sync mode
+                <select bind:value={createTelegramMode}>
+                  <option value="bidirectional">Bidirectional</option>
+                  <option value="telegram-to-kas">Telegram → KAS</option>
+                  <option value="kas-to-telegram">KAS → Telegram</option>
+                </select>
+              </label>
+              <label>
+                API base <small>Optional</small>
+                <input
+                  bind:value={createTelegramApiBase}
+                  type="url"
+                  placeholder="https://api.telegram.org"
+                />
+              </label>
+              <button class="primary-button" type="submit" disabled={savingTelegram}>
+                {savingTelegram ? 'Creating…' : 'Create bridge'}
+              </button>
+            </form>
+
+            <nav aria-label="Telegram bridges">
+              {#each telegramConfigurations as configuration}
+                <button
+                  class:active={configuration.path === selectedTelegramPath}
+                  onclick={() => selectTelegramConfiguration(configuration.path)}
+                >
+                  <span>
+                    <strong>{configuration.name}</strong>
+                    <code>{configuration.path}</code>
+                  </span>
+                  <small>{resourceConverged(configuration) ? resourceState(configuration) : 'reconciling'}</small>
+                </button>
+              {/each}
+            </nav>
+          </aside>
+
+          {#if selectedTelegram}
+            <article class="telegram-editor">
+              <header>
+                <div>
+                  <p class="eyebrow">Telegram Resource</p>
+                  <h2>{selectedTelegram.name}</h2>
+                  <code>{selectedTelegram.path}</code>
+                </div>
+                <span class:pending={!resourceConverged(selectedTelegram)} class="state-pill">
+                  {resourceConverged(selectedTelegram)
+                    ? resourceState(selectedTelegram)
+                    : 'reconciling'}
+                </span>
+              </header>
+
+              <form
+                class="telegram-settings"
+                onsubmit={(event) => {
+                  event.preventDefault();
+                  void saveTelegramConfiguration();
+                }}
+              >
+                <div class="telegram-field-grid">
+                  <label>
+                    Forum group chat ID
+                    <input
+                      bind:value={editTelegramChatId}
+                      inputmode="numeric"
+                      pattern="-?[0-9]+"
+                      required
+                    />
+                  </label>
+                  <label>
+                    Sync mode
+                    <select bind:value={editTelegramMode}>
+                      <option value="bidirectional">Bidirectional</option>
+                      <option value="telegram-to-kas">Telegram → KAS</option>
+                      <option value="kas-to-telegram">KAS → Telegram</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Replacement bot token
+                  <input
+                    bind:value={editTelegramToken}
+                    type="password"
+                    minlength="20"
+                    autocomplete="new-password"
+                    placeholder="Leave blank to keep the current token"
+                  />
+                  <small>The existing token is never shown. Leave this field empty to retain it.</small>
+                </label>
+                <label>
+                  API base <small>Optional</small>
+                  <input
+                    bind:value={editTelegramApiBase}
+                    type="url"
+                    placeholder="https://api.telegram.org"
+                  />
+                </label>
+                <div class="telegram-form-actions">
+                  <span>Revision {selectedTelegram.revision}</span>
+                  <button class="primary-button" type="submit" disabled={savingTelegram}>
+                    {savingTelegram ? 'Saving…' : 'Save changes'}
+                  </button>
+                </div>
+              </form>
+
+              <section class="telegram-mappings" aria-label="Thread to Telegram Topic mappings">
+                <header>
+                  <div>
+                    <strong>Managed Telegram Topics</strong>
+                    <small>KAS asks the Bot to create one forum Topic for each mapped Thread.</small>
+                  </div>
+                  <span>{telegramTopicLinks.length}</span>
+                </header>
+
+                <p class="telegram-managed-note">
+                  Only Topics created here are synchronized. Existing Telegram Topics and the
+                  General Topic are ignored. The Thread title is the Topic name and renaming the
+                  Thread updates it in Telegram.
+                </p>
+
+                <form
+                  class="telegram-mapping-create"
+                  onsubmit={(event) => {
+                    event.preventDefault();
+                    void createTelegramTopicLink();
+                  }}
+                >
+                  <label>
+                    KAS Thread
+                    <select
+                      value={telegramMappingThreadPath}
+                      onchange={(event) =>
+                        selectTelegramMappingThread(
+                          (event.currentTarget as HTMLSelectElement).value
+                        )}
+                      required
+                    >
+                      <option value="" disabled>Choose a Thread</option>
+                      {#each threads as thread}
+                        <option value={thread.path}>{titleOf(thread)} · {thread.path}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <button
+                    class="quiet-button"
+                    type="submit"
+                    disabled={savingTelegram || threads.length === 0}
+                  >
+                    {savingTelegram ? 'Creating…' : 'Create Telegram Topic'}
+                  </button>
+                </form>
+
+                {#if telegramTopicLinks.length === 0}
+                  <p class="telegram-mapping-empty">
+                    No managed Topics yet. Choose a Thread above and let the Bot create one.
+                  </p>
+                {:else}
+                  <div class="telegram-mapping-list">
+                    {#each telegramTopicLinks as link}
+                      {@const thread = threads.find((candidate) => candidate.path === link.source.path)}
+                      <article>
+                        <div>
+                          <strong>{thread ? titleOf(thread) : link.source.path}</strong>
+                          <code>{link.source.path}</code>
+                        </div>
+                        <span>↔</span>
+                        <div>
+                          <small>Telegram Topic</small>
+                          <strong>
+                            {typeof link.metadata.topic_name === 'string'
+                              ? link.metadata.topic_name
+                              : thread
+                                ? titleOf(thread)
+                                : 'Managed Topic'}
+                          </strong>
+                          {#if typeof link.metadata.topic_id === 'number' ||
+                          typeof link.metadata.topic_id === 'string'}
+                            <code>Topic ID {link.metadata.topic_id}</code>
+                          {:else}
+                            <span class="telegram-provisioning">Provisioning…</span>
+                          {/if}
+                        </div>
+                        <button
+                          class="danger-button"
+                          type="button"
+                          disabled={savingTelegram}
+                          onclick={() => void deleteTelegramTopicLink(link.path, link.revision)}
+                        >
+                          Remove
+                        </button>
+                      </article>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
+            </article>
+          {:else}
+            <div class="management-empty">
+              <p class="eyebrow">No Telegram bridges</p>
+              <h2>Connect a Telegram forum group.</h2>
+              <p>Create a bridge with the form to begin syncing Topics and KAS Threads.</p>
+            </div>
+          {/if}
+        </div>
+      </section>
     {:else if view === 'plugin'}
       <section class="frontend-plugin-host" aria-label={selectedPlugin?.label ?? 'Frontend Plugin'}>
         {#if loading || !pluginUrl}
@@ -2339,7 +2880,7 @@
             bind:this={pluginFrame}
             src={pluginUrl}
             title={selectedPlugin?.label ?? 'Frontend Plugin'}
-            sandbox="allow-scripts"
+            sandbox="allow-scripts allow-forms"
           ></iframe>
         {/if}
       </section>
@@ -2926,6 +3467,42 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+{#if deleteTelegramTarget}
+  <div class="modal-backdrop" role="presentation">
+    <div
+      class="modal destructive-modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="delete-telegram-title"
+    >
+      <div class="modal-kicker danger-text">Delete Resource</div>
+      <h2 id="delete-telegram-title">Delete {deleteTelegramTarget.name}?</h2>
+      <p>
+        This removes its Thread ↔ Topic Links before deleting the Telegram bridge. Messages and
+        Threads already created through the bridge are retained.
+      </p>
+      <code class="delete-path">{deleteTelegramTarget.path}</code>
+      <div class="modal-actions">
+        <button
+          type="button"
+          class="quiet-button"
+          onclick={() => (deleteTelegramTarget = null)}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="danger-button solid"
+          disabled={savingTelegram}
+          onclick={() => void deleteTelegramConfiguration()}
+        >
+          {savingTelegram ? 'Deleting…' : 'Delete bridge'}
+        </button>
+      </div>
     </div>
   </div>
 {/if}

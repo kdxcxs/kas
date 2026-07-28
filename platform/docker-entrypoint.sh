@@ -63,7 +63,7 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
 
   echo "Installing KAS Platform packages..."
   for package in \
-    thread session file proxy frontend skill approval-result approval agent message; do
+    thread session file proxy frontend skill approval-result approval agent message telegram; do
     install_package "$PACKAGES_DIR/$package.kas"
   done
 
@@ -123,6 +123,7 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
 
   wait_for_state "/manifests/file/driver" running
   wait_for_state "/manifests/frontend-plugin/driver" running
+  wait_for_state "/manifests/telegram/driver" running
   wait_for_state "/proxies/file" available
   wait_for_state "/proxies/skill" available
   wait_for_state "/proxies/approval" available
@@ -153,10 +154,12 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
     "/frontend-plugins/skills" skills skills.html Skills "⌁" 30 /skills
   install_plugin "$PLUGINS_DIR/workspace.zip" \
     "/frontend-plugins/approvals" approvals approvals.html Approvals "✓" 40 /approvals
+  install_plugin "$PLUGINS_DIR/workspace.zip" \
+    "/frontend-plugins/telegram" telegram telegram.html Telegram "✈" 45 /telegram
   install_plugin "$PLUGINS_DIR/registry.zip" \
     "/frontend-plugins/registry" registry index.html Objects "◇" 50 /objects
 
-  for plugin in threads agents skills approvals registry; do
+  for plugin in threads agents skills approvals telegram registry; do
     wait_for_state "/frontend-plugins/$plugin" available
   done
 

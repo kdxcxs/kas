@@ -24,7 +24,7 @@ if [[ ! -f "$FRONTEND_DIST/index.html" ]]; then
 fi
 
 cp -R "$FRONTEND_DIST/." "$STAGING/"
-for view in agents skills approvals threads; do
+for view in agents skills approvals threads telegram; do
   cp "$FRONTEND_DIST/index.html" "$STAGING/$view.html"
 done
 

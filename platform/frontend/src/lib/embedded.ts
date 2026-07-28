@@ -1,4 +1,4 @@
-export type EmbeddedView = 'agents' | 'skills' | 'approvals' | 'threads';
+export type EmbeddedView = 'agents' | 'skills' | 'approvals' | 'threads' | 'telegram';
 
 interface HostContext {
   subject?: {
@@ -17,7 +17,13 @@ interface PendingFetch {
 
 const HOST_SOURCE = 'kas-frontend-host';
 const PLUGIN_SOURCE = 'kas-frontend-plugin';
-const embeddedNames = new Set<EmbeddedView>(['agents', 'skills', 'approvals', 'threads']);
+const embeddedNames = new Set<EmbeddedView>([
+  'agents',
+  'skills',
+  'approvals',
+  'threads',
+  'telegram'
+]);
 const pending = new Map<string, PendingFetch>();
 let sequence = 0;
 let resolveContext: ((context: HostContext) => void) | undefined;
