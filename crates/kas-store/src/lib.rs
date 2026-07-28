@@ -1,12 +1,15 @@
 //! Persistence for KAS's single-Resource model.
 
 mod database;
+mod reconcile;
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
-use database::{Connection, Error as DatabaseError, OptionalExtension, Row, Transaction};
+use database::{
+    Connection, Error as DatabaseError, IntoParam, OptionalExtension, Param, Row, Transaction,
+};
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
     package_path_for_digest, ActionSpec, CreateResource, CreateRun, CredentialSpec, DeliveryStatus,
@@ -18,6 +21,7 @@ use kas_core::{
     UpdateResource, UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE, STATE_AVAILABLE,
     STATE_DELETED,
 };
+use reconcile::{affected_manifest_paths, driver_matches_resource, ReconcileQueue};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -25,7 +29,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 14;
+pub const LATEST_SCHEMA_VERSION: u32 = 15;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -82,6 +86,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         14,
         include_str!("../migrations/0014_resource_documents.sql"),
     ),
+    (
+        15,
+        include_str!("../migrations/0015_link_endpoint_indexes.sql"),
+    ),
 ];
 
 const RESOURCE_SELECT: &str = "SELECT path,metadata,spec,status FROM resources";
@@ -132,9 +140,46 @@ pub fn migrate_database(database: &str) -> Result<u32, StoreError> {
 pub struct Store {
     connection: Connection,
     deliveries: HashMap<Uuid, DriverDelivery>,
+    reconciliations: ReconcileQueue,
 }
 
 impl Store {
+    fn rebuild_reconcile_queue(&mut self) -> Result<(), StoreError> {
+        let drivers = self.list_drivers()?;
+        let resources = self.list_resources(None)?;
+        self.reconciliations.rebuild(&drivers, &resources);
+        Ok(())
+    }
+
+    fn schedule_reconcile_path(&mut self, path: &str) -> Result<(), StoreError> {
+        match self.get_resource(path) {
+            Ok(resource) => {
+                self.reconciliations.schedule(&resource);
+                Ok(())
+            }
+            Err(StoreError::NotFound(_)) => {
+                self.reconciliations.remove_resource(path);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn schedule_reconcile_values(&mut self, values: &[Value]) -> Result<(), StoreError> {
+        for value in values {
+            if let Ok(resource) = serde_json::from_value::<Resource>(value.clone()) {
+                self.schedule_reconcile_path(&resource.path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_reconcile_drivers(&mut self) -> Result<(), StoreError> {
+        let drivers = self.list_drivers()?;
+        self.reconciliations.refresh_drivers(&drivers);
+        Ok(())
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let database = path.as_ref().to_string_lossy();
         Self::open_database(&database)
@@ -147,9 +192,11 @@ impl Store {
         let mut store = Self {
             connection,
             deliveries: HashMap::new(),
+            reconciliations: ReconcileQueue::default(),
         };
         store.ensure_builtins()?;
         reconcile_platform_state(&mut store)?;
+        store.rebuild_reconcile_queue()?;
         Ok(store)
     }
 
@@ -159,10 +206,12 @@ impl Store {
         let mut store = Self {
             connection,
             deliveries: HashMap::new(),
+            reconciliations: ReconcileQueue::default(),
         };
         migrate_connection(&mut store.connection)?;
         store.ensure_builtins()?;
         reconcile_platform_state(&mut store)?;
+        store.rebuild_reconcile_queue()?;
         Ok(store)
     }
 
@@ -270,6 +319,11 @@ impl Store {
 
         let tx = self.connection.transaction()?;
         let now = Utc::now();
+        let event_cursor: u64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM events",
+            db_params![],
+            |row| row.get(0),
+        )?;
         let mut stored_paths = Vec::new();
         let mut projections = Vec::new();
 
@@ -395,8 +449,29 @@ impl Store {
         for resource in &stored_resources {
             project_declared_relationships(&tx, resource, now)?;
         }
-        reconcile_all_resources(&tx, "package_registered", now)?;
+        let mut touched_paths = stored_paths.clone();
+        for driver_path in stored_resources
+            .iter()
+            .filter(|resource| resource.manifest == DRIVER_MANIFEST)
+            .map(|resource| resource.path.as_str())
+        {
+            let driver = resource_in(&tx, driver_path)?;
+            touched_paths.extend(reconcile_driver_change(&tx, None, Some(&driver))?);
+        }
+        touched_paths.extend(event_paths_since(&tx, event_cursor)?);
+        touched_paths.sort();
+        touched_paths.dedup();
+        for path in &touched_paths {
+            if let Ok(resource) = resource_in(&tx, path) {
+                enqueue_if_drifted(&tx, &resource, "package_registered", now)?;
+            }
+        }
         tx.commit()?;
+        let drivers = self.list_drivers()?;
+        self.reconciliations.refresh_drivers(&drivers);
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
         Ok(package_resources)
     }
 
@@ -414,6 +489,7 @@ impl Store {
         }
         let tx = self.connection.transaction()?;
         let now = Utc::now();
+        let event_cursor = current_event_sequence_in(&tx)?;
         let input = normalized_initial_documents(&tx, &input)?;
         validate_against_manifest(
             &tx,
@@ -432,7 +508,11 @@ impl Store {
         project_declared_relationships(&tx, &planned_from_resource(resource.clone()), now)?;
         append_event(&tx, EventType::Created, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "created", now)?;
+        let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
         Ok(resource)
     }
 
@@ -478,7 +558,9 @@ impl Store {
         input: UpdateResource,
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
+        let event_cursor = current_event_sequence_in(&tx)?;
         let mut current = resource_in(&tx, path)?;
+        let previous = current.clone();
         if current.manifest == CREDENTIAL_MANIFEST {
             return Err(StoreError::Invalid(
                 "Credential Resources can only be changed through credential endpoints".into(),
@@ -503,9 +585,20 @@ impl Store {
         save_resource_in(&tx, &current)?;
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
+        let affected = reconcile_driver_change(&tx, Some(&previous), Some(&resource))?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "spec_updated", now)?;
+        let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
+        if resource.manifest == DRIVER_MANIFEST {
+            self.refresh_reconcile_drivers()?;
+        }
+        for path in affected {
+            self.schedule_reconcile_path(&path)?;
+        }
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
         Ok(resource)
     }
 
@@ -517,6 +610,7 @@ impl Store {
         mut input: UpdateResourceStatus,
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
+        let event_cursor = current_event_sequence_in(&tx)?;
         assert_driver_owns(&tx, path, driver_path, generation)?;
         let current = resource_in(&tx, path)?;
         normalize_submitted_status(&current, &mut input.status);
@@ -538,8 +632,12 @@ impl Store {
         refresh_projection(&tx, &resource, now)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         maybe_finish_deleted_resource(&tx, path, now)?;
+        let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
-        Ok(resource)
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
+        self.get_resource(path).or(Ok(resource))
     }
 
     pub fn delete_resource(
@@ -548,6 +646,7 @@ impl Store {
         expected_revision: u64,
     ) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
+        let event_cursor = current_event_sequence_in(&tx)?;
         let mut resource = resource_in(&tx, path)?;
         if resource.revision != expected_revision {
             return Err(StoreError::Conflict(format!(
@@ -577,8 +676,12 @@ impl Store {
             save_resource_in(&tx, &resource)?;
             maybe_finish_deleted_resource(&tx, path, now)?;
         }
+        let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
-        Ok(resource)
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
+        self.get_resource(path).or(Ok(resource))
     }
 
     pub fn links_for_resource(&self, path: &str) -> Result<Vec<Resource>, StoreError> {
@@ -592,21 +695,42 @@ impl Store {
         target: Option<&str>,
         either_endpoint: bool,
     ) -> Result<Vec<Resource>, StoreError> {
-        Ok(self
-            .list_resources(Some(LINK_MANIFEST))?
-            .into_iter()
-            .filter(|resource| {
-                let Ok(link) = decode::<LinkSpec>(&resource.spec, "Link spec") else {
-                    return false;
-                };
-                source.is_none_or(|expected| {
-                    link.source == expected || (either_endpoint && link.target == expected)
-                }) && relation.is_none_or(|expected| link.relation == expected)
-                    && target.is_none_or(|expected| {
-                        link.target == expected || (either_endpoint && link.source == expected)
-                    })
-            })
-            .collect())
+        let mut predicates = vec!["json_extract(metadata,'$.manifest')=?".to_string()];
+        let mut params: Vec<Param> = vec![LINK_MANIFEST.into_param()];
+        if let Some(relation) = relation {
+            predicates.push("json_extract(spec,'$.relation')=?".into());
+            params.push(relation.into_param());
+        }
+        if let Some(source) = source {
+            predicates.push(if either_endpoint {
+                "(json_extract(spec,'$.source')=? OR json_extract(spec,'$.target')=?)".into()
+            } else {
+                "json_extract(spec,'$.source')=?".into()
+            });
+            params.push(source.into_param());
+            if either_endpoint {
+                params.push(source.into_param());
+            }
+        }
+        if let Some(target) = target {
+            predicates.push(if either_endpoint {
+                "(json_extract(spec,'$.target')=? OR json_extract(spec,'$.source')=?)".into()
+            } else {
+                "json_extract(spec,'$.target')=?".into()
+            });
+            params.push(target.into_param());
+            if either_endpoint {
+                params.push(target.into_param());
+            }
+        }
+        let sql = format!(
+            "{RESOURCE_SELECT} WHERE {} ORDER BY path",
+            predicates.join(" AND ")
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params, resource_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     fn relation_path(&self, role: RelationRole) -> Result<Option<String>, StoreError> {
@@ -703,6 +827,7 @@ impl Store {
     pub fn start_driver(&mut self, path: &str) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
+        let previous = driver.clone();
         require_manifest(&driver, DRIVER_MANIFEST)?;
         let state = driver_state(&driver)?;
         if !matches!(state, DriverState::Stopped | DriverState::Failed) {
@@ -718,17 +843,22 @@ impl Store {
             driver.metadata.kas.updated_at = now;
             save_resource_in(&tx, &driver)?;
             driver = resource_in(&tx, path)?;
-            reconcile_all_resources(&tx, "driver_started", now)?;
         }
         let generation = driver.metadata.kas.generation + 1;
         driver.metadata.kas.generation = generation;
         save_resource_in(&tx, &driver)?;
         update_status_document(&tx, path, DriverState::Starting, &driver.status.spec, now)?;
         driver = resource_in(&tx, path)?;
+        let affected = reconcile_driver_change(&tx, Some(&previous), Some(&driver))?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
         self.deliveries
             .retain(|_, delivery| delivery.driver_path != path);
+        self.refresh_reconcile_drivers()?;
+        for path in affected {
+            self.schedule_reconcile_path(&path)?;
+        }
+        self.schedule_reconcile_path(path)?;
         Ok(driver)
     }
 
@@ -769,6 +899,7 @@ impl Store {
     pub fn stop_driver(&mut self, path: &str) -> Result<Resource, StoreError> {
         let tx = self.connection.transaction()?;
         let mut driver = resource_in(&tx, path)?;
+        let previous = driver.clone();
         require_manifest(&driver, DRIVER_MANIFEST)?;
         let state = driver_state(&driver)?;
         let now = Utc::now();
@@ -778,7 +909,6 @@ impl Store {
             driver.metadata.kas.updated_at = now;
             save_resource_in(&tx, &driver)?;
             driver = resource_in(&tx, path)?;
-            reconcile_all_resources(&tx, "driver_stopped", now)?;
         }
         let state = if matches!(state, DriverState::Starting | DriverState::Running) {
             DriverState::Stopping
@@ -787,8 +917,14 @@ impl Store {
         };
         update_status_document(&tx, path, state, &driver.status.spec, now)?;
         driver = resource_in(&tx, path)?;
+        let affected = reconcile_driver_change(&tx, Some(&previous), Some(&driver))?;
         append_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
+        self.refresh_reconcile_drivers()?;
+        for path in affected {
+            self.schedule_reconcile_path(&path)?;
+        }
+        self.schedule_reconcile_path(path)?;
         Ok(driver)
     }
 
@@ -898,6 +1034,7 @@ impl Store {
         run = resource_in(&tx, run_path)?;
         append_event(&tx, EventType::Updated, &run, now)?;
         tx.commit()?;
+        self.schedule_reconcile_path(run_path)?;
         Ok(run)
     }
 
@@ -941,6 +1078,7 @@ impl Store {
         if delivery.status != DeliveryStatus::Acked {
             return Err(StoreError::Conflict("Delivery must be acknowledged".into()));
         }
+        let event_cursor = current_event_sequence_in(&tx)?;
         let now = Utc::now();
         let mut results = Vec::new();
         for operation in operations {
@@ -952,7 +1090,7 @@ impl Store {
                 now,
             )?);
         }
-        match delivery.work {
+        match &delivery.work {
             DriverWork::Reconcile {
                 driver_revision,
                 resource,
@@ -961,7 +1099,7 @@ impl Store {
                     current.status.metadata.kas.observed.insert(
                         driver_path.into(),
                         DriverObservation {
-                            driver_revision,
+                            driver_revision: *driver_revision,
                             resource_revision: resource.revision,
                         },
                     );
@@ -974,8 +1112,16 @@ impl Store {
             }
             DriverWork::Run { .. } => {}
         }
+        let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
         self.deliveries.remove(&delivery_id);
+        self.schedule_reconcile_values(&results)?;
+        for path in touched_paths {
+            self.schedule_reconcile_path(&path)?;
+        }
+        if let DriverWork::Reconcile { resource, .. } = &delivery.work {
+            self.schedule_reconcile_path(&resource.path)?;
+        }
         Ok(results)
     }
 }
@@ -1002,12 +1148,25 @@ impl Store {
         }
 
         let now = Utc::now();
-        let reconcile = next_reconciliation_in(&tx, driver_path)?;
-        let work = if let Some((path, driver_revision)) = reconcile {
-            Some(DriverWork::Reconcile {
-                driver_revision,
-                resource: resource_in(&tx, &path)?,
-            })
+        let mut reconcile_work = None;
+        while let Some((path, expected)) = self.reconciliations.pop(driver_path) {
+            let Ok(resource) = resource_in(&tx, &path) else {
+                continue;
+            };
+            if !self
+                .reconciliations
+                .is_pending(&resource, driver_path, &expected)
+            {
+                continue;
+            }
+            reconcile_work = Some(DriverWork::Reconcile {
+                driver_revision: expected.driver_revision,
+                resource,
+            });
+            break;
+        }
+        let work = if reconcile_work.is_some() {
+            reconcile_work
         } else {
             let run_path: Option<String> = tx
                 .query_row(
@@ -1265,7 +1424,9 @@ impl Store {
         insert_resource_row(&tx, &planned, false, "system", now)?;
         let resource = resource_in(&tx, &credential_path)?;
         append_event(&tx, EventType::Created, &resource, now)?;
+        enqueue_if_drifted(&tx, &resource, "credential_created", now)?;
         tx.commit()?;
+        self.schedule_reconcile_path(&credential_path)?;
         Ok(IssuedCredential {
             resource_path: credential_path,
             token,
@@ -1355,6 +1516,7 @@ impl Store {
         let resource = resource_in(&tx, path)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         tx.commit()?;
+        self.schedule_reconcile_path(path)?;
         Ok(resource)
     }
 }
@@ -1501,9 +1663,21 @@ fn migrate_connection(connection: &mut Connection) -> Result<u32, StoreError> {
                  path
              )
              WHERE (metadata::jsonb->>'manifest')='/builtin/link';
+             CREATE INDEX IF NOT EXISTS links_by_source
+             ON resources (
+                 ((spec::jsonb->>'source')),
+                 path
+             )
+             WHERE (metadata::jsonb->>'manifest')='/builtin/link';
+             CREATE INDEX IF NOT EXISTS links_by_target
+             ON resources (
+                 ((spec::jsonb->>'target')),
+                 path
+             )
+             WHERE (metadata::jsonb->>'manifest')='/builtin/link';
              CREATE INDEX IF NOT EXISTS events_by_resource_sequence
              ON events(resource_path,sequence);
-             UPDATE kas_schema SET version=14;",
+             UPDATE kas_schema SET version=15;",
         )?;
         return Ok(LATEST_SCHEMA_VERSION);
     }
@@ -2134,17 +2308,66 @@ fn owner_manifest_for_driver_in(
 fn refresh_projection(
     tx: &Transaction<'_>,
     resource: &Resource,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     match resource.manifest.as_str() {
         DRIVER_MANIFEST => {
             let spec: DriverSpec = decode(&resource.spec, "Driver spec")?;
             project_driver_manifests(tx, &resource.path, &spec)?;
-            reconcile_all_resources(tx, "driver_management_updated", now)?;
         }
         _ => {}
     }
     Ok(())
+}
+
+fn reconcile_driver_change(
+    tx: &Transaction<'_>,
+    old: Option<&Resource>,
+    new: Option<&Resource>,
+) -> Result<Vec<String>, StoreError> {
+    if old
+        .or(new)
+        .is_none_or(|resource| resource.manifest != DRIVER_MANIFEST)
+    {
+        return Ok(Vec::new());
+    }
+    let manifest_registry = resources_for_manifest_in(tx, MANIFEST_MANIFEST)?
+        .into_iter()
+        .map(|manifest| manifest.path)
+        .collect::<Vec<_>>();
+    let affected = affected_manifest_paths(old, new, &manifest_registry);
+    let driver_path = new
+        .or(old)
+        .expect("Driver delta has an endpoint")
+        .path
+        .clone();
+    let mut changed_paths = Vec::new();
+
+    for manifest in affected {
+        for mut resource in resources_for_manifest_in(tx, &manifest)? {
+            let before = resource.metadata.kas.observed.clone();
+            let status_before = resource.status.metadata.kas.observed.clone();
+            if let Some(driver) = new.filter(|driver| driver_matches_resource(driver, &resource)) {
+                resource.metadata.kas.observed.insert(
+                    driver_path.clone(),
+                    DriverObservation {
+                        driver_revision: driver.revision,
+                        resource_revision: resource.revision,
+                    },
+                );
+            } else {
+                resource.metadata.kas.observed.remove(&driver_path);
+                resource.status.metadata.kas.observed.remove(&driver_path);
+            }
+            if resource.metadata.kas.observed != before
+                || resource.status.metadata.kas.observed != status_before
+            {
+                save_resource_in(tx, &resource)?;
+                changed_paths.push(resource.path);
+            }
+        }
+    }
+    Ok(changed_paths)
 }
 
 fn driver_path_for_manifest(
@@ -2226,113 +2449,6 @@ fn enqueue_if_drifted(
         save_resource_in(tx, &updated)?;
     }
     Ok(())
-}
-
-fn next_reconciliation_in(
-    tx: &Transaction<'_>,
-    driver_path: &str,
-) -> Result<Option<(String, u64)>, StoreError> {
-    let pending_sql = if tx.is_postgres() {
-        "SELECT resources.path,
-                (expected.value->>'driver_revision')::bigint
-         FROM resources
-         JOIN LATERAL jsonb_each(
-             resources.metadata::jsonb#>'{\"[kas]\",observed}'
-         ) AS expected(key,value) ON true
-         LEFT JOIN LATERAL jsonb_each(
-             resources.status::jsonb#>'{metadata,\"[kas]\",observed}'
-         ) AS actual(key,value) ON actual.key=expected.key
-         WHERE expected.key=?
-           AND (
-             actual.key IS NULL
-             OR (actual.value->>'driver_revision')::bigint
-                != (expected.value->>'driver_revision')::bigint
-             OR (actual.value->>'resource_revision')::bigint
-                != (expected.value->>'resource_revision')::bigint
-           )
-         ORDER BY resources.metadata::jsonb#>>'{\"[kas]\",created_at}',
-                  resources.path
-         LIMIT 1"
-    } else {
-        "SELECT resources.path,
-                json_extract(expected.value,'$.driver_revision')
-         FROM resources
-         JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
-         LEFT JOIN json_each(resources.status,'$.metadata.\"[kas]\".observed') AS actual
-           ON actual.key=expected.key
-         WHERE expected.key=?
-           AND (
-             actual.key IS NULL
-             OR json_extract(actual.value,'$.driver_revision')
-                != json_extract(expected.value,'$.driver_revision')
-             OR json_extract(actual.value,'$.resource_revision')
-                != json_extract(expected.value,'$.resource_revision')
-           )
-         ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
-                  resources.path
-         LIMIT 1"
-    };
-    let pending = tx
-        .query_row(pending_sql, db_params![driver_path], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-        })
-        .optional()?;
-    if pending.is_some() {
-        return Ok(pending);
-    }
-
-    let driver = resource_in(tx, driver_path)?;
-    let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
-    for manifest in spec.manages {
-        let drifted_sql = if tx.is_postgres() {
-            "SELECT resources.path,
-                    (expected.value->>'driver_revision')::bigint
-             FROM resources
-             JOIN LATERAL jsonb_each(
-                 resources.metadata::jsonb#>'{\"[kas]\",observed}'
-             ) AS expected(key,value) ON true
-             WHERE expected.key=?
-               AND (resources.metadata::jsonb->>'manifest')=?
-               AND (
-                 (resources.metadata::jsonb #- '{\"[kas]\",observed}')
-                   IS DISTINCT FROM
-                 ((resources.status::jsonb->'metadata') #- '{\"[kas]\",observed}')
-                 OR resources.spec::jsonb
-                   IS DISTINCT FROM (resources.status::jsonb->'spec')
-               )
-             ORDER BY resources.metadata::jsonb#>>'{\"[kas]\",created_at}',
-                      resources.path
-             LIMIT 1"
-        } else {
-            "SELECT resources.path,
-                    json_extract(expected.value,'$.driver_revision')
-             FROM resources
-             JOIN json_each(resources.metadata,'$.\"[kas]\".observed') AS expected
-             WHERE expected.key=?
-               AND json_extract(resources.metadata,'$.manifest')=?
-               AND (
-                 json_remove(resources.metadata,'$.\"[kas]\".observed')
-                   IS NOT json_remove(
-                     json_extract(resources.status,'$.metadata'),
-                     '$.\"[kas]\".observed'
-                   )
-                 OR json(resources.spec)
-                   IS NOT json_quote(json_extract(resources.status,'$.spec'))
-               )
-             ORDER BY json_extract(resources.metadata,'$.\"[kas]\".created_at'),
-                      resources.path
-             LIMIT 1"
-        };
-        let drifted = tx
-            .query_row(drifted_sql, db_params![driver_path, manifest], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-            })
-            .optional()?;
-        if drifted.is_some() {
-            return Ok(drifted);
-        }
-    }
-    Ok(None)
 }
 
 fn reconcile_all_resources(
@@ -2714,6 +2830,26 @@ fn append_deleted_event(
         ],
     )?;
     Ok(())
+}
+
+fn current_event_sequence_in(tx: &Transaction<'_>) -> Result<u64, StoreError> {
+    tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM events",
+        db_params![],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
+fn event_paths_since(tx: &Transaction<'_>, cursor: u64) -> Result<Vec<String>, StoreError> {
+    let mut statement = tx.prepare(
+        "SELECT DISTINCT resource_path FROM events
+         WHERE sequence>? ORDER BY resource_path",
+    )?;
+    statement
+        .query_map(db_params![cursor], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
 }
 
 fn event_type_name(event_type: EventType) -> &'static str {

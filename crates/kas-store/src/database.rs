@@ -342,10 +342,6 @@ pub enum Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    pub fn is_postgres(&self) -> bool {
-        matches!(self, Self::Postgres { .. })
-    }
-
     pub fn execute(&self, sql: &str, params: Vec<Param>) -> Result<usize> {
         match self {
             Self::Sqlite(transaction) => Ok(transaction
@@ -707,6 +703,12 @@ fn postgres_sql(sql: &str) -> String {
             "(metadata::jsonb#>>'{\"[kas]\",created_at}')",
         )
         .replace("json_extract(spec,'$.driver')", "(spec::jsonb->>'driver')")
+        .replace(
+            "json_extract(spec,'$.relation')",
+            "(spec::jsonb->>'relation')",
+        )
+        .replace("json_extract(spec,'$.source')", "(spec::jsonb->>'source')")
+        .replace("json_extract(spec,'$.target')", "(spec::jsonb->>'target')")
         .replace(
             "json_extract(spec,'$.token_hash')",
             "(spec::jsonb->>'token_hash')",
