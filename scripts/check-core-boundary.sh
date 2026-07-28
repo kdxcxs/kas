@@ -45,13 +45,31 @@ fi
 INVALID_COMMITS=0
 while IFS= read -r commit; do
   [[ -n "$commit" ]] || continue
-  PARENT_COUNT="$(git rev-list --parents -n 1 "$commit" | awk '{print NF - 1}')"
+  read -r -a COMMIT_AND_PARENTS <<<"$(git rev-list --parents -n 1 "$commit")"
+  PARENT_COUNT=$((${#COMMIT_AND_PARENTS[@]} - 1))
   if ((PARENT_COUNT > 1)); then
-    continue
+    CORE_MERGE=0
+    for parent in "${COMMIT_AND_PARENTS[@]:2}"; do
+      if git merge-base --is-ancestor "$parent" "$CORE_REF"; then
+        CORE_MERGE=1
+        break
+      fi
+    done
+    if ((CORE_MERGE)); then
+      continue
+    fi
+    CHANGED_PATHS="$(
+      git diff --name-only "${COMMIT_AND_PARENTS[1]}" "$commit"
+    )"
+  else
+    CHANGED_PATHS="$(
+      git diff-tree --root --no-commit-id --name-only -r "$commit"
+    )"
   fi
   INVALID_PATHS="$(
-    git diff-tree --root --no-commit-id --name-only -r "$commit" |
+    printf '%s\n' "$CHANGED_PATHS" |
       while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
         case "$path" in
           platform/*) ;;
           *) echo "$path" ;;
