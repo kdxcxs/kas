@@ -45,6 +45,7 @@ pub(crate) struct Supervisor {
 
 enum SupervisorCommand {
     EnsureRunning(DriverLaunch),
+    Restart(DriverLaunch),
     Stop(String),
     Finished { driver_path: String, instance: Uuid },
 }
@@ -68,6 +69,12 @@ impl Supervisor {
             .map_err(|_| anyhow::anyhow!("Driver supervisor is not running"))
     }
 
+    pub fn restart(&self, launch: DriverLaunch) -> anyhow::Result<()> {
+        self.commands
+            .send(SupervisorCommand::Restart(launch))
+            .map_err(|_| anyhow::anyhow!("Driver supervisor is not running"))
+    }
+
     pub fn stop(&self, driver_path: impl Into<String>) -> anyhow::Result<()> {
         self.commands
             .send(SupervisorCommand::Stop(driver_path.into()))
@@ -82,45 +89,42 @@ async fn run_supervisor(
     api_url: String,
     data_dir: PathBuf,
 ) {
-    let mut drivers: HashMap<String, (Uuid, watch::Sender<bool>)> = HashMap::new();
+    let mut drivers: HashMap<String, SupervisedDriver> = HashMap::new();
     while let Some(command) = receiver.recv().await {
         match command {
             SupervisorCommand::EnsureRunning(launch) => {
                 let driver_path = launch.driver.path.clone();
-                if drivers
-                    .get(&driver_path)
-                    .is_some_and(|(_, desired)| *desired.borrow())
-                {
+                if drivers.contains_key(&driver_path) {
                     continue;
                 }
-                if let Some((_, previous)) = drivers.remove(&driver_path) {
-                    let _ = previous.send(false);
-                }
-                let (desired, desired_receiver) = watch::channel(true);
-                let instance = Uuid::new_v4();
-                drivers.insert(driver_path.clone(), (instance, desired));
-                let completion = commands.clone();
-                let task_store = store.clone();
-                let task_api_url = api_url.clone();
-                let task_data_dir = data_dir.clone();
-                tokio::spawn(async move {
-                    run_driver(
-                        task_store,
-                        task_api_url,
-                        task_data_dir,
+                start_supervised_driver(
+                    &mut drivers,
+                    &commands,
+                    &store,
+                    &api_url,
+                    &data_dir,
+                    launch,
+                );
+            }
+            SupervisorCommand::Restart(launch) => {
+                let driver_path = launch.driver.path.clone();
+                if let Some(current) = drivers.get_mut(&driver_path) {
+                    current.pending = Some(launch);
+                    let _ = current.desired.send(false);
+                } else {
+                    start_supervised_driver(
+                        &mut drivers,
+                        &commands,
+                        &store,
+                        &api_url,
+                        &data_dir,
                         launch,
-                        desired_receiver,
-                    )
-                    .await;
-                    let _ = completion.send(SupervisorCommand::Finished {
-                        driver_path,
-                        instance,
-                    });
-                });
+                    );
+                }
             }
             SupervisorCommand::Stop(driver_path) => {
-                if let Some((_, desired)) = drivers.remove(&driver_path) {
-                    let _ = desired.send(false);
+                if let Some(current) = drivers.remove(&driver_path) {
+                    let _ = current.desired.send(false);
                 } else if let Ok(mut store) = store.lock() {
                     let _ = store.stop_driver(&driver_path);
                 }
@@ -131,16 +135,73 @@ async fn run_supervisor(
             } => {
                 if drivers
                     .get(&driver_path)
-                    .is_some_and(|(current, _)| *current == instance)
+                    .is_some_and(|current| current.instance == instance)
                 {
-                    drivers.remove(&driver_path);
+                    let pending = drivers
+                        .remove(&driver_path)
+                        .and_then(|current| current.pending);
+                    if let Some(launch) = pending {
+                        start_supervised_driver(
+                            &mut drivers,
+                            &commands,
+                            &store,
+                            &api_url,
+                            &data_dir,
+                            launch,
+                        );
+                    }
                 }
             }
         }
     }
-    for (_, (_, desired)) in drivers {
-        let _ = desired.send(false);
+    for (_, current) in drivers {
+        let _ = current.desired.send(false);
     }
+}
+
+struct SupervisedDriver {
+    instance: Uuid,
+    desired: watch::Sender<bool>,
+    pending: Option<DriverLaunch>,
+}
+
+fn start_supervised_driver(
+    drivers: &mut HashMap<String, SupervisedDriver>,
+    commands: &mpsc::UnboundedSender<SupervisorCommand>,
+    store: &Arc<Mutex<Store>>,
+    api_url: &str,
+    data_dir: &std::path::Path,
+    launch: DriverLaunch,
+) {
+    let driver_path = launch.driver.path.clone();
+    let (desired, desired_receiver) = watch::channel(true);
+    let instance = Uuid::new_v4();
+    drivers.insert(
+        driver_path.clone(),
+        SupervisedDriver {
+            instance,
+            desired,
+            pending: None,
+        },
+    );
+    let completion = commands.clone();
+    let task_store = store.clone();
+    let task_api_url = api_url.to_owned();
+    let task_data_dir = data_dir.to_owned();
+    tokio::spawn(async move {
+        run_driver(
+            task_store,
+            task_api_url,
+            task_data_dir,
+            launch,
+            desired_receiver,
+        )
+        .await;
+        let _ = completion.send(SupervisorCommand::Finished {
+            driver_path,
+            instance,
+        });
+    });
 }
 
 async fn run_driver(

@@ -316,7 +316,8 @@ ${KAS_DATA_DIR}/packages/sha256/<digest>/
   manifest → /builtin/package
 ```
 
-其 `spec` 和 `status.spec` 保存 `digest`、`size_bytes`、`media_type`，
+其 `spec` 和 `status.spec` 保存 `digest`、`size_bytes`、`media_type`、
+`manifest` 和 `manifest_version`，
 生命周期 state 位于各自 metadata；Resource 不保存数据目录的绝对路径。
 KAS 同时创建
 `/builtin/relations/package-manifest` Link：
@@ -330,16 +331,27 @@ Manifest spec 因此不再重复保存 `package_digest`。运行时使用 Packag
 表达同一事实，不参与控制面 bootstrap。Package Resource 只能由
 `POST /packages` 创建并受保护，不能通过普通 Resource CRUD 伪造。
 
-同一 Manifest path 和 Package 的重复安装是幂等操作；同一路径安装不同内容会
-被拒绝。`POST /packages` 返回 Package Resource；安装后的 Manifest 和初始化
-Resource 通过 `GET /resources` 或 `GET /resources/by-path?path=...` 查询，
-没有第二套 Manifest CRUD。
+同一 Manifest path 和 digest 的重复安装是幂等操作；同一路径安装不同 digest
+会执行原子更新。更新会替换该 Package 管理的 Manifest 和初始化 Resource，
+创建新增成员、删除已移除成员，并把 package-manifest Link 切换到新的
+Package Resource。该 Manifest 的普通业务 Resource 不会被删除或直接改写
+业务 `spec`；KAS 只把它们的 `metadata["[kas]"].package` 推进到新 Package，
+由既有 Reconcile 机制完成业务转换并推进
+`status.metadata["[kas]"].package`。调用方需要
+分别拥有已有成员的 `update`、新增成员的 `create`、移除成员和旧 Package 的
+`delete` 权限。`POST /packages` 返回新的 Package Resource；安装后的 Manifest
+和初始化 Resource 通过 `GET /resources` 或
+`GET /resources/by-path?path=...` 查询，没有第二套 Manifest CRUD。
 
 带 Driver 的包安装完成后，由 API 进程内的 Supervisor 自动启动
 entrypoint。Supervisor 管理 singleton、generation、临时 Credential、hello
 超时、停止、崩溃重启和退避，并向进程传递 `KAS_API`、
 `KAS_DRIVER_PATH`、`KAS_DRIVER_GENERATION`、`KAS_DRIVER_TOKEN`、
-`KAS_MANIFEST_PATH` 和 `KAS_PACKAGE_ROOT`。
+`KAS_MANIFEST_PATH` 和 `KAS_PACKAGE_ROOT`。更新 Package 时，仍处于 running
+目标状态的 Driver 会先停止旧进程，再以递增的 generation 和新的
+`KAS_PACKAGE_ROOT` 启动；同一路径不会同时运行两个 Driver 进程。
+旧 Package Resource 会保留到所有引用它的 status 都收敛到新 Package，之后
+由 KAS 回收；不需要单独的 migration mode 或另一套 Driver 协议。
 
 ## 权限
 
@@ -419,6 +431,7 @@ Resource 会呈现为：
     "state": "available",
     "[kas]": {
       "revision": 4,
+      "package": "/packages/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "observed": {
         "/manifests/agent/driver": {
           "driver_revision": 2,
@@ -441,6 +454,7 @@ Resource 会呈现为：
       "state": "available",
       "[kas]": {
         "revision": 4,
+        "package": "/packages/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "observed": {
           "/manifests/agent/driver": {
             "driver_revision": 2,
@@ -466,6 +480,12 @@ Resource 会呈现为：
 owner Driver 在自己的消费版本落后，或根级 metadata/spec 与 status
 metadata/spec 任一字段不同时收到 reconcile；只 watch 的 Driver 仅比较自己
 的 observed 条目。
+
+`metadata["[kas]"].package` 是该 Resource 的 Manifest 当前对应的目标
+Package；status 中的同名字段是 owner Driver 最近成功 Reconcile 时使用的
+Package。两者不同时仍通过普通 Reconcile 收敛。`managed_by` 继续只表达
+Package 初始化 Resource 的增删所有权，不承担版本消费语义；多 Driver 的消费
+进度继续由 `observed` 独立记录。
 
 Driver spec 使用 `manages` 声明由该 singleton 负责推进 status 的 Manifest。
 每个 Manifest 最多只能映射到一个 Driver，但一个 Driver 可以管理多个
@@ -553,10 +573,13 @@ Event 是平台维护的内部持久化审计日志，只能随业务对象事�
 
 Driver 使用 `/drivers/connect?path=...&generation=N` 建立带 Bearer Token 的
 WebSocket，不再依赖 claim 轮询。控制面主动推送 reconcile、Run 和 stop，
-Driver 在同一连接上返回 ack，并将所有业务写操作统一放进一条 `mutation`
-消息。in-flight delivery 仅存在于当前 API 进程内；断线或服务重启后，KAS
-重新扫描尚未收敛的 observation 与 queued/running Run 并生成新 delivery，
-因此不需要持久化投递副本。
+Driver 在同一连接上返回 ack、mutation、`reconcile_complete` 和自动
+heartbeat。每个 reconcile delivery 只包含一个 Resource；一个连接默认最多
+并行处理 16 个 delivery，因此一个慢 Resource 不会阻塞其他 Resource。
+in-flight delivery 仅存在于当前 API 进程内；连接断开、Driver 内部任务退出
+或进程重启时，KAS 在 15 秒租约到期后使用同一个 `delivery_id` 重投。
+API 服务本身重启后，则从尚未收敛的 observation 与 queued/running Run
+重新生成 delivery，因此不需要持久化投递副本。
 
 `hello.driver`、`reconcile.resource` 以及 Run 投递中的 `run`、`resource`、
 `action` 都使用同一个 Resource envelope。Driver 的异步
@@ -566,19 +589,20 @@ Link 也只是 manifest 为 `/builtin/link` 的 Resource。
 Mutation 只保留 `create_resource`、`update_resource`、`delete_resource`、
 `update_resource_status` 和 `complete_run`。Driver 因而可以在同一事务中创建
 任意获授权的 Resource，包括 ServiceAccount、Role 或 Link。
-空 mutation 表示当前 Driver 已经消费该 Resource revision；KAS 原子完成
-delivery，并写入该 Driver 自己的
-`status.metadata["[kas]"].observed` 条目。如果处理期间 Resource 或 Driver
-revision 已推进，新版本仍会继续排队。Run mutation 必须
-以该 Run 的 `complete_run` 结束。KAS 返回 `mutation_result`，只有
-`committed` 才表示整组写入和消费确认成功。
+reconcile mutation 只原子提交其中的业务写操作，不再隐式完成 delivery；
+空操作时无需发送 mutation。Driver 只有在所需 mutation 获得 `committed`
+结果后才发送 `reconcile_complete`。KAS 收到 complete 后才写入该 Driver
+自己的 `status.metadata["[kas]"].observed` 条目并结束 delivery。相同
+delivery 的 mutation request 和 complete 均可幂等重放；如果处理期间
+Resource 或 Driver revision 已推进，新版本仍会独立排队。Run mutation
+仍必须以该 Run 的 `complete_run` 结束，并在同一事务中完成 Run。
 
 Driver 的 `hello`、ack、reconcile 状态回写和 Run 完成属于控制协议，由绑定
 generation 的 Credential、Driver 身份、in-flight delivery 和目标对象共同
 授权，不要求 Manifest 猜测这些基础协议权限。mutation 中额外的业务写操作
-仍按 Driver ServiceAccount 的精细 RBAC 验证，并和 delivery 完成在一个
-SQLite 事务中提交；任一操作失败时整组回滚。跨 Manifest fanout 需要显式给
-Driver ServiceAccount 绑定目标 Manifest、verb 和 path 对应的 Role。
+仍按 Driver ServiceAccount 的精细 RBAC 验证；同一 mutation 内任一操作失败
+时整组回滚。跨 Manifest fanout 需要显式给 Driver ServiceAccount 绑定目标
+Manifest、verb 和 path 对应的 Role。
 
 现有 REST 写接口继续保留；统一的 `mutation` 入口只存在于 Driver
 WebSocket 协议中，不提供对应的 HTTP endpoint。
@@ -620,6 +644,8 @@ tests/e2e.sh
   → 使用通用 API 创建 Run Resource
   → 验证 Run 到 Resource/Action/Driver 的系统 Link
   → Driver 执行 echo 并完成 Run
+  → 更新同一 Manifest 的 Package，验证旧 Package 被替换且业务 Resource 保留
+  → 验证 running Driver generation 递增并由新进程再次完成 Run
   → DELETE Resource，经 Driver reconcile 后验证硬删除及 path 可复用
   → 创建 User/Role/role-binding Link/Credential Resource 并验证 RBAC
   → 停止 Driver 并确认子进程退出

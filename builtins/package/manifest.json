@@ -15,9 +15,17 @@
         "type": "integer",
         "minimum": 0
       },
-    "media_type": {
-      "type": "string"
-    }
+      "media_type": {
+        "type": "string"
+      },
+      "manifest": {
+        "type": "string",
+        "pattern": "^/[^/]+(?:/[^/]+)*$"
+      },
+      "manifest_version": {
+        "type": "integer",
+        "minimum": 1
+      }
     },
     "required": [
       "digest",
