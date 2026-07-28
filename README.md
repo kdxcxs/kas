@@ -245,6 +245,16 @@ platform/
 `core` 修复或实现。`core` 不得依赖 `platform/`。通过这一单向依赖和目录
 所有权约定，持续降低 `core → master` 合并时的冲突。
 
+安装仓库自带的 pre-push 检查：
+
+```bash
+scripts/install-git-hooks.sh
+```
+
+该检查要求 `core` 不包含 `platform/**`，要求 `master` 已合并最新 `core`
+历史，并要求两个分支在 `platform/**` 之外的文件树完全相同。因此核心改动
+需要先提交到 `core`，在本地合并进 `master` 后再一起 push。
+
 启动顺序：
 
 ```bash
