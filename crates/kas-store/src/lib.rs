@@ -1521,6 +1521,31 @@ impl Store {
         Ok(true)
     }
 
+    pub fn abandon_reconciliation(
+        &mut self,
+        delivery_id: Uuid,
+        driver_path: &str,
+        generation: u64,
+    ) -> Result<(), StoreError> {
+        let delivery = self
+            .deliveries
+            .get(&delivery_id)
+            .cloned()
+            .ok_or_else(|| StoreError::Conflict("Driver delivery is stale".into()))?;
+        if delivery.driver_path != driver_path || delivery.generation != generation {
+            return Err(StoreError::Conflict("Driver delivery is stale".into()));
+        }
+        let DriverWork::Reconcile { resource, .. } = delivery.work else {
+            return Err(StoreError::Conflict(
+                "Delivery is not a reconciliation".into(),
+            ));
+        };
+        self.deliveries.remove(&delivery_id);
+        self.mutation_results
+            .retain(|(id, _), _| *id != delivery_id);
+        self.schedule_reconcile_path(&resource.path)
+    }
+
     fn remove_completed_delivery(&mut self, delivery_id: Uuid) {
         self.deliveries.remove(&delivery_id);
         self.mutation_results
