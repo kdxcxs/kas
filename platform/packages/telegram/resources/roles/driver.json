@@ -33,6 +33,18 @@
       },
       {
         "manifests": [
+          "/manifests/file"
+        ],
+        "verbs": [
+          "get",
+          "download"
+        ],
+        "paths": [
+          "/files/**"
+        ]
+      },
+      {
+        "manifests": [
           "/builtin/link"
         ],
         "verbs": [

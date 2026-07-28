@@ -32,6 +32,7 @@
           "/threads/**/links/telegram/**",
           "/messages/**/links/telegram/**",
           "/messages/**/links/message-thread",
+          "/messages/**/links/attachments/*",
           "/users/**/links/telegram/**",
           "/users/**/links/telegram-bindings/**",
           "/approvals/**/links/telegram/**"

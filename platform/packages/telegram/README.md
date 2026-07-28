@@ -6,7 +6,11 @@ Each `/manifests/telegram` Resource configures one bot and one group. Creating a
 managed `thread-topic` Link asks the Driver to create a new Telegram topic for
 that KAS Thread. The Driver stores Telegram's returned topic ID on the Link.
 Incoming Telegram messages become KAS Message Resources, and KAS Messages in a
-bound Thread are sent to the corresponding topic.
+bound Thread are sent to the corresponding topic. Files attached to outbound
+Messages are downloaded through the authenticated File API and uploaded to
+Telegram as photos, videos, audio, animations, or generic documents. An
+attachment added after the Message text was already copied is delivered without
+resending the text.
 
 ## User binding
 

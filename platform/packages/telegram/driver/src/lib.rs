@@ -6,10 +6,14 @@ use kas_core::{
     LinkSpec, Mutation, PlannedResource, PlannedResourceMetadata, Resource, ResourceStatus,
 };
 use kas_driver::{Driver, DriverError};
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::{
+    blocking::{multipart, Client},
+    StatusCode,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 const TELEGRAM_MANIFEST: &str = "/manifests/telegram";
@@ -26,6 +30,8 @@ const MENTIONED: &str = "/manifests/message/relations/mentioned";
 const PARTICIPANTS: &str = "/manifests/thread/relations/participants";
 const THREAD_TOPIC: &str = "/manifests/telegram/relations/thread-topic";
 const MESSAGE_COPY: &str = "/manifests/telegram/relations/message-copy";
+const FILE_MANIFEST: &str = "/manifests/file";
+const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
 const TELEGRAM_IDENTITY: &str = "/manifests/telegram/relations/identity";
 const BINDING_REQUEST: &str = "/manifests/telegram/relations/binding-request";
 const USER_BINDING: &str = "/manifests/telegram/relations/user-binding";
@@ -34,6 +40,7 @@ const APPROVAL_DELIVERY: &str = "/manifests/telegram/relations/approval-delivery
 #[derive(Debug, Clone)]
 pub struct TelegramDriver {
     kas_api: String,
+    file_api: String,
     approval_api: String,
     kas_token: String,
     client: Client,
@@ -135,10 +142,17 @@ struct IssuedCredential {
     token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct FileSpec {
+    filename: String,
+    media_type: String,
+}
+
 impl TelegramDriver {
     pub fn new(kas_api: impl Into<String>, kas_token: impl Into<String>) -> Self {
         Self {
             kas_api: kas_api.into().trim_end_matches('/').to_owned(),
+            file_api: "http://127.0.0.1:3001".into(),
             approval_api: "http://127.0.0.1:3003".into(),
             kas_token: kas_token.into(),
             client: Client::builder()
@@ -146,6 +160,11 @@ impl TelegramDriver {
                 .build()
                 .expect("Telegram HTTP client configuration is valid"),
         }
+    }
+
+    pub fn with_file_api(mut self, file_api: impl Into<String>) -> Self {
+        self.file_api = file_api.into().trim_end_matches('/').to_owned();
+        self
     }
 
     pub fn with_approval_api(mut self, approval_api: impl Into<String>) -> Self {
@@ -751,9 +770,7 @@ impl TelegramDriver {
                 ])
                 .json(&json!({ "decision": decision }))
                 .send()
-                .map_err(|error| {
-                    format!("could not decide Approval {}: {error}", approval.path)
-                })?;
+                .map_err(|error| format!("could not decide Approval {}: {error}", approval.path))?;
             let status = response.status();
             if !status.is_success() {
                 return Err(format!(
@@ -1082,6 +1099,66 @@ impl TelegramDriver {
             .ok_or_else(|| format!("Telegram {method} omitted result"))
     }
 
+    fn send_attachment(
+        &self,
+        config: &TelegramConfig,
+        topic_id: i64,
+        reply_message_id: Option<i64>,
+        file: &Resource,
+    ) -> Result<TelegramMessage, String> {
+        let spec: FileSpec = serde_json::from_value(file.spec.clone())
+            .map_err(|error| format!("invalid File {}: {error}", file.path))?;
+        let response = self
+            .client
+            .get(format!("{}/files/content", self.file_api))
+            .bearer_auth(&self.kas_token)
+            .query(&[("path", file.path.as_str())])
+            .send()
+            .map_err(|error| format!("could not download File {}: {error}", file.path))?
+            .error_for_status()
+            .map_err(|error| format!("could not download File {}: {error}", file.path))?;
+        let content = response
+            .bytes()
+            .map_err(|error| format!("could not read File {}: {error}", file.path))?;
+        let (method, field) = telegram_media_method(&spec.media_type);
+        let part = multipart::Part::bytes(content.to_vec())
+            .file_name(spec.filename)
+            .mime_str(&spec.media_type)
+            .map_err(|error| format!("invalid File media type {}: {error}", spec.media_type))?;
+        let mut form = multipart::Form::new()
+            .text("chat_id", config.chat_id.clone())
+            .text("message_thread_id", topic_id.to_string())
+            .part(field, part);
+        if let Some(reply) = reply_message_id {
+            form = form.text(
+                "reply_parameters",
+                json!({ "message_id": reply }).to_string(),
+            );
+        }
+        let base = config.api_base.trim_end_matches('/');
+        let response = self
+            .client
+            .post(format!("{base}/bot{}/{method}", config.bot_token))
+            .multipart(form)
+            .send()
+            .map_err(|error| format!("Telegram {method} failed: {error}"))?;
+        let status = response.status();
+        let response: TelegramResponse<TelegramMessage> = response.json().map_err(|error| {
+            format!("Telegram {method} returned invalid JSON ({status}): {error}")
+        })?;
+        if !response.ok {
+            return Err(format!(
+                "Telegram {method} failed ({status}): {}",
+                response
+                    .description
+                    .unwrap_or_else(|| "ok=false without a description".into())
+            ));
+        }
+        response
+            .result
+            .ok_or_else(|| format!("Telegram {method} omitted result"))
+    }
+
     fn reconcile_topic_link(
         &self,
         resource: &Resource,
@@ -1223,8 +1300,13 @@ impl TelegramDriver {
             if link.relation == THREAD_TOPIC {
                 return self.reconcile_topic_link(resource, link);
             }
-            if link.relation == MESSAGE_THREAD {
-                return match self.get_resource(&link.source)? {
+            if link.relation == MESSAGE_THREAD || link.relation == ATTACHED_TO {
+                let message_path = if link.relation == MESSAGE_THREAD {
+                    &link.source
+                } else {
+                    &link.target
+                };
+                return match self.get_resource(message_path)? {
                     Some(message) if message.manifest == MESSAGE_MANIFEST => {
                         self.reconcile_blocking(&message)
                     }
@@ -1254,9 +1336,6 @@ impl TelegramDriver {
             {
                 continue;
             }
-            if has_link(&links, MESSAGE_COPY, &resource.path, &topic.target) {
-                continue;
-            }
             let Some(configuration) = self.get_resource(&topic.target)? else {
                 continue;
             };
@@ -1267,6 +1346,44 @@ impl TelegramDriver {
             let Some(topic_id) = topic.metadata.get("topic_id").and_then(Value::as_i64) else {
                 continue;
             };
+            let existing_copy = links.iter().find_map(|link_resource| {
+                let link = serde_json::from_value::<LinkSpec>(link_resource.spec.clone()).ok()?;
+                (link_resource.metadata.state != kas_core::STATE_DELETED
+                    && link.relation == MESSAGE_COPY
+                    && link.source == resource.path
+                    && link.target == configuration.path)
+                    .then_some((link_resource, link))
+            });
+            let mut attachment_paths = links
+                .iter()
+                .filter_map(|link_resource| {
+                    let link =
+                        serde_json::from_value::<LinkSpec>(link_resource.spec.clone()).ok()?;
+                    (link_resource.metadata.state != kas_core::STATE_DELETED
+                        && link.relation == ATTACHED_TO
+                        && link.target == resource.path)
+                        .then_some(link.source)
+                })
+                .collect::<Vec<_>>();
+            attachment_paths.sort();
+            attachment_paths.dedup();
+            let mut delivered_attachments = existing_copy
+                .as_ref()
+                .and_then(|(_, link)| link.metadata.get("attachment_paths"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<HashSet<_>>();
+            let pending_attachments = attachment_paths
+                .iter()
+                .filter(|path| !delivered_attachments.contains(*path))
+                .cloned()
+                .collect::<Vec<_>>();
+            if existing_copy.is_some() && pending_attachments.is_empty() {
+                continue;
+            }
             let mut text = resource
                 .spec
                 .get("body")
@@ -1282,7 +1399,7 @@ impl TelegramDriver {
                     text = format!("@{handle}\n\n{text}");
                 }
             }
-            if text.trim().is_empty() {
+            if existing_copy.is_none() && text.trim().is_empty() && pending_attachments.is_empty() {
                 continue;
             }
             let reply_message_id =
@@ -1303,35 +1420,81 @@ impl TelegramDriver {
                             .flatten()
                     })
                 });
-            let mut message_ids = Vec::new();
-            for chunk in split_telegram_text(&text) {
-                let mut request = json!({
-                    "chat_id": config.chat_id,
-                    "message_thread_id": topic_id,
-                    "text": chunk
-                });
-                if let Some(reply) = reply_message_id {
-                    request["reply_parameters"] = json!({ "message_id": reply });
+            let mut message_ids = existing_copy
+                .as_ref()
+                .and_then(|(_, link)| link.metadata.get("message_ids"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .collect::<Vec<_>>();
+            if existing_copy.is_none() {
+                for chunk in split_telegram_text(&text) {
+                    let mut request = json!({
+                        "chat_id": config.chat_id,
+                        "message_thread_id": topic_id,
+                        "text": chunk
+                    });
+                    if let Some(reply) = reply_message_id {
+                        request["reply_parameters"] = json!({ "message_id": reply });
+                    }
+                    let sent: TelegramMessage =
+                        self.telegram_call(&config, "sendMessage", request)?;
+                    message_ids.push(sent.message_id);
                 }
-                let sent: TelegramMessage = self.telegram_call(&config, "sendMessage", request)?;
-                message_ids.push(sent.message_id);
             }
-            mutations.push(Mutation::CreateResource {
-                resource: planned_link(
-                    format!(
-                        "{}/links/telegram/{}",
-                        resource.path,
-                        path_slug(&configuration.path)
-                    ),
-                    MESSAGE_COPY,
-                    resource.path.clone(),
-                    configuration.path,
-                    json!({
-                        "direction": "kas-to-telegram",
-                        "message_ids": message_ids
-                    }),
-                ),
+            for attachment_path in pending_attachments {
+                let file = self
+                    .get_resource(&attachment_path)?
+                    .ok_or_else(|| format!("attached File {attachment_path} does not exist"))?;
+                if file.manifest != FILE_MANIFEST || file.metadata.state == kas_core::STATE_DELETED
+                {
+                    return Err(format!(
+                        "attachment {attachment_path} is not an available File"
+                    ));
+                }
+                let sent = self.send_attachment(&config, topic_id, reply_message_id, &file)?;
+                message_ids.push(sent.message_id);
+                delivered_attachments.insert(attachment_path);
+            }
+            if message_ids.is_empty() {
+                continue;
+            }
+            let mut delivered_attachments = delivered_attachments.into_iter().collect::<Vec<_>>();
+            delivered_attachments.sort();
+            let metadata = json!({
+                "direction": "kas-to-telegram",
+                "message_ids": message_ids,
+                "attachment_paths": delivered_attachments
             });
+            if let Some((copy_resource, copy)) = existing_copy {
+                mutations.push(Mutation::UpdateResource {
+                    resource_path: copy_resource.path.clone(),
+                    expected_revision: copy_resource.revision,
+                    metadata: None,
+                    spec: serde_json::to_value(LinkSpec {
+                        relation: copy.relation,
+                        source: copy.source,
+                        target: copy.target,
+                        metadata,
+                    })
+                    .expect("LinkSpec is serializable"),
+                });
+            } else {
+                mutations.push(Mutation::CreateResource {
+                    resource: planned_link(
+                        format!(
+                            "{}/links/telegram/{}",
+                            resource.path,
+                            path_slug(&configuration.path)
+                        ),
+                        MESSAGE_COPY,
+                        resource.path.clone(),
+                        configuration.path,
+                        metadata,
+                    ),
+                });
+            }
         }
         Ok(mutations)
     }
@@ -1417,14 +1580,6 @@ fn link_target(links: &[Resource], relation: &str, source: &str) -> Option<Strin
     })
 }
 
-fn has_link(links: &[Resource], relation: &str, source: &str, target: &str) -> bool {
-    links.iter().any(|resource| {
-        serde_json::from_value::<LinkSpec>(resource.spec.clone()).is_ok_and(|link| {
-            link.relation == relation && link.source == source && link.target == target
-        })
-    })
-}
-
 fn planned_link(
     path: String,
     relation: impl Into<String>,
@@ -1498,6 +1653,20 @@ fn split_telegram_text(text: &str) -> Vec<String> {
     chunks
 }
 
+fn telegram_media_method(media_type: &str) -> (&'static str, &'static str) {
+    if media_type == "image/gif" {
+        ("sendAnimation", "animation")
+    } else if media_type.starts_with("image/") {
+        ("sendPhoto", "photo")
+    } else if media_type.starts_with("video/") {
+        ("sendVideo", "video")
+    } else if media_type.starts_with("audio/") {
+        ("sendAudio", "audio")
+    } else {
+        ("sendDocument", "document")
+    }
+}
+
 fn hash_token(token: &str) -> String {
     Sha256::digest(token.as_bytes())
         .iter()
@@ -1560,5 +1729,20 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), 4096);
         assert_eq!(chunks[1].chars().count(), 904);
+    }
+
+    #[test]
+    fn attachments_use_the_matching_telegram_method() {
+        assert_eq!(telegram_media_method("image/png"), ("sendPhoto", "photo"));
+        assert_eq!(
+            telegram_media_method("image/gif"),
+            ("sendAnimation", "animation")
+        );
+        assert_eq!(telegram_media_method("video/mp4"), ("sendVideo", "video"));
+        assert_eq!(telegram_media_method("audio/mpeg"), ("sendAudio", "audio"));
+        assert_eq!(
+            telegram_media_method("application/zip"),
+            ("sendDocument", "document")
+        );
     }
 }

@@ -950,6 +950,58 @@ wait_for_state \
   "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e" \
   available >/dev/null
 
+# Attachments may be created after the Message has already been copied. The
+# attachment Link must trigger another reconcile without duplicating the text.
+create_link "$TELEGRAM_OUTBOUND_PATH/links/attachments/e2e-input" \
+  "/manifests/file/relations/attached-to" \
+  "$FILE_PATH" \
+  "$TELEGRAM_OUTBOUND_PATH"
+for _ in $(seq 1 800); do
+  TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+  if jq -e \
+    --arg chat "$TELEGRAM_CHAT_ID" \
+    --arg topic "$TELEGRAM_TOPIC_ID" '
+      any(.[ ];
+        .method == "sendDocument"
+        and .request.chat_id == $chat
+        and .request.message_thread_id == $topic
+        and .request.document.filename == "attachment.bin"
+        and .request.document.content_type == "application/octet-stream"
+        and .request.document.size > 0
+      )
+    ' <<<"$TELEGRAM_REQUESTS" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  --arg chat "$TELEGRAM_CHAT_ID" \
+  --arg topic "$TELEGRAM_TOPIC_ID" '
+    any(.[ ];
+      .method == "sendDocument"
+      and .request.chat_id == $chat
+      and .request.message_thread_id == $topic
+      and .request.document.filename == "attachment.bin"
+      and .request.document.content_type == "application/octet-stream"
+      and .request.document.size > 0
+    )
+  ' <<<"$TELEGRAM_REQUESTS" >/dev/null
+for _ in $(seq 1 800); do
+  TELEGRAM_COPY="$(get_resource \
+    "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e")"
+  if jq -e --arg file "$FILE_PATH" '
+    (.spec.metadata.attachment_paths | index($file)) != null
+    and (.spec.metadata.message_ids | length) == 2
+  ' <<<"$TELEGRAM_COPY" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e --arg file "$FILE_PATH" '
+  (.spec.metadata.attachment_paths | index($file)) != null
+  and (.spec.metadata.message_ids | length) == 2
+' <<<"$TELEGRAM_COPY" >/dev/null
+
 # The KAS Thread is authoritative for a managed Topic's display name.
 TELEGRAM_RENAMED_TOPIC="E2E Renamed Topic"
 TELEGRAM_THREAD_RESOURCE="$(get_resource "$TELEGRAM_THREAD_PATH")"
