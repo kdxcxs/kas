@@ -1911,7 +1911,7 @@ impl Store {
         subject_path: &str,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<IssuedCredential, StoreError> {
-        self.issue_credential_for_generation(subject_path, expires_at, None)
+        self.issue_credential_for_generation(subject_path, expires_at, None, None)
     }
 
     pub fn issue_driver_credential(
@@ -1922,8 +1922,9 @@ impl Store {
         let spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
         self.issue_credential_for_generation(
             &spec.service_account,
-            Some(Utc::now() + Duration::hours(1)),
+            None,
             Some(self.driver_generation(driver_path)?),
+            Some(driver_path),
         )
     }
 
@@ -1932,6 +1933,7 @@ impl Store {
         subject_path: &str,
         expires_at: Option<DateTime<Utc>>,
         driver_generation: Option<u64>,
+        driver_path: Option<&str>,
     ) -> Result<IssuedCredential, StoreError> {
         let subject = self.get_resource(subject_path)?;
         if subject.manifest != USER_MANIFEST && subject.manifest != SERVICE_ACCOUNT_MANIFEST {
@@ -1969,8 +1971,28 @@ impl Store {
         let resource = resource_in(&tx, &credential_path)?;
         append_event(&tx, EventType::Created, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "credential_created", now)?;
+        let driver_link_path = if let Some(driver_path) = driver_path {
+            let link_path = format!("{credential_path}/links/driver");
+            create_system_link(
+                &tx,
+                &link_path,
+                RelationRole::DriverCredential,
+                driver_path,
+                &credential_path,
+                now,
+            )?
+            .ok_or_else(|| {
+                StoreError::Invalid("built-in DriverCredential Relation is missing".into())
+            })?;
+            Some(link_path)
+        } else {
+            None
+        };
         tx.commit()?;
         self.schedule_reconcile_path(&credential_path)?;
+        if let Some(path) = driver_link_path {
+            self.schedule_reconcile_path(&path)?;
+        }
         Ok(IssuedCredential {
             resource_path: credential_path,
             token,
@@ -1993,6 +2015,22 @@ impl Store {
             )
             .optional()?
             .ok_or_else(|| StoreError::NotFound("Credential".into()))?;
+        self.authenticate_credential_resource(credential)
+    }
+
+    pub fn authenticate_credential(
+        &self,
+        credential_path: &str,
+    ) -> Result<AuthContext, StoreError> {
+        let credential = self.get_resource(credential_path)?;
+        require_manifest(&credential, CREDENTIAL_MANIFEST)?;
+        self.authenticate_credential_resource(credential)
+    }
+
+    fn authenticate_credential_resource(
+        &self,
+        credential: Resource,
+    ) -> Result<AuthContext, StoreError> {
         let spec: CredentialSpec = decode(&credential.spec, "Credential spec")?;
         if spec.expires_at.is_some_and(|expiry| expiry <= Utc::now()) || spec.revoked_at.is_some() {
             return Err(StoreError::NotFound("Credential".into()));
@@ -2027,13 +2065,39 @@ impl Store {
                 paths: rule.paths,
             }));
         }
-        let driver_path = if subject_resource.manifest == SERVICE_ACCOUNT_MANIFEST {
-            self.list_drivers()?.into_iter().find_map(|driver| {
-                decode::<DriverSpec>(&driver.spec, "Driver spec")
-                    .ok()
-                    .filter(|driver_spec| driver_spec.service_account == spec.subject)
-                    .map(|_| driver.path.clone())
-            })
+        let driver_path = if let Some(generation) = spec.driver_generation {
+            let relation = self
+                .relation_path(RelationRole::DriverCredential)?
+                .ok_or_else(|| StoreError::NotFound("Credential".into()))?;
+            let bindings = self
+                .list_links(None, Some(&relation), Some(&credential.path), false)?
+                .into_iter()
+                .filter(|link| {
+                    link.metadata.state != STATE_DELETED
+                        && link.metadata.kas.protected
+                        && link.metadata.kas.managed_by == "system"
+                })
+                .collect::<Vec<_>>();
+            let [binding] = bindings.as_slice() else {
+                return Err(StoreError::NotFound("Credential".into()));
+            };
+            let binding_spec: LinkSpec = decode(&binding.spec, "DriverCredential Link spec")?;
+            if binding_spec.target != credential.path {
+                return Err(StoreError::NotFound("Credential".into()));
+            }
+            let driver = self.get_driver(&binding_spec.source)?;
+            let driver_spec: DriverSpec = decode(&driver.spec, "Driver spec")?;
+            let state = driver_state(&driver)?;
+            if driver_spec.service_account != spec.subject
+                || driver.metadata.kas.generation != generation
+                || !matches!(
+                    state,
+                    DriverState::Starting | DriverState::Running | DriverState::Stopping
+                )
+            {
+                return Err(StoreError::NotFound("Credential".into()));
+            }
+            Some(driver.path)
         } else {
             None
         };
@@ -2098,9 +2162,12 @@ fn builtin_documents() -> [BuiltinDocuments; 11] {
         },
         BuiltinDocuments {
             manifest: include_str!("../../../builtins/driver/manifest.json"),
-            resources: &[include_str!(
-                "../../../builtins/driver/resources/relations/driver-service-account.json"
-            )],
+            resources: &[
+                include_str!(
+                    "../../../builtins/driver/resources/relations/driver-service-account.json"
+                ),
+                include_str!("../../../builtins/driver/resources/relations/driver-credential.json"),
+            ],
         },
         BuiltinDocuments {
             manifest: include_str!("../../../builtins/run/manifest.json"),
@@ -4200,6 +4267,70 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(unresolved.status.metadata.state, kas_core::STATE_PENDING);
+    }
+
+    #[test]
+    fn driver_credentials_are_link_bound_and_generation_scoped() {
+        let mut store = Store::memory().unwrap();
+        let driver_path = "/builtin/link/driver";
+        store.start_driver(driver_path).unwrap();
+        let generation = store.driver_generation(driver_path).unwrap();
+
+        let issued = store.issue_driver_credential(driver_path).unwrap();
+        assert_eq!(issued.expires_at, None);
+        let credential = store.get_resource(&issued.resource_path).unwrap();
+        let credential_spec: CredentialSpec = decode(&credential.spec, "Credential spec").unwrap();
+        assert_eq!(credential_spec.expires_at, None);
+        assert_eq!(credential_spec.driver_generation, Some(generation));
+
+        let relation = store
+            .relation_path(RelationRole::DriverCredential)
+            .unwrap()
+            .unwrap();
+        let links = store
+            .list_links(None, Some(&relation), Some(&issued.resource_path), false)
+            .unwrap();
+        let [link] = links.as_slice() else {
+            panic!("Driver Credential must have exactly one Driver binding Link");
+        };
+        let link_spec: LinkSpec = decode(&link.spec, "DriverCredential Link spec").unwrap();
+        assert_eq!(link_spec.source, driver_path);
+        assert_eq!(link_spec.target, issued.resource_path);
+        assert!(link.metadata.kas.protected);
+        assert_eq!(link.metadata.kas.managed_by, "system");
+
+        let auth = store.authenticate(&issued.token).unwrap();
+        assert_eq!(auth.driver_path.as_deref(), Some(driver_path));
+        assert_eq!(auth.driver_generation, Some(generation));
+
+        store.stop_driver(driver_path).unwrap();
+        assert!(store.authenticate(&issued.token).is_ok());
+        store.mark_driver_stopped(driver_path, generation).unwrap();
+        assert!(matches!(
+            store.authenticate(&issued.token),
+            Err(StoreError::NotFound(_))
+        ));
+
+        store.start_driver(driver_path).unwrap();
+        assert!(matches!(
+            store.authenticate(&issued.token),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn ordinary_service_account_credentials_are_not_driver_credentials() {
+        let mut store = Store::memory().unwrap();
+        let driver = store.get_driver("/builtin/link/driver").unwrap();
+        let driver_spec: DriverSpec = decode(&driver.spec, "Driver spec").unwrap();
+
+        let issued = store
+            .issue_credential(&driver_spec.service_account, None)
+            .unwrap();
+        let auth = store.authenticate(&issued.token).unwrap();
+        assert_eq!(issued.expires_at, None);
+        assert_eq!(auth.driver_path, None);
+        assert_eq!(auth.driver_generation, None);
     }
 
     #[test]
