@@ -12,16 +12,7 @@ Thread、Agent、Message、File、Skill 和 Approval 都建模为 Resource，让
 Agent 由真实的 Codex CLI 驱动。它们拥有持久 Session，可以读取 Thread
 中的新消息和附件，按需加载 Skill，并通过 KAS API 将回复和工作结果写回平台。
 
-```mermaid
-flowchart LR
-    U["用户"] --> T["Thread<br/>共享工作上下文"]
-    T -->|"@mention"| A["Agent<br/>Codex Session"]
-    F["Files<br/>附件"] --> T
-    S["Skills<br/>可复用能力"] --> A
-    A --> M["Messages / Resources<br/>回复与工作成果"]
-    A -. "需要更高权限" .-> P["Approval<br/>用户审批"]
-    P --> M
-```
+![用户与 Agent 通过 KAS 协作](docs/assets/platform-collaboration.png)
 
 ## 在这里可以做什么
 

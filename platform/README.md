@@ -14,16 +14,7 @@ Agents run through the real Codex CLI. They retain persistent Sessions, read
 new Thread messages and attachments, load assigned Skills, and publish replies
 and work products through the KAS API.
 
-```mermaid
-flowchart LR
-    U["User"] --> T["Thread<br/>shared work context"]
-    T -->|"@mention"| A["Agent<br/>Codex Session"]
-    F["Files<br/>attachments"] --> T
-    S["Skills<br/>reusable capabilities"] --> A
-    A --> M["Messages / Resources<br/>replies and work products"]
-    A -. "needs elevated access" .-> P["Approval<br/>user decision"]
-    P --> M
-```
+![People and Agents collaborating through KAS](docs/assets/platform-collaboration.png)
 
 ## What you can do
 
