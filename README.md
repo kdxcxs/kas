@@ -17,16 +17,11 @@ around shared objects. The `core` branch contains the generic kernel. The
 `master` branch also includes the ready-to-use
 [KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform).
 
-```mermaid
-flowchart LR
-    U["User / API client"] --> K["KAS control plane"]
-    K --> R["Resources<br/>shared data and state"]
-    M["Manifests<br/>structure and rules"] --> R
-    R --> D["Drivers<br/>handle outstanding changes"]
-    D --> E["External systems / runtimes"]
-    D --> R
-    R --- L["Links<br/>connect any Resources"]
-```
+![KAS control plane coordinating Resources and Drivers](docs/assets/core-control-plane.png)
+
+> **Control plane:** Manifests define Resource structure. Clients submit
+> desired Resources to KAS; KAS persists them, selects the affected singleton
+> Drivers, and records the status they return. Links connect any Resources.
 
 ## Why KAS
 
@@ -90,13 +85,11 @@ singleton Driver process; KAS does not start one process per instance.
 A Relation defines which relationships are valid. A Link is one concrete
 relationship and may connect any two Resources:
 
-```mermaid
-flowchart LR
-    T["Thread"] -- participants --> A["Agent"]
-    M["Message"] -- mentioned --> A
-    A -- uses --> S["Skill"]
-    D["Driver"] -- role-binding --> R["Role"]
-```
+![Resources connected by named Links](docs/assets/resource-links.png)
+
+> **Named Link examples:** `Thread → Agent` (`participants`) ·
+> `Message → Agent` (`mentioned`) · `Agent → Skill` (`uses`) ·
+> `Driver → Role` (`role-binding`).
 
 ### Action and Run
 
@@ -112,19 +105,12 @@ definition, relationships, permissions, and runtime behavior.
 
 ## How KAS works
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant KAS
-    participant Driver
+![The KAS reconciliation loop](docs/assets/reconciliation-loop.png)
 
-    Client->>KAS: Create or update a Resource
-    KAS->>KAS: Persist, authorize, and select affected Drivers
-    KAS-->>Driver: Push one Resource reconciliation
-    Driver->>KAS: Submit Resource mutations
-    Driver->>KAS: Reconciliation complete
-    KAS->>KAS: Advance Resource status
-```
+> **Reconciliation loop:** (1) a client changes a desired Resource; (2) KAS
+> authorizes and persists it; (3) KAS pushes that one Resource to each affected
+> Driver; (4) the Driver commits mutations and reports completion; (5) KAS
+> advances status until it matches the desired document.
 
 KAS Core implements this generic control loop without embedding product
 domains. KAS Platform supplies Agents, Threads, Messages, Files, Skills,

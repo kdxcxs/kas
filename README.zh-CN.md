@@ -15,16 +15,11 @@ Driver。
 `master` 分支还包含一个可直接使用的
 [KAS Platform](https://github.com/kdxcxs/kas/blob/master/platform/README.zh-CN.md)。
 
-```mermaid
-flowchart LR
-    U["用户 / API 客户端"] --> K["KAS 控制面"]
-    K --> R["Resources<br/>统一的数据与状态"]
-    M["Manifests<br/>定义结构与规则"] --> R
-    R --> D["Drivers<br/>处理待完成的变化"]
-    D --> E["外部系统 / Runtime"]
-    D --> R
-    R --- L["Links<br/>连接任意 Resource"]
-```
+![KAS 控制面协调 Resource 与 Driver](docs/assets/core-control-plane.png)
+
+> **控制面：** Manifest 定义 Resource 结构。客户端向 KAS 提交期望的
+> Resource；KAS 完成持久化、选择受影响的 singleton Driver，并记录 Driver
+> 返回的当前状态。任意 Resource 之间都可以通过 Link 连接。
 
 ## 为什么是 KAS
 
@@ -84,13 +79,11 @@ Manifest 共享一个 singleton Driver 进程，而不是为每个实例启动�
 Relation 定义什么样的关系是合法的，Link 是一条具体关系。Link 可以连接任意
 两个 Resource，例如：
 
-```mermaid
-flowchart LR
-    T["Thread"] -- participants --> A["Agent"]
-    M["Message"] -- mentioned --> A
-    A -- uses --> S["Skill"]
-    D["Driver"] -- role-binding --> R["Role"]
-```
+![通过具名 Link 连接的 Resource](docs/assets/resource-links.png)
+
+> **具名 Link 示例：** `Thread → Agent`（`participants`）·
+> `Message → Agent`（`mentioned`）· `Agent → Skill`（`uses`）·
+> `Driver → Role`（`role-binding`）。
 
 ### Action 与 Run
 
@@ -104,19 +97,12 @@ Driver。一个功能由此能够自带自己的数据定义、关系、权限�
 
 ## KAS 如何工作
 
-```mermaid
-sequenceDiagram
-    participant Client as 客户端
-    participant KAS as KAS
-    participant Driver as Driver
+![KAS Reconcile 闭环](docs/assets/reconciliation-loop.png)
 
-    Client->>KAS: 创建或更新 Resource
-    KAS->>KAS: 持久化、鉴权、计算受影响的 Driver
-    KAS-->>Driver: 推送单个 Resource 的 reconcile
-    Driver->>KAS: 提交 Resource mutation
-    Driver->>KAS: reconcile complete
-    KAS->>KAS: 更新 Resource status
-```
+> **Reconcile 闭环：**（1）客户端修改 Resource 的期望文档；（2）KAS
+> 鉴权并持久化；（3）KAS 向每个受影响的 Driver 推送这一个 Resource；
+> （4）Driver 提交 mutation 并明确完成；（5）KAS 推进 status，直至其与
+> 期望文档一致。
 
 KAS Core 关注的是这条通用闭环，不内置具体业务。完整的 Agent、Thread、
 Message、File、Skill、Approval 和可插拔前端由 KAS Platform 以普通 Package
