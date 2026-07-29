@@ -1,10 +1,13 @@
-# KAS Platform 文档
+# KAS Platform documentation
 
-README 只介绍产品、用户能够完成的工作和最基本的概念。实现与运维细节集中在
-这里：
+English | [简体中文](README.zh-CN.md)
 
-- [Platform 技术参考](technical-reference.md)：Package 布局、Agent 与
-  Session、File/Skill/Approval API、Frontend Gateway、iframe 插件、端到端
-  测试和 Docker 部署。
-- [KAS Core 文档](../../docs/README.md)：底层 Resource、RBAC、Package、
-  Reconcile 和 Driver 协议。
+The project README explains the product, the work users can perform, and the
+smallest set of concepts needed to understand it. Implementation and
+operational material lives here:
+
+- [Platform technical reference](technical-reference.md): Package layout,
+  Agent and Session behavior, File/Skill/Approval APIs, the Frontend Gateway,
+  iframe plugins, end-to-end testing, and Docker deployment.
+- [KAS Core documentation](../../docs/README.md): the underlying Resource,
+  RBAC, Package, reconciliation, and Driver contracts.

@@ -1,8 +1,9 @@
-# KAS Platform 技术参考
+# KAS Platform technical reference
 
-本文档集中说明 Platform 的 Package 布局、Agent 与 Session 行为、File/Skill/
-Approval API、前端插件机制、端到端测试和 Docker 部署。第一次了解产品时，
-请先阅读 [Platform 首页](../README.md)。
+This document covers the Platform Package layout, Agent and Session behavior,
+File/Skill/Approval APIs, frontend plugin runtime, end-to-end tests, and Docker
+deployment. Start with the [Platform overview](../README.md) if this is your
+first time exploring the project.
 
 This workspace contains batteries-included KAS packages. It depends on the
 generic KAS crates in the repository root but is not a member of the root

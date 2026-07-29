@@ -1,61 +1,66 @@
 # KAS Platform
 
-> 一个由人和 AI Agent 共同工作的 Resource 原生协作空间。
+English | [简体中文](README.zh-CN.md)
 
-KAS Platform 是构建在 [KAS Core](../README.md) 之上的开箱即用产品。它把
-Thread、Agent、Message、File、Skill 和 Approval 都建模为 Resource，让用户
-可以在同一个 Workspace 中组织工作、邀请 Agent，并清楚地看到 Agent 使用了
-什么上下文、获得了什么权限、产生了什么结果。
+> A Resource-native workspace where people and AI Agents work together.
 
-Agent 由真实的 Codex CLI 驱动。它们拥有持久 Session，可以读取 Thread
-中的新消息和附件，按需加载 Skill，并通过 KAS API 将回复和工作结果写回平台。
+KAS Platform is a batteries-included product built on
+[KAS Core](../README.md). It models Threads, Agents, Messages, Files, Skills,
+and Approvals as Resources, giving users one Workspace in which to organize
+work, invite Agents, and understand the context, permissions, and results
+behind every Agent action.
+
+Agents run through the real Codex CLI. They retain persistent Sessions, read
+new Thread messages and attachments, load assigned Skills, and publish replies
+and work products through the KAS API.
 
 ```mermaid
 flowchart LR
-    U["用户"] --> T["Thread<br/>共享工作上下文"]
+    U["User"] --> T["Thread<br/>shared work context"]
     T -->|"@mention"| A["Agent<br/>Codex Session"]
-    F["Files<br/>附件"] --> T
-    S["Skills<br/>可复用能力"] --> A
-    A --> M["Messages / Resources<br/>回复与工作成果"]
-    A -. "需要更高权限" .-> P["Approval<br/>用户审批"]
+    F["Files<br/>attachments"] --> T
+    S["Skills<br/>reusable capabilities"] --> A
+    A --> M["Messages / Resources<br/>replies and work products"]
+    A -. "needs elevated access" .-> P["Approval<br/>user decision"]
     P --> M
 ```
 
-## 在这里可以做什么
+## What you can do
 
-| 能力 | 它解决的问题 |
+| Capability | What it provides |
 | --- | --- |
-| **Threads** | 把一次协作的参与者、消息、文件和 Agent Session 组织在一起 |
-| **Agents** | 使用真实 Codex CLI 执行工作，并通过 `@handle` 精确触发 |
-| **Sessions** | 为每个 Thread–Agent 组合保留连续上下文，同时隔离不同 Agent |
-| **Files** | 上传任意附件，并以 KAS 权限控制上传、预览和下载 |
-| **Skills** | 把多文件 Skill bundle 作为可版本化能力分配给一个或多个 Agent |
-| **Approvals** | 让低权限 Agent 为一次确定操作申请用户授权，而不扩大长期权限 |
-| **Frontend plugins** | 把新的管理页面安装到 Workspace 侧边栏，而不重建宿主 UI |
+| **Threads** | Organize participants, messages, files, and Agent Sessions around one collaboration |
+| **Agents** | Run work through the real Codex CLI and trigger exactly the Agents named with `@handle` |
+| **Sessions** | Preserve context for each Thread–Agent pair while isolating different Agents |
+| **Files** | Upload arbitrary attachments with KAS-authorized upload, preview, and download |
+| **Skills** | Version multi-file Skill bundles and assign them to one or more Agents |
+| **Approvals** | Let a low-privilege Agent request one user-authorized operation without gaining standing access |
+| **Frontend plugins** | Install management pages in the Workspace sidebar without rebuilding the host UI |
 
-## 一次典型协作
+## A typical collaboration
 
 ```mermaid
 sequenceDiagram
-    actor User as 用户
+    actor User
     participant UI as Workspace
-    participant KAS as KAS
+    participant KAS
     participant Agent as Codex Agent
 
-    User->>UI: 创建 Thread，加入 Agent 和附件
-    User->>UI: 发送带 @mention 的消息
-    UI->>KAS: 创建 Message 与 Links
-    KAS-->>Agent: 推送需要处理的 Resource
-    Agent->>KAS: 读取 Thread、File 与已分配 Skill
-    Agent->>KAS: 创建回复和工作成果
-    KAS-->>UI: 展示新的 Resources
+    User->>UI: Create a Thread with Agents and attachments
+    User->>UI: Send a message containing @mentions
+    UI->>KAS: Create the Message and Links
+    KAS-->>Agent: Push the Resource that needs work
+    Agent->>KAS: Read the Thread, Files, and assigned Skills
+    Agent->>KAS: Create a reply and work products
+    KAS-->>UI: Display the new Resources
 ```
 
-Platform 不依赖一套隐藏的聊天数据库。界面里看到的 Thread、Message、Agent、
-附件关系、审批记录和插件注册信息，都可以通过 KAS 的通用 Resource 与 Link
-模型查询和授权。
+Platform does not hide collaboration data in a separate chat database. The
+Threads, Messages, Agents, attachment relationships, Approval records, and
+plugin registrations visible in the UI are all queryable and authorizable
+through the generic KAS Resource and Link model.
 
-## 产品结构
+## Product structure
 
 ```mermaid
 flowchart TB
@@ -69,42 +74,46 @@ flowchart TB
 
     B --> G
     G --> K
-    P -->|"安装 Resources"| K
-    P -. "包含" .-> D
+    P -->|"install Resources"| K
+    P -. "contain" .-> D
     K <--> D
     D --> C
     D <--> X
 ```
 
-KAS Core 提供稳定的 Resource 控制面；Platform 的产品功能则以相互独立的
-Package 交付。每个 Package 可以包含 Manifest、初始化 Resources 和 Driver，
-因此新增功能不需要在 Core 中增加新的对象类型。
+KAS Core supplies the stable Resource control plane. Platform features are
+delivered as independent Packages. A Package may contain a Manifest, initial
+Resources, and a Driver, so adding a product capability does not require a new
+object type in Core.
 
-Web 界面由一个很小的 Workspace 宿主和可安装的 iframe 插件组成。宿主负责
-登录、导航和受控 API bridge；Threads、Agents、Skills、Approvals 和通用对象
-管理页都可以作为前端插件独立演进。
+The Web UI consists of a small Workspace host and installable iframe plugins.
+The host owns login, navigation, and a controlled API bridge. Threads, Agents,
+Skills, Approvals, and the generic object registry can evolve as independent
+frontend plugins.
 
-## 核心设计原则
+## Design principles
 
-- **Resource 是共同语言**：产品中的领域对象、权限和插件注册都使用同一模型。
-- **Agent 只在被提及时工作**：Thread 可以容纳多个 Agent，消息通过 Link
-  明确选择本次参与者。
-- **权限默认最小化**：Agent 使用自己的 Service Account；临时高权限操作必须
-  经过可审计的 Approval。
-- **内容与控制面分离**：大文件由 File Driver 保存和传输，KAS 只维护描述符
-  与关系。
-- **能力可以安装**：后台 Driver、Skill 和前端插件都能独立更新，不把业务
-  逻辑写死在平台内核中。
+- **Resource is the common language.** Domain objects, permissions, and plugin
+  registration all use the same model.
+- **Agents work only when mentioned.** A Thread may contain several Agents,
+  while Message Links select the participants for one turn.
+- **Permissions stay minimal.** Each Agent uses its own Service Account. A
+  privileged one-off operation requires an auditable Approval.
+- **Content stays outside the control plane.** The File Driver stores and
+  transfers large bytes; KAS stores descriptors and relationships.
+- **Capabilities are installable.** Drivers, Skills, and frontend plugins can
+  evolve without embedding product behavior in the kernel.
 
-## 与 KAS Core 的关系
+## Relationship to KAS Core
 
-仓库的 `core` 分支只维护通用控制面；`master` 分支在此基础上增加
-`platform/`。Platform 只依赖 Core，Platform 专属 Package、Driver、UI、部署
-和测试均留在本目录中，确保 Core 可以持续无冲突地合并进完整产品。
+The `core` branch contains only the generic control plane. The `master` branch
+adds `platform/` on top. Product-specific Packages, Drivers, UI, deployment,
+and tests remain in this directory, preserving a one-way dependency that lets
+Core merge into the complete product without conflicts.
 
-## 继续阅读
+## Learn more
 
-- [Platform 文档索引](docs/README.md)
-- [Platform 技术参考](docs/technical-reference.md)
-- [KAS Core 项目介绍](../README.md)
-- [KAS Core 技术文档](../docs/README.md)
+- [Platform documentation](docs/README.md)
+- [Platform technical reference](docs/technical-reference.md)
+- [KAS Core overview](../README.md)
+- [KAS Core documentation](../docs/README.md)
