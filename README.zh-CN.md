@@ -21,6 +21,29 @@ Driver。
 > Resource；KAS 完成持久化、选择受影响的 singleton Driver，并记录 Driver
 > 返回的当前状态。任意 Resource 之间都可以通过 Link 连接。
 
+## 快速运行
+
+安装较新的 Rust 工具链后，在仓库根目录依次运行：
+
+```bash
+cargo run -p kas-migrate
+cargo run -p kas-admin -- bootstrap admin
+cargo run -p kas-api
+```
+
+创建管理员时会输出 Bearer token。随后 KAS 会监听
+`http://127.0.0.1:3000`，并将 SQLite 数据库保存在 `.data/kas.db`。
+可以在另一个终端确认 API 已就绪：
+
+```bash
+curl http://127.0.0.1:3000/health
+```
+
+PostgreSQL、配置项、Package 安装和 Driver 开发等内容见
+[Core 技术参考](docs/technical-reference.zh-CN.md)。如果需要完整产品与 Web
+界面，请使用
+[KAS Platform](https://github.com/kdxcxs/kas/blob/master/platform/README.zh-CN.md)。
+
 ## 为什么是 KAS
 
 许多系统会分别为任务、用户、权限、关系、后台作业和插件建立不同的数据模型，
