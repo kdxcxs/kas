@@ -1,308 +1,110 @@
 # KAS Platform
 
-This workspace contains batteries-included KAS packages. It depends on the
-generic KAS crates in the repository root but is not a member of the root
-workspace.
+> 一个由人和 AI Agent 共同工作的 Resource 原生协作空间。
 
-Each directory under `packages/` is an independent Manifest package root:
+KAS Platform 是构建在 [KAS Core](../README.md) 之上的开箱即用产品。它把
+Thread、Agent、Message、File、Skill 和 Approval 都建模为 Resource，让用户
+可以在同一个 Workspace 中组织工作、邀请 Agent，并清楚地看到 Agent 使用了
+什么上下文、获得了什么权限、产生了什么结果。
 
-```text
-packages/
-├── approval-result/
-│   └── manifest.json
-├── skill/
-│   ├── manifest.json
-│   ├── assets/kas/
-│   ├── resources/
-│   └── driver/
-├── file/
-│   ├── manifest.json
-│   ├── resources/
-│   │   ├── drivers/
-│   │   ├── relations/
-│   │   ├── links/
-│   │   ├── roles/
-│   │   └── service-accounts/
-│   └── driver/
-│       ├── Cargo.toml
-│       └── src/
-├── session/
-│   ├── manifest.json
-│   └── resources/
-│       └── relations/
-├── thread/
-│   ├── manifest.json
-│   └── resources/
-│       └── relations/
-├── message/
-│   ├── manifest.json
-│   ├── resources/
-│   │   ├── drivers/
-│   │   ├── relations/
-│   │   ├── links/
-│   │   ├── roles/
-│   │   └── service-accounts/
-│   └── driver/
-│       ├── Cargo.toml
-│       └── src/
-├── approval/
-│   ├── manifest.json
-│   ├── resources/
-│   └── driver/
-└── agent/
-    ├── manifest.json
-    ├── resources/
-    │   ├── actions/
-    │   ├── drivers/
-    │   ├── relations/
-    │   ├── links/
-    │   ├── roles/
-    │   └── service-accounts/
-    └── driver/
-        ├── Cargo.toml
-        └── src/
+Agent 由真实的 Codex CLI 驱动。它们拥有持久 Session，可以读取 Thread
+中的新消息和附件，按需加载 Skill，并通过 KAS API 将回复和工作结果写回平台。
+
+```mermaid
+flowchart LR
+    U["用户"] --> T["Thread<br/>共享工作上下文"]
+    T -->|"@mention"| A["Agent<br/>Codex Session"]
+    F["Files<br/>附件"] --> T
+    S["Skills<br/>可复用能力"] --> A
+    A --> M["Messages / Resources<br/>回复与工作成果"]
+    A -. "需要更高权限" .-> P["Approval<br/>用户审批"]
+    P --> M
 ```
 
-`manifest.json` defines only the package Manifest. Each Action, Relation,
-Driver, ServiceAccount, Role, and Link installed with the package is an
-ordinary Resource stored as one JSON file under `resources/`. Driver
-authorization is a Subject-to-Role Link using the built-in `role-binding`
-Relation. `thread` is
-data-only. `session` defines the persistent Thread-Agent session record.
-`file` stores immutable File descriptors in KAS while its singleton Driver
-owns the binary content API and storage. Binary content never passes through
-the KAS API. A `File --attached-to--> Resource` Link represents attachments.
-`skill` stores stable Skill Resources while each Skill's current ZIP bundle is
-an immutable File selected by its `bundle` Link. Replacing a bundle updates the
-existing Link target; it does not replace the Skill or Link Resource.
-`message` owns the fanout Driver that turns validated `mentioned` Links into
-Agent Runs. `agent` owns the Codex Driver that executes those Runs and manages
-both Agent and Session Resources. The Agent publishes its own assistant Message
-and required Links through the scoped KAS API; the Driver validates that reply
-and never converts Codex's final terminal output into a Message.
-Agent-to-Skill assignment uses a `uses`
-Link. The built-in KAS operating context is itself the `/skills/kas` Skill and
-is assigned to every Agent. The fixed Agent prompt contains only enough
-bootstrap context to identify KAS, the Agent's ServiceAccount, and its API
-environment variables; the complete operating instructions live in `$kas`.
-`approval` lets an Agent request one exact operation that its normal
-ServiceAccount cannot perform. A User may approve or reject the request. On
-approval, the Driver verifies that the deciding User may perform the exact
-operation and executes it with that request's User credential. Request,
-Decision, and Result are independent Resources whose paths belong to their
-principal namespaces: `/approvals{requester}/requests/{uuid}`,
-`/approvals{approver}/decisions/{uuid}`, and
-`/approvals{requester}/results/{uuid}`. Named Links record `requested-by`,
-`decides`, `decided-by`, `result-of`, and `produced-by`; no shared request ID
-or per-request Role or role-binding Link is required. A successful operation creates
-an immutable `/manifests/approval-result` Resource containing the sanitized API
-response. Plaintext credentials are never stored in KAS Resources.
+## 在这里可以做什么
 
-Threads are independent Resources under `/threads/{id}`. Their `participants`
-Links may reference multiple Agents, but only Agents referenced by a Message
-`mentioned` Link receive a Run. Message membership uses `message-thread`;
-the old convention where a root Message doubled as a Thread no longer exists.
+| 能力 | 它解决的问题 |
+| --- | --- |
+| **Threads** | 把一次协作的参与者、消息、文件和 Agent Session 组织在一起 |
+| **Agents** | 使用真实 Codex CLI 执行工作，并通过 `@handle` 精确触发 |
+| **Sessions** | 为每个 Thread–Agent 组合保留连续上下文，同时隔离不同 Agent |
+| **Files** | 上传任意附件，并以 KAS 权限控制上传、预览和下载 |
+| **Skills** | 把多文件 Skill bundle 作为可版本化能力分配给一个或多个 Agent |
+| **Approvals** | 让低权限 Agent 为一次确定操作申请用户授权，而不扩大长期权限 |
+| **Frontend plugins** | 把新的管理页面安装到 Workspace 侧边栏，而不重建宿主 UI |
 
-Each `(Thread, Agent)` pair gets at most one Session Resource at
-`/threads/{thread}/sessions/{agent}`. The first mention starts a persistent
-Codex CLI session and records the `thread.started.thread_id`; later mentions
-use `codex exec resume`. The Session cursor advances to the latest assistant
-Message, so a resumed Agent receives only Thread Messages created since its
-previous turn. Different Agents in the same Thread have isolated Sessions.
+## 一次典型协作
 
-Build installable `.kas` archives:
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant UI as Workspace
+    participant KAS as KAS
+    participant Agent as Codex Agent
 
-```bash
-platform/scripts/build-packages.sh
+    User->>UI: 创建 Thread，加入 Agent 和附件
+    User->>UI: 发送带 @mention 的消息
+    UI->>KAS: 创建 Message 与 Links
+    KAS-->>Agent: 推送需要处理的 Resource
+    Agent->>KAS: 读取 Thread、File 与已分配 Skill
+    Agent->>KAS: 创建回复和工作成果
+    KAS-->>UI: 展示新的 Resources
 ```
 
-This writes `platform/dist/thread.kas`, `platform/dist/session.kas`,
-`platform/dist/file.kas`, `platform/dist/skill.kas`,
-`platform/dist/message.kas`, `platform/dist/approval-result.kas`,
-`platform/dist/approval.kas`, and `platform/dist/agent.kas`. Install Approval
-Result before Approval. Install Thread, Session, File, and Skill before Agent
-because the Agent Driver manages Session Resources and reads Skill and File
-descriptors.
-The Message package contains the singleton fanout Driver. The Agent package
-contains a singleton Driver that invokes the `codex` executable available in
-its environment. Set `KAS_CODEX_BIN` to override its path and
-`KAS_CODEX_HOME` to select the persistent Codex session store.
+Platform 不依赖一套隐藏的聊天数据库。界面里看到的 Thread、Message、Agent、
+附件关系、审批记录和插件注册信息，都可以通过 KAS 的通用 Resource 与 Link
+模型查询和授权。
 
-The File Driver binds `KAS_FILE_ADDRESS` (default `127.0.0.1:3001`) and stores
-content under `KAS_DATA_DIR/file-driver/blobs`. Clients upload multipart
-`content` to `POST /files` and download with
-`GET /files/content?path=/files/...`; both endpoints accept normal KAS Bearer
-Credentials. The Driver forwards that Credential to KAS `/auth/check` using
-the `upload` or `download` verb. `KAS_FILE_MAX_BYTES` sets the upload limit
-(default 1 GiB). Downloads support HEAD and HTTP byte ranges.
+## 产品结构
 
-The Skill Driver binds `KAS_SKILL_ADDRESS` (default `127.0.0.1:3002`).
-Create a Skill with multipart field `bundle` at
-`POST /skills?path=/skills/{id}` and replace its bundle at
-`PATCH /skills?path=/skills/{id}&expected_revision={revision}`. Both endpoints
-authorize the caller through KAS and upload bundle bytes through the File API.
-The Driver validates every ZIP before creating Skill state and validates it
-again before materializing it for an Agent. Bundles require a root
-`SKILL.md`; absolute or traversing paths, duplicate entries, symbolic links,
-and other non-file entries are rejected. Expanded size and entry counts are
-also bounded.
+```mermaid
+flowchart TB
+    B["Browser"]
+    G["Frontend Gateway<br/>Workspace + plugin host"]
+    K["KAS Core<br/>Resource API · RBAC · Driver runtime"]
+    P["Platform Packages<br/>Thread · Message · Agent · File<br/>Skill · Approval · Frontend"]
+    D["Platform Drivers"]
+    C["Codex CLI"]
+    X["Blob storage / external services"]
 
-The Approval Driver binds `KAS_APPROVAL_ADDRESS` (default
-`127.0.0.1:3003`). Agents submit requests to `POST /approvals`; authenticated
-Users decide them with `POST /approvals/decide`. Approval never expands an
-Agent's standing permissions. The Driver checks the current User credential
-against the exact create, update, delete, get, or bounded list operation before
-executing it. An unauthorized Decision is retained as `invalid` and leaves the
-Request pending; a later authorized Decision may still claim it. Concurrent or
-late valid Decisions become `superseded`. Successful responses are stored as
-Result Resources after removing platform-only `[kas]` bookkeeping fields and
-are discovered through `result-of` and `produced-by` Links.
-
-Run the complete platform flow with the real Codex CLI:
-
-```bash
-platform/tests/e2e.sh
-platform/tests/e2e.sh -v
+    B --> G
+    G --> K
+    P -->|"安装 Resources"| K
+    P -. "包含" .-> D
+    K <--> D
+    D --> C
+    D <--> X
 ```
 
-The E2E test requires an authenticated `codex` executable on `PATH`. Set
-`KAS_CODEX_BIN` to select another real Codex executable. It starts KAS with a
-temporary database, installs all eight packages, uploads binary content,
-installs the FrontendPlugin package and Registry plugin, verifies full and
-ranged downloads, creates a multi-Agent Thread with an
-attached File, and verifies that only the mentioned Agent receives a Run. The
-real Codex Agent loads an assigned Skill, downloads the attachment with its
-own ServiceAccount, and produces KAS Resources from both inputs. The test then
-replaces the Skill bundle without changing the Skill or bundle Link identity,
-restarts the Agent Driver, and verifies that the resumed Session uses the new
-bundle. It also rejects a ZIP containing a symbolic link. Agent
-ServiceAccounts may upload new Files and download existing Files, but uploads
-are create-only and cannot overwrite an existing File path. The test also
-covers File and Skill RBAC and deletion. It also proves that an Agent cannot
-perform a privileged write directly, can submit it for User approval, and that
-the operation executes only when the deciding User has the requested
-permission. It covers invalid, rejected, successful, and duplicate Decisions,
-Link-based discovery, and requester namespace isolation.
+KAS Core 提供稳定的 Resource 控制面；Platform 的产品功能则以相互独立的
+Package 交付。每个 Package 可以包含 Manifest、初始化 Resources 和 Driver，
+因此新增功能不需要在 Core 中增加新的对象类型。
 
-## Frontend
+Web 界面由一个很小的 Workspace 宿主和可安装的 iframe 插件组成。宿主负责
+登录、导航和受控 API bridge；Threads、Agents、Skills、Approvals 和通用对象
+管理页都可以作为前端插件独立演进。
 
-`packages/frontend/` is a normal KAS Package with a singleton Rust Driver.
-The Package contains the built Svelte host, the FrontendPlugin Manifest,
-Driver RBAC, the HTTP Gateway, and the plugin runtime. Build all Platform
-packages with:
+## 核心设计原则
 
-```bash
-platform/scripts/build-packages.sh
-```
+- **Resource 是共同语言**：产品中的领域对象、权限和插件注册都使用同一模型。
+- **Agent 只在被提及时工作**：Thread 可以容纳多个 Agent，消息通过 Link
+  明确选择本次参与者。
+- **权限默认最小化**：Agent 使用自己的 Service Account；临时高权限操作必须
+  经过可审计的 Approval。
+- **内容与控制面分离**：大文件由 File Driver 保存和传输，KAS 只维护描述符
+  与关系。
+- **能力可以安装**：后台 Driver、Skill 和前端插件都能独立更新，不把业务
+  逻辑写死在平台内核中。
 
-The Driver serves the host and acts as a small same-origin reverse proxy.
-`/api/*` is an intrinsic route to the same KAS control plane used by the
-Driver protocol. Every independently served HTTP API is configured as a
-`/manifests/proxy` Resource in KAS. The Frontend Driver reconciles those
-Resources into its live longest-prefix route table, so route changes require
-neither environment configuration nor a process restart. File is the
-foundational external route; Skill and Approval remain compatibility Proxy
-Resources while those Drivers still expose specialized HTTP operations.
+## 与 KAS Core 的关系
 
-The connection form exchanges a KAS Credential for an opaque in-memory
-Gateway Session. Only an `HttpOnly`, `SameSite=Strict` session cookie remains
-in the browser; the Gateway forwards each operation with the current User's
-Credential rather than its Driver ServiceAccount.
+仓库的 `core` 分支只维护通用控制面；`master` 分支在此基础上增加
+`platform/`。Platform 只依赖 Core，Platform 专属 Package、Driver、UI、部署
+和测试均留在本目录中，确保 Core 可以持续无冲突地合并进完整产品。
 
-The UI stores the User path and API base in browser-local settings; it does
-not persist the exchanged Bearer Credential. It can create Agents and independent Threads, add multiple Agent participants,
-turn `@handle` mentions into structured Links, wait for Driver-created real
-Codex Runs, display the linked assistant Messages, inspect the Session for each
-Thread participant, reset a Session when a fresh Codex context is needed, and
-attach arbitrary files to Messages. Image, video, and audio previews are
-loaded on demand with authenticated requests; all other content is available
-through authenticated download. The Skill page imports or replaces Skill ZIP
-bundles and manages Agent assignments. The Approval page presents the exact
-requested operation and its reason, lets a User approve or reject it, and
-shows the resulting decision audit record.
+## 继续阅读
 
-### Frontend plugins
-
-Platform extensions can contribute entries to the Workspace or Resources
-sidebar without changing Core or rebuilding the host UI. A FrontendPlugin is
-an ordinary Resource whose ZIP bundle is an immutable File connected by the
-package-defined `./relations/bundle` Link. Build and install one with:
-
-```bash
-platform/scripts/build-frontend-plugin.sh \
-  platform/plugins/registry \
-  /tmp/registry.zip
-
-platform/scripts/install-frontend-plugin.sh \
-  /tmp/registry.zip \
-  /frontend-plugins/registry \
-  registry \
-  index.html \
-  Objects \
-  '◇' \
-  50 \
-  /objects
-```
-
-The Frontend Driver watches the plugin, bundle Link, and File; validates and
-extracts the ZIP into a digest-addressed cache; and serves the entrypoint and
-relative assets below `/plugins/{slug}/`. The host loads that URL in a
-sandboxed iframe without exposing the User Credential. A `postMessage` bridge
-provides plugin context plus Resource, Link, authorization, approved Gateway
-API, and navigation operations; every operation is executed by the host with
-the current User's normal KAS permissions. Static JavaScript and CSS assets
-are CORS-readable so an opaque-origin sandbox can load modules, but entrypoints
-and all data operations remain authenticated.
-
-`platform/plugins/registry/` implements the generic Objects registry.
-Threads, Agents, Skills, and Approvals are also installed FrontendPlugin
-Resources and render through the same iframe runtime. Their bundle reuses the
-complete Svelte management UI, including File, Skill, Approval, and navigation
-operations. Chat and the current Thread context remain part of the minimal
-host shell.
-
-## Docker
-
-Build the complete Platform image from the repository root:
-
-```bash
-docker build -f platform/Dockerfile -t kas-platform .
-```
-
-Run it with a named volume so the SQLite database, installed packages, File
-blobs, plugins, and Codex sessions survive container replacement:
-
-```bash
-docker run --name kas-platform \
-  -p 5173:5173 \
-  -p 3000:3000 \
-  -v kas-data:/var/lib/kas \
-  -e OPENAI_API_KEY \
-  kas-platform
-```
-
-The multi-stage build compiles Core and every Platform Driver in release mode,
-builds the Svelte host, creates the `.kas` archives, bundles the built-in
-iframe plugins, and installs the Codex CLI. The runtime image runs as the
-unprivileged `kas` User under `tini`.
-
-On a new volume, the entrypoint migrates the database, bootstraps an admin,
-starts KAS, installs all packages, creates the three Proxy Resources, and
-installs Threads, Agents, Skills, Approvals, and Objects as FrontendPlugin
-Resources. The initial admin token is printed once in the container logs:
-
-```bash
-docker logs kas-platform
-```
-
-Open `http://localhost:5173/` and connect with that token. The control-plane
-API is available on port `3000`; File, Skill, and Approval APIs normally remain
-behind the Frontend Gateway. Set `KAS_ADMIN_NAME` before the first start to
-choose another bootstrap User name. `CODEX_VERSION` is a build argument when a
-specific Codex CLI release is required:
-
-```bash
-docker build -f platform/Dockerfile \
-  --build-arg CODEX_VERSION=latest \
-  -t kas-platform .
-```
+- [Platform 文档索引](docs/README.md)
+- [Platform 技术参考](docs/technical-reference.md)
+- [KAS Core 项目介绍](../README.md)
+- [KAS Core 技术文档](../docs/README.md)
