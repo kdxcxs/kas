@@ -1,46 +1,53 @@
 # KAS
 
-> 用一套 Resource 模型，把领域对象、关系、权限和后台协调统一到同一个控制面。
+English | [简体中文](README.zh-CN.md)
 
-KAS 是一个面向 Resource 的应用控制面。你只需要描述系统中“应该存在什么”，
-KAS 负责保存这些对象、检查权限、记录关系，并把需要处理的变化交给对应的
-Driver。
+> One Resource model for domain objects, relationships, authorization, and
+> background coordination.
 
-它适合构建 Agent 平台、自动化控制面、集成中心，以及任何需要让多个后台能力
-围绕共享对象持续协作的系统。仓库中的 `core` 分支提供通用内核；
-`master` 分支还包含一个可直接使用的
-[KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform)。
+KAS is a Resource-oriented application control plane. You describe what should
+exist; KAS stores those objects, enforces permissions, records relationships,
+and sends each relevant change to the Driver responsible for handling it.
+
+It is a foundation for Agent platforms, automation control planes, integration
+hubs, and other systems where multiple background capabilities collaborate
+around shared objects. The `core` branch contains the generic kernel. The
+`master` branch also includes the ready-to-use
+[KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform).
 
 ```mermaid
 flowchart LR
-    U["用户 / API 客户端"] --> K["KAS 控制面"]
-    K --> R["Resources<br/>统一的数据与状态"]
-    M["Manifests<br/>定义结构与规则"] --> R
-    R --> D["Drivers<br/>处理待完成的变化"]
-    D --> E["外部系统 / Runtime"]
+    U["User / API client"] --> K["KAS control plane"]
+    K --> R["Resources<br/>shared data and state"]
+    M["Manifests<br/>structure and rules"] --> R
+    R --> D["Drivers<br/>handle outstanding changes"]
+    D --> E["External systems / runtimes"]
     D --> R
-    R --- L["Links<br/>连接任意 Resource"]
+    R --- L["Links<br/>connect any Resources"]
 ```
 
-## 为什么是 KAS
+## Why KAS
 
-许多系统会分别为任务、用户、权限、关系、后台作业和插件建立不同的数据模型，
-最后还要额外解决它们之间的同步问题。KAS 把这些内容都表示为 Resource：
+Many systems create separate models for tasks, users, permissions,
+relationships, background jobs, and plugins, then add another synchronization
+layer to keep them consistent. KAS represents all of them as Resources:
 
-- 它们使用相同的路径进行寻址；
-- 通过 Manifest 获得结构和语义；
-- 通过 Link 建立显式关系；
-- 通过同一套 RBAC 授权；
-- 由 Driver 持续把期望状态变成实际状态。
+- every object has a stable path;
+- a Manifest defines its structure and semantics;
+- Links express explicit relationships;
+- one RBAC model authorizes every object;
+- Drivers continuously converge desired and current state.
 
-这让平台能力可以作为 Package 安装和更新，而不是不断向内核加入新的特殊类型。
+Platform capabilities can therefore be installed and upgraded as Packages
+instead of becoming new special cases in the kernel.
 
-## 最小心智模型
+## The smallest useful mental model
 
 ### Resource
 
-KAS 中唯一的持久化原语。Agent、Message、Role、Driver，甚至 Manifest 自己，
-最终都是 Resource。每个 Resource 都有稳定的 `path`，以及期望数据和当前状态：
+The only public persistent primitive in KAS. Agents, Messages, Roles, Drivers,
+and even Manifests are all Resources. Every Resource has a stable `path`,
+desired data, and current status:
 
 ```json
 {
@@ -65,20 +72,21 @@ KAS 中唯一的持久化原语。Agent、Message、Role、Driver，甚至 Manif
 
 ### Manifest
 
-定义一类 Resource 的结构、状态和可用能力，类似一份可以被平台理解的“类定义”。
-Manifest 本身也是 Resource，因此新的领域类型可以动态安装，不需要修改 KAS
-内核。
+A Manifest defines the schema, states, and available capabilities of a class of
+Resources. It is itself a Resource, so new domain types can be installed
+dynamically without changing the KAS kernel.
 
 ### Driver
 
-负责让 Resource 的当前状态追上期望状态。一个 Driver 可以管理一种或多种
-Manifest，也可以关注其他 Resource；KAS 只投递真正需要处理的变化。每个
-Manifest 共享一个 singleton Driver 进程，而不是为每个实例启动一个进程。
+A Driver makes a Resource's current state converge on its desired state. One
+Driver may manage several Manifests or watch additional Resources, while KAS
+delivers only changes that require work. All Resources of a Manifest share a
+singleton Driver process; KAS does not start one process per instance.
 
-### Relation 与 Link
+### Relation and Link
 
-Relation 定义什么样的关系是合法的，Link 是一条具体关系。Link 可以连接任意
-两个 Resource，例如：
+A Relation defines which relationships are valid. A Link is one concrete
+relationship and may connect any two Resources:
 
 ```mermaid
 flowchart LR
@@ -88,49 +96,52 @@ flowchart LR
     D["Driver"] -- role-binding --> R["Role"]
 ```
 
-### Action 与 Run
+### Action and Run
 
-Action 描述 Resource 可以执行的操作，Run 表示一次具体执行。两者仍然是
-Resource，因此执行记录可以沿用相同的查询、权限和关系模型。
+An Action describes an operation available for a Resource. A Run records one
+execution of that Action. Both are Resources, so execution history uses the
+same querying, authorization, and relationship model.
 
 ### Package
 
-Package 是 KAS 的交付单元，可以一起安装 Manifest、初始化 Resources 和
-Driver。一个功能由此能够自带自己的数据定义、关系、权限与运行逻辑。
+A Package is the KAS delivery unit. It can install a Manifest, initial
+Resources, and a Driver together, allowing a feature to bring its own data
+definition, relationships, permissions, and runtime behavior.
 
-## KAS 如何工作
+## How KAS works
 
 ```mermaid
 sequenceDiagram
-    participant Client as 客户端
-    participant KAS as KAS
-    participant Driver as Driver
+    participant Client
+    participant KAS
+    participant Driver
 
-    Client->>KAS: 创建或更新 Resource
-    KAS->>KAS: 持久化、鉴权、计算受影响的 Driver
-    KAS-->>Driver: 推送单个 Resource 的 reconcile
-    Driver->>KAS: 提交 Resource mutation
-    Driver->>KAS: reconcile complete
-    KAS->>KAS: 更新 Resource status
+    Client->>KAS: Create or update a Resource
+    KAS->>KAS: Persist, authorize, and select affected Drivers
+    KAS-->>Driver: Push one Resource reconciliation
+    Driver->>KAS: Submit Resource mutations
+    Driver->>KAS: Reconciliation complete
+    KAS->>KAS: Advance Resource status
 ```
 
-KAS Core 关注的是这条通用闭环，不内置具体业务。完整的 Agent、Thread、
-Message、File、Skill、Approval 和可插拔前端由 KAS Platform 以普通 Package
-提供。
+KAS Core implements this generic control loop without embedding product
+domains. KAS Platform supplies Agents, Threads, Messages, Files, Skills,
+Approvals, and a pluggable frontend as ordinary Packages.
 
-## Core 与 Platform
+## Core and Platform
 
-| 项目 | 作用 |
+| Project | Responsibility |
 | --- | --- |
-| **KAS Core** | Resource API、Manifest、Package、RBAC、Link、Driver Runtime、SQLite/PostgreSQL 存储 |
-| **KAS Platform** | 基于 Core 构建的开箱即用多 Agent 协作产品和 Web UI |
+| **KAS Core** | Resource API, Manifests, Packages, RBAC, Links, Driver runtime, and SQLite/PostgreSQL storage |
+| **KAS Platform** | A batteries-included multi-Agent collaboration product and Web UI built on Core |
 
-核心代码位于根目录的 `crates/`、`apps/`、`builtins/`；Platform 的产品能力
-独立维护在 `platform/`，因此 Core 可以持续合并进完整平台，而不与业务包互相
-缠绕。
+Core lives in the root `crates/`, `apps/`, and `builtins/` directories.
+Product-specific Packages, Drivers, UI, deployment, and tests stay under
+`platform/`, allowing Core to merge into the complete Platform without
+entangling generic and product code.
 
-## 继续阅读
+## Learn more
 
-- [文档索引](docs/README.md)
-- [Core 技术参考](docs/technical-reference.md)
-- [KAS Platform 介绍](https://github.com/kdxcxs/kas/tree/master/platform)
+- [Documentation index](docs/README.md)
+- [Core technical reference](docs/technical-reference.md)
+- [KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform)
