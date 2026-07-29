@@ -16,6 +16,23 @@ and work products through the KAS API.
 
 ![People and Agents collaborating through KAS](docs/assets/platform-collaboration.png)
 
+## Quick start
+
+Install Rust, Node.js, `curl`, `jq`, Python 3, and an authenticated Codex CLI,
+then run this command from the repository root:
+
+```bash
+./platform/scripts/preview.sh
+```
+
+The script builds Core and the Platform packages, creates an isolated temporary
+database, installs the frontend plugins, and prints the login token and service
+URLs. Open `http://127.0.0.1:5173/` and use the printed token. Press
+<kbd>Ctrl</kbd>+<kbd>C</kbd> to stop the preview and remove its temporary data.
+
+For a persistent Docker deployment and configuration options, see the
+[Platform technical reference](docs/technical-reference.md).
+
 ## What you can do
 
 | Capability | What it provides |

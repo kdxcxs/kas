@@ -14,6 +14,23 @@ Agent 由真实的 Codex CLI 驱动。它们拥有持久 Session，可以读取 
 
 ![用户与 Agent 通过 KAS 协作](docs/assets/platform-collaboration.png)
 
+## 快速运行
+
+安装 Rust、Node.js、`curl`、`jq`、Python 3，以及已经完成登录的 Codex CLI
+后，在仓库根目录运行：
+
+```bash
+./platform/scripts/preview.sh
+```
+
+脚本会构建 Core 与 Platform Package、创建隔离的临时数据库、安装前端插件，
+并输出登录 token 和各服务地址。打开 `http://127.0.0.1:5173/`，使用终端中
+输出的 token 登录即可。按 <kbd>Ctrl</kbd>+<kbd>C</kbd> 停止服务时，临时数据
+也会一并清理。
+
+持久化 Docker 部署及其他配置见
+[Platform 技术参考](docs/technical-reference.md)。
+
 ## 在这里可以做什么
 
 | 能力 | 它解决的问题 |
