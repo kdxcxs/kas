@@ -49,18 +49,44 @@ For the complete product and Web UI, use
 
 ## Why KAS
 
-Many systems create separate models for tasks, users, permissions,
-relationships, background jobs, and plugins, then add another synchronization
-layer to keep them consistent. KAS represents all of them as Resources:
+> Everything a person or an Agent does is ultimately an interaction with a
+> Resource.
 
-- every object has a stable path;
-- a Manifest defines its structure and semantics;
-- Links express explicit relationships;
-- one RBAC model authorizes every object;
-- Drivers continuously converge desired and current state.
+Creating, reading, updating, deleting, sharing a file, invoking an Agent,
+granting permission, and approving an operation may look like different
+features at the product level. Underneath, each one reads, changes, relates, or
+acts on something that can be described, stored, and referenced. Even
+execution is represented as Resources: an Action describes what can be done,
+and a Run records one concrete invocation.
 
-Platform capabilities can therefore be installed and upgraded as Packages
-instead of becoming new special cases in the kernel.
+In the same way that programs ultimately operate on memory, KAS starts from the
+idea that an application ultimately operates on Resources. The important
+questions are therefore not “which special subsystem should own this feature?”
+but:
+
+- What does this Resource look like, and what does it mean?
+- How is it related to other Resources?
+
+Once those two things are explicit, many higher-level capabilities follow from
+the same foundation:
+
+- **Sharing:** people and Agents collaborate through the same addressable
+  Resources instead of exchanging data through hidden, feature-specific
+  stores.
+- **Permission and audit:** reads, mutations, relationships, and executions
+  pass through one authorization model and leave inspectable records.
+- **Control and orchestration:** Links can express participants, dependencies,
+  inputs, outputs, ownership, and ordering, allowing Drivers to coordinate
+  complex Agent behavior.
+- **Extension without intrusion:** a Link can add a new description or
+  relationship to an existing Resource without changing the original object.
+- **Dynamic vocabulary:** a Manifest introduces a new Resource type at
+  runtime. With the appropriate permission, an Agent can define and create new
+  types itself instead of waiting for the kernel to be changed.
+
+This is why KAS does not build separate foundations for chat, tasks, identity,
+permissions, workflows, and plugins. They are different Resource definitions
+and relationships operating on one small, composable control plane.
 
 ## The smallest useful mental model
 
