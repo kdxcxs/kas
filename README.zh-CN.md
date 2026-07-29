@@ -2,6 +2,8 @@
 
 [English](README.md) | 简体中文
 
+![KAS — Kas Agent System](docs/assets/kas-banner.png)
+
 > 用一套 Resource 模型，把领域对象、关系、权限和后台协调统一到同一个控制面。
 
 KAS 是一个面向 Resource 的应用控制面。你只需要描述系统中“应该存在什么”，

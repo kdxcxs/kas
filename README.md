@@ -2,6 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+![KAS — Kas Agent System](docs/assets/kas-banner.png)
+
 > One Resource model for domain objects, relationships, authorization, and
 > background coordination.
 
