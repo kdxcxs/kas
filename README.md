@@ -23,6 +23,30 @@ around shared objects. The `core` branch contains the generic kernel. The
 > desired Resources to KAS; KAS persists them, selects the affected singleton
 > Drivers, and records the status they return. Links connect any Resources.
 
+## Quick start
+
+With a recent Rust toolchain installed, run the following commands from the
+repository root:
+
+```bash
+cargo run -p kas-migrate
+cargo run -p kas-admin -- bootstrap admin
+cargo run -p kas-api
+```
+
+The bootstrap command prints the admin Bearer token. KAS then listens at
+`http://127.0.0.1:3000` and stores its SQLite database in `.data/kas.db`.
+From another terminal, verify that the API is ready:
+
+```bash
+curl http://127.0.0.1:3000/health
+```
+
+See the [Core technical reference](docs/technical-reference.md) for
+PostgreSQL, configuration, package installation, and Driver development.
+For the complete product and Web UI, use
+[KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform).
+
 ## Why KAS
 
 Many systems create separate models for tasks, users, permissions,
