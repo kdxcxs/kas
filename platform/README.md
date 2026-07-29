@@ -30,21 +30,12 @@ and work products through the KAS API.
 
 ## A typical collaboration
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant UI as Workspace
-    participant KAS
-    participant Agent as Codex Agent
+![One collaboration turn through KAS](docs/assets/collaboration-turn.png)
 
-    User->>UI: Create a Thread with Agents and attachments
-    User->>UI: Send a message containing @mentions
-    UI->>KAS: Create the Message and Links
-    KAS-->>Agent: Push the Resource that needs work
-    Agent->>KAS: Read the Thread, Files, and assigned Skills
-    Agent->>KAS: Create a reply and work products
-    KAS-->>UI: Display the new Resources
-```
+> **One turn:** A user creates a Thread with Agents and Files, then sends an
+> `@mention`. Only the selected Agent receives work, loads the Thread,
+> attachments, and assigned Skills, and publishes its reply as new Resources
+> in the same Thread.
 
 Platform does not hide collaboration data in a separate chat database. The
 Threads, Messages, Agents, attachment relationships, Approval records, and
@@ -53,24 +44,12 @@ through the generic KAS Resource and Link model.
 
 ## Product structure
 
-```mermaid
-flowchart TB
-    B["Browser"]
-    G["Frontend Gateway<br/>Workspace + plugin host"]
-    K["KAS Core<br/>Resource API · RBAC · Driver runtime"]
-    P["Platform Packages<br/>Thread · Message · Agent · File<br/>Skill · Approval · Frontend"]
-    D["Platform Drivers"]
-    C["Codex CLI"]
-    X["Blob storage / external services"]
+![KAS Platform product architecture](docs/assets/platform-architecture.png)
 
-    B --> G
-    G --> K
-    P -->|"install Resources"| K
-    P -. "contain" .-> D
-    K <--> D
-    D --> C
-    D <--> X
-```
+> **Product layers:** The Browser connects through the Frontend Gateway and
+> plugin host to KAS Core. Packages install Resources into Core; singleton
+> Drivers connect Core bidirectionally to Codex, File storage, and external
+> services.
 
 KAS Core supplies the stable Resource control plane. Platform features are
 delivered as independent Packages. A Package may contain a Manifest, initial

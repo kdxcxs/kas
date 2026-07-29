@@ -28,21 +28,11 @@ Agent 由真实的 Codex CLI 驱动。它们拥有持久 Session，可以读取 
 
 ## 一次典型协作
 
-```mermaid
-sequenceDiagram
-    actor User as 用户
-    participant UI as Workspace
-    participant KAS as KAS
-    participant Agent as Codex Agent
+![一次完整的 KAS 协作流程](docs/assets/collaboration-turn.png)
 
-    User->>UI: 创建 Thread，加入 Agent 和附件
-    User->>UI: 发送带 @mention 的消息
-    UI->>KAS: 创建 Message 与 Links
-    KAS-->>Agent: 推送需要处理的 Resource
-    Agent->>KAS: 读取 Thread、File 与已分配 Skill
-    Agent->>KAS: 创建回复和工作成果
-    KAS-->>UI: 展示新的 Resources
-```
+> **一次协作：** 用户创建包含 Agent 和 File 的 Thread，然后发送
+> `@mention`；只有被选中的 Agent 会收到工作。Agent 加载 Thread、附件和已分配
+> Skill，再把回复作为新的 Resource 发布回同一个 Thread。
 
 Platform 不依赖一套隐藏的聊天数据库。界面里看到的 Thread、Message、Agent、
 附件关系、审批记录和插件注册信息，都可以通过 KAS 的通用 Resource 与 Link
@@ -50,24 +40,11 @@ Platform 不依赖一套隐藏的聊天数据库。界面里看到的 Thread、M
 
 ## 产品结构
 
-```mermaid
-flowchart TB
-    B["Browser"]
-    G["Frontend Gateway<br/>Workspace + plugin host"]
-    K["KAS Core<br/>Resource API · RBAC · Driver runtime"]
-    P["Platform Packages<br/>Thread · Message · Agent · File<br/>Skill · Approval · Frontend"]
-    D["Platform Drivers"]
-    C["Codex CLI"]
-    X["Blob storage / external services"]
+![KAS Platform 产品结构](docs/assets/platform-architecture.png)
 
-    B --> G
-    G --> K
-    P -->|"安装 Resources"| K
-    P -. "包含" .-> D
-    K <--> D
-    D --> C
-    D <--> X
-```
+> **产品分层：** Browser 通过 Frontend Gateway 和插件宿主访问 KAS Core；
+> Package 向 Core 安装 Resource，singleton Driver 则把 Core 与 Codex、File
+> 存储和外部服务双向连接。
 
 KAS Core 提供稳定的 Resource 控制面；Platform 的产品功能则以相互独立的
 Package 交付。每个 Package 可以包含 Manifest、初始化 Resources 和 Driver，
