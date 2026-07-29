@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/kas-icon.png" alt="KAS icon" width="112">
+</p>
+
 # KAS Core documentation
 
 English | [简体中文](README.zh-CN.md)
