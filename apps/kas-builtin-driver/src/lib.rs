@@ -7,8 +7,8 @@ use kas_core::{
 };
 use kas_driver::{Driver, DriverError, DriverRuntime};
 
-const RELATION_MANIFEST: &str = "/builtin/relation";
-const LINK_MANIFEST: &str = "/builtin/link";
+const RELATION_MANIFEST: &str = "/packages/kas/relation/manifest";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
 const INVALID_STATE: &str = "invalid";
 
 pub async fn run_builtin_driver() -> anyhow::Result<()> {

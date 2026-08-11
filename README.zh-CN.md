@@ -84,9 +84,9 @@ KAS 中唯一的持久化原语。Agent、Message、Role、Driver，甚至 Manif
 
 ```json
 {
-  "path": "/agents/planner",
+  "path": "/packages/acme/agent/resources/planner",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "state": "available"
   },
   "spec": {
@@ -108,6 +108,10 @@ KAS 中唯一的持久化原语。Agent、Message、Role、Driver，甚至 Manif
 定义一类 Resource 的结构、状态和可用能力，类似一份可以被平台理解的“类定义”。
 Manifest 本身也是 Resource，因此新的领域类型可以动态安装，不需要修改 KAS
 内核。
+
+每个 Package 都拥有稳定的 `/packages/{publisher}/{package}` 沙箱；Manifest、
+Driver、权限、关系和业务 Resource 都位于该 Root 下，跨 Package 访问必须获得
+明确的 RBAC 授权。
 
 ### Driver
 

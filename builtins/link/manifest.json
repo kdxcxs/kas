@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/link",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/link/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "link",
   "version": 1,
   "description": "Defines Link Resources",
+  "paths": [
+    "/packages/*/*/**/links/**"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [

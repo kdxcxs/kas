@@ -1,7 +1,7 @@
 {
-  "path": "/builtin/relations/role-binding",
+  "path": "./relations/role-binding",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "role-binding"
   },
   "spec": {
@@ -9,14 +9,14 @@
     "sources": [
       {
         "manifest": [
-          "/builtin/user",
-          "/builtin/service-account"
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest"
         ]
       }
     ],
     "targets": [
       {
-        "manifest": "/builtin/role"
+        "manifest": "/packages/kas/role/manifest"
       }
     ],
     "on_source_delete": "cascade",

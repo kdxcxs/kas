@@ -929,6 +929,7 @@ name = "kas-auth"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "kas-core",
  "serde",
  "sha2",
  "uuid",

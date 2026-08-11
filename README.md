@@ -99,9 +99,9 @@ desired data, and current status:
 
 ```json
 {
-  "path": "/agents/planner",
+  "path": "/packages/acme/agent/resources/planner",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "state": "available"
   },
   "spec": {
@@ -123,6 +123,10 @@ desired data, and current status:
 A Manifest defines the schema, states, and available capabilities of a class of
 Resources. It is itself a Resource, so new domain types can be installed
 dynamically without changing the KAS kernel.
+
+Every Package owns a stable `/packages/{publisher}/{package}` sandbox. Its
+Manifest, Driver, permissions, relationships, and business Resources remain
+under that root; cross-Package access requires explicit RBAC permission.
 
 ### Driver
 

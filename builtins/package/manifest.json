@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/package",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/package/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "package",
   "version": 1,
   "description": "Defines installed Package artifact metadata",
+  "paths": [
+    "/packages/*/*"
+  ],
   "resource_schema": {
     "type": "object",
     "properties": {
@@ -30,7 +33,7 @@
     "required": [
       "digest",
       "size_bytes",
-    "media_type"
+      "media_type"
     ],
     "additionalProperties": false
   },

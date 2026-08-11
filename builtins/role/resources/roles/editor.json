@@ -1,7 +1,7 @@
 {
-  "path": "/builtin/roles/editor",
+  "path": "./roles/editor",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "system:editor"
   },
   "spec": {

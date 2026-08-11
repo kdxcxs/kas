@@ -1,14 +1,14 @@
 {
-  "path": "/builtin/relations/run-resource",
+  "path": "./relations/run-resource",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "run-resource"
   },
   "spec": {
     "role": "run_resource",
     "sources": [
       {
-        "manifest": "/builtin/run"
+        "manifest": "/packages/kas/run/manifest"
       }
     ],
     "targets": [

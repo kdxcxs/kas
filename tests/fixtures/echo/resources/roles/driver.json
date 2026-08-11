@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "echo-driver"
   },
   "spec": {
@@ -9,7 +9,7 @@
     "rules": [
       {
         "manifests": [
-          "/manifests/echo"
+          "."
         ],
         "verbs": [
           "get",
@@ -17,7 +17,7 @@
           "update"
         ],
         "paths": [
-          "/resources/e2e/**"
+          "./resources/**"
         ]
       }
     ]

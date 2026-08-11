@@ -12,7 +12,7 @@ impl Driver for TestDriver {
     }
 
     async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
-        if resource.manifest != "/manifests/echo" {
+        if resource.manifest != "/packages/test/echo/manifest" {
             return Ok(Vec::new());
         }
         Ok(vec![Mutation::UpdateResourceStatus {
@@ -49,9 +49,9 @@ mod tests {
     #[tokio::test]
     async fn echo_uses_hydrated_action() {
         let resource: Resource = serde_json::from_value(json!({
-            "path": "/resources/source",
+            "path": "/packages/test/echo/resources/source",
             "metadata": {
-                "manifest": "/manifests/echo",
+                "manifest": "/packages/test/echo/manifest",
                 "name": "source",
                 "state": "available",
                 "[kas]": {
@@ -66,9 +66,9 @@ mod tests {
         }))
         .unwrap();
         let run: Resource = serde_json::from_value(json!({
-            "path": "/runs/echo-1",
+            "path": "/packages/test/echo/resources/source/runs/echo-1",
             "metadata": {
-                "manifest": "/builtin/run",
+                "manifest": "/packages/kas/run/manifest",
                 "name": "echo-1",
                 "state": "queued",
                 "[kas]": {
@@ -80,27 +80,27 @@ mod tests {
             },
             "spec": {
                 "request_id": "10000000-0000-0000-0000-000000000001",
-                "resource": "/resources/source",
-                "action": "/manifests/echo/actions/echo",
-                "driver": "/manifests/echo/driver",
+                "resource": "/packages/test/echo/resources/source",
+                "action": "/packages/test/echo/actions/echo",
+                "driver": "/packages/test/echo/driver",
                 "input": {"message": "hello"}
             },
             "status": {
                 "metadata": {"state": "running"},
                 "spec": {
                     "request_id": "10000000-0000-0000-0000-000000000001",
-                    "resource": "/resources/source",
-                    "action": "/manifests/echo/actions/echo",
-                    "driver": "/manifests/echo/driver",
+                    "resource": "/packages/test/echo/resources/source",
+                    "action": "/packages/test/echo/actions/echo",
+                    "driver": "/packages/test/echo/driver",
                     "input": {"message": "hello"}
                 }
             }
         }))
         .unwrap();
         let action: Resource = serde_json::from_value(json!({
-            "path": "/manifests/test/actions/echo",
+            "path": "/packages/test/echo/actions/echo",
             "metadata": {
-                "manifest": "/builtin/action",
+                "manifest": "/packages/kas/action/manifest",
                 "name": "echo",
                 "state": "available",
                 "[kas]": {

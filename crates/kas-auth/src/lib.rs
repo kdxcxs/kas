@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
-use std::fmt;
 use uuid::Uuid;
+
+pub use kas_core::{validate_path, validate_path_pattern, PathError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subject {
@@ -62,111 +63,8 @@ pub fn token_hash(token: &str) -> String {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathError {
-    NotAbsolute,
-    Root,
-    TrailingSlash,
-    EmptySegment,
-    InvalidSegment(String),
-    TooLong,
-    SegmentTooLong,
-}
-
-impl fmt::Display for PathError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotAbsolute => formatter.write_str("path must be absolute"),
-            Self::Root => formatter.write_str("path must identify an object"),
-            Self::TrailingSlash => formatter.write_str("path must not have a trailing slash"),
-            Self::EmptySegment => formatter.write_str("path must not contain empty segments"),
-            Self::InvalidSegment(segment) => {
-                write!(formatter, "path contains invalid segment {segment:?}")
-            }
-            Self::TooLong => formatter.write_str("path exceeds 1024 bytes"),
-            Self::SegmentTooLong => formatter.write_str("path segment exceeds 255 bytes"),
-        }
-    }
-}
-
-impl std::error::Error for PathError {}
-
-pub fn validate_path(path: &str) -> Result<(), PathError> {
-    validate_path_inner(path, false)
-}
-
-pub fn validate_path_pattern(pattern: &str) -> Result<(), PathError> {
-    validate_path_inner(pattern, true)
-}
-
-fn validate_path_inner(path: &str, allow_wildcards: bool) -> Result<(), PathError> {
-    if !path.starts_with('/') {
-        return Err(PathError::NotAbsolute);
-    }
-    if path == "/" {
-        return Err(PathError::Root);
-    }
-    if path.len() > 1024 {
-        return Err(PathError::TooLong);
-    }
-    if path.ends_with('/') {
-        return Err(PathError::TrailingSlash);
-    }
-    for segment in path[1..].split('/') {
-        if segment.is_empty() {
-            return Err(PathError::EmptySegment);
-        }
-        if segment.len() > 255 {
-            return Err(PathError::SegmentTooLong);
-        }
-        if segment == "." || segment == ".." {
-            return Err(PathError::InvalidSegment(segment.into()));
-        }
-        if segment
-            .bytes()
-            .any(|byte| byte == 0 || byte.is_ascii_control())
-            || (!allow_wildcards && (segment == "*" || segment == "**"))
-            || (segment.contains('*') && segment != "*" && segment != "**")
-        {
-            return Err(PathError::InvalidSegment(segment.into()));
-        }
-    }
-    Ok(())
-}
-
 pub fn path_matches(pattern: &str, path: &str) -> bool {
-    if validate_path_pattern(pattern).is_err() || validate_path(path).is_err() {
-        return false;
-    }
-    let pattern = split_path(pattern);
-    let path = split_path(path);
-    let mut memo = vec![vec![None; path.len() + 1]; pattern.len() + 1];
-    matches_segments(&pattern, &path, 0, 0, &mut memo)
-}
-
-fn matches_segments(
-    pattern: &[&str],
-    path: &[&str],
-    pattern_index: usize,
-    path_index: usize,
-    memo: &mut [Vec<Option<bool>>],
-) -> bool {
-    if let Some(result) = memo[pattern_index][path_index] {
-        return result;
-    }
-    let result = if pattern_index == pattern.len() {
-        path_index == path.len()
-    } else if pattern[pattern_index] == "**" {
-        matches_segments(pattern, path, pattern_index + 1, path_index, memo)
-            || (path_index < path.len()
-                && matches_segments(pattern, path, pattern_index, path_index + 1, memo))
-    } else {
-        path_index < path.len()
-            && (pattern[pattern_index] == "*" || pattern[pattern_index] == path[path_index])
-            && matches_segments(pattern, path, pattern_index + 1, path_index + 1, memo)
-    };
-    memo[pattern_index][path_index] = Some(result);
-    result
+    kas_core::path_matches(pattern, path)
 }
 
 pub fn path_pattern_contains(container: &str, candidate: &str) -> bool {

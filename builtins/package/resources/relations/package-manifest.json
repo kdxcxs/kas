@@ -1,19 +1,19 @@
 {
-  "path": "/builtin/relations/package-manifest",
+  "path": "./relations/package-manifest",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "package-manifest"
   },
   "spec": {
     "role": "package_manifest",
     "sources": [
       {
-        "manifest": "/builtin/package"
+        "manifest": "/packages/kas/package/manifest"
       }
     ],
     "targets": [
       {
-        "manifest": "/builtin/manifest"
+        "manifest": "/packages/kas/manifest/manifest"
       }
     ],
     "on_source_delete": "unlink",

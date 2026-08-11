@@ -1,14 +1,14 @@
 {
-  "path": "/builtin/relations/manifest-resource",
+  "path": "./relations/manifest-resource",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "manifest-resource"
   },
   "spec": {
     "role": "manifest_resource",
     "sources": [
       {
-        "manifest": "/builtin/manifest"
+        "manifest": "/packages/kas/manifest/manifest"
       }
     ],
     "targets": [

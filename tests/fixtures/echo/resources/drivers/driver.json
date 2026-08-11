@@ -1,7 +1,7 @@
 {
   "path": "./driver",
   "metadata": {
-    "manifest": "/builtin/driver",
+    "manifest": "/packages/kas/driver/manifest",
     "name": "echo-driver",
     "state": "running"
   },
@@ -12,21 +12,21 @@
     "args": [],
     "watches": [
       {
-        "manifest": "/builtin/link",
+        "manifest": "/packages/kas/link/manifest",
         "paths": [
-          "/links/e2e/**"
+          "./links/**"
         ]
       },
       {
-        "manifest": "/builtin/user",
+        "manifest": "/packages/kas/user/manifest",
         "paths": [
-          "/users/**"
+          "/packages/kas/user/users/**"
         ]
       },
       {
-        "manifest": "/manifests/integration-*",
+        "manifest": "/packages/test/integration/manifest",
         "paths": [
-          "/resources/integrations/**"
+          "/packages/test/integration/resources/**"
         ]
       }
     ],

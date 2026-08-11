@@ -502,12 +502,12 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&entrypoint, permissions).unwrap();
         let launch = DriverLaunch {
-            manifest_path: "/manifests/echo".into(),
+            manifest_path: "/packages/test/echo/manifest".into(),
             package_root: package.path().to_owned(),
             driver: serde_json::from_value(json!({
-                "path": "/manifests/echo/driver",
+                "path": "/packages/test/echo/driver",
                 "metadata": {
-                    "manifest": "/builtin/driver",
+                    "manifest": "/packages/kas/driver/manifest",
                     "name": "driver",
                     "state": "running",
                     "[kas]": {
@@ -520,13 +520,13 @@ mod tests {
                 "spec": {
                     "runtime": "process",
                     "entrypoint": "./driver",
-                    "service_account": "/manifests/echo/service-accounts/driver",
+                    "service_account": "/packages/test/echo/service-accounts/driver",
                     "args": ["argument"],
                     "restart": "never"
                 },
                 "status": {
                     "metadata": {
-                        "manifest": "/builtin/driver",
+                        "manifest": "/packages/kas/driver/manifest",
                         "name": "driver",
                         "state": "stopped",
                         "[kas]": {
@@ -554,7 +554,7 @@ mod tests {
         assert!(child.wait().await.unwrap().success());
         assert_eq!(
             fs::read_to_string(package.path().join("observed")).unwrap(),
-            "http://127.0.0.1:3000|/manifests/echo/driver|7|argument"
+            "http://127.0.0.1:3000|/packages/test/echo/driver|7|argument"
         );
     }
 }
