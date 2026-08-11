@@ -217,13 +217,9 @@ impl BenchmarkRunner {
 
         metrics_task.abort();
         let metrics_snapshot = driver_metrics.lock().unwrap().clone();
-        let database_bytes = if is_postgres(&database) {
-            0
-        } else {
-            fs::metadata(&database)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0)
-        };
+        let database_bytes = fs::metadata(&database)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         let mut extra = std::collections::BTreeMap::new();
         extra.insert("actual_resource_bytes".into(), actual_resource_bytes.into());
         extra.insert(
@@ -790,10 +786,6 @@ fn run_command(
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn is_postgres(database: &str) -> bool {
-    database.starts_with("postgres://") || database.starts_with("postgresql://")
 }
 
 fn reserve_tcp_port() -> anyhow::Result<u16> {

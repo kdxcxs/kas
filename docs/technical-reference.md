@@ -61,9 +61,9 @@ KAS-owned metadata is isolated under the reserved `"[kas]"` key. Manifest
 schemas may not define field names containing `[` or `]`.
 
 The `resources` table contains only `path`, `metadata`, `spec`, and `status`.
-SQLite stores the three documents as JSON text. PostgreSQL uses native `jsonb`.
-Backend-specific JSON expression indexes accelerate Manifest, Link, Run, and
-other platform queries without duplicating those values into parallel columns.
+SQLite stores the three documents as JSON text. JSON expression indexes
+accelerate Manifest, Link, Run, and other platform queries without duplicating
+those values into parallel columns.
 
 ## Manifests and built-ins
 
@@ -164,6 +164,11 @@ endpoints asynchronously, advances valid Links to `available`, and applies
 `unlink` or `cascade` deletion behavior. Cardinality and domain-specific
 relationship balance remain the responsibility of business Drivers.
 
+The Relationship Driver does not watch or list the complete Resource registry.
+Source, target, and Relation indexes let the Store advance only affected Link
+revisions; those unreconciled Links are then delivered through the normal
+observation queue. Each delivery reads only its three referenced Resources.
+
 Role bindings, Driver credentials, Run targets, Actions, Packages, and other
 platform mappings are represented by named Links instead of private object
 types.
@@ -191,6 +196,11 @@ their initial Resources. A Driver explicitly references its ServiceAccount;
 KAS does not infer business permissions. Driver Credentials are bound to the
 Driver generation and protected Driver-to-Credential Link. They become invalid
 when the Driver stops, restarts, or loses that Link.
+
+Because RoleBinding Links are themselves part of the authorization boundary,
+the Store validates and activates them transactionally. Authorization ignores
+bindings whose desired state is `deleted` or whose status is not `available`;
+`pending` and `invalid` bindings never grant permissions.
 
 `GET /auth` returns the caller's Credential, Subject, and effective Rules.
 `POST /auth/check` answers whether that same Credential may perform one
@@ -284,9 +294,8 @@ cargo run -p kas-admin -- bootstrap admin
 cargo run -p kas-api
 ```
 
-SQLite uses `${KAS_DATA_DIR}/kas.db` by default. Set the same
-`KAS_DATABASE=postgresql://...` value for all three commands to use PostgreSQL.
-`KAS_DATABASE_POOL_SIZE` controls the connection pool and defaults to 16.
+SQLite uses `${KAS_DATA_DIR}/kas.db` by default. `KAS_DATABASE` can override
+that file path, and `KAS_DATABASE_POOL_SIZE` controls the connection pool.
 
 The API never performs schema migration implicitly; it refuses to start when
 the database is not ready.
@@ -320,12 +329,6 @@ Run the Core tests:
 ```bash
 cargo test --workspace
 tests/e2e.sh
-```
-
-With Docker available, the same black-box flow can validate native PostgreSQL:
-
-```bash
-tests/e2e-postgres.sh
 ```
 
 The independent end-to-end benchmark starts a real API and Driver processes,

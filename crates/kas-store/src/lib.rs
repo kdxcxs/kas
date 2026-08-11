@@ -1,15 +1,22 @@
 //! Persistence for KAS's single-Resource model.
 
+mod authorization;
 mod database;
+mod events;
 mod reconcile;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use authorization::activate_role_binding_in;
 use chrono::{DateTime, Duration, Utc};
 use database::{
     Connection, Error as DatabaseError, IntoParam, OptionalExtension, Param, Row, Transaction,
+};
+use events::{
+    append_deleted_event, append_event, current_event_sequence_in, event_from_row,
+    event_paths_since,
 };
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
@@ -30,7 +37,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 17;
+pub const LATEST_SCHEMA_VERSION: u32 = 18;
 
 pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
 pub const ACTION_MANIFEST: &str = "/builtin/action";
@@ -99,10 +106,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
         17,
         include_str!("../migrations/0017_run_resource_index.sql"),
     ),
+    (
+        18,
+        include_str!("../migrations/0018_link_relation_index.sql"),
+    ),
 ];
-
-const POSTGRES_BASELINE: &str = include_str!("../migrations/postgres/0001_native.sql");
-const POSTGRES_NATIVE_JSONB: &str = include_str!("../migrations/postgres/0017_native_jsonb.sql");
 
 const RESOURCE_SELECT: &str = "SELECT path,metadata,spec,status FROM resources";
 const DRIVER_DELIVERY_LEASE_SECONDS: i64 = 15;
@@ -143,12 +151,7 @@ struct PackageInstallation {
 }
 
 pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
-    let database = path.as_ref().to_string_lossy();
-    migrate_database(&database)
-}
-
-pub fn migrate_database(database: &str) -> Result<u32, StoreError> {
-    let connection = Connection::open_database(database)?;
+    let connection = Connection::open(path)?;
     configure(&connection)?;
     migrate_connection(&connection)
 }
@@ -214,12 +217,7 @@ impl Store {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let database = path.as_ref().to_string_lossy();
-        Self::open_database(&database)
-    }
-
-    pub fn open_database(database: &str) -> Result<Self, StoreError> {
-        let connection = Connection::open_database(database)?;
+        let connection = Connection::open(path)?;
         configure(&connection)?;
         require_current_schema(&connection)?;
         let store = Self {
@@ -816,34 +814,19 @@ impl Store {
     }
 
     pub fn list_resources(&self, manifest: Option<&str>) -> Result<Vec<Resource>, StoreError> {
-        let (sqlite_sql, postgres_sql) = if manifest.is_some() {
-            (
-                format!(
-                    "{RESOURCE_SELECT}
-                     WHERE json_extract(metadata,'$.manifest')=?
-                     ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-                ),
-                format!(
-                    "{RESOURCE_SELECT}
-                     WHERE metadata->>'manifest'=?
-                     ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-                ),
+        let sql = if manifest.is_some() {
+            format!(
+                "{RESOURCE_SELECT}
+                 WHERE json_extract(metadata,'$.manifest')=?
+                 ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
             )
         } else {
-            (
-                format!(
-                    "{RESOURCE_SELECT}
-                     ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-                ),
-                format!(
-                    "{RESOURCE_SELECT}
-                     ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-                ),
+            format!(
+                "{RESOURCE_SELECT}
+                 ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
             )
         };
-        let mut statement = self
-            .connection
-            .prepare_dialect(&sqlite_sql, &postgres_sql)?;
+        let mut statement = self.connection.prepare(&sql)?;
         if let Some(manifest) = manifest {
             let rows = statement.query_map(db_params![manifest], resource_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -899,6 +882,7 @@ impl Store {
         save_resource_in(&tx, &current)?;
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
+        let resource = resource_in(&tx, path)?;
         let affected = reconcile_driver_change(&tx, Some(&previous), Some(&resource))?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "spec_updated", now)?;
@@ -1013,24 +997,17 @@ impl Store {
         target: Option<&str>,
         either_endpoint: bool,
     ) -> Result<Vec<Resource>, StoreError> {
-        let mut sqlite_predicates = vec!["json_extract(metadata,'$.manifest')=?".to_string()];
-        let mut postgres_predicates = vec!["metadata->>'manifest'=?".to_string()];
+        let mut predicates = vec!["json_extract(metadata,'$.manifest')=?".to_string()];
         let mut params: Vec<Param> = vec![LINK_MANIFEST.as_param()];
         if let Some(relation) = relation {
-            sqlite_predicates.push("json_extract(spec,'$.relation')=?".into());
-            postgres_predicates.push("spec->>'relation'=?".into());
+            predicates.push("json_extract(spec,'$.relation')=?".into());
             params.push(relation.as_param());
         }
         if let Some(source) = source {
-            sqlite_predicates.push(if either_endpoint {
+            predicates.push(if either_endpoint {
                 "(json_extract(spec,'$.source')=? OR json_extract(spec,'$.target')=?)".into()
             } else {
                 "json_extract(spec,'$.source')=?".into()
-            });
-            postgres_predicates.push(if either_endpoint {
-                "(spec->>'source'=? OR spec->>'target'=?)".into()
-            } else {
-                "spec->>'source'=?".into()
             });
             params.push(source.as_param());
             if either_endpoint {
@@ -1038,32 +1015,21 @@ impl Store {
             }
         }
         if let Some(target) = target {
-            sqlite_predicates.push(if either_endpoint {
+            predicates.push(if either_endpoint {
                 "(json_extract(spec,'$.target')=? OR json_extract(spec,'$.source')=?)".into()
             } else {
                 "json_extract(spec,'$.target')=?".into()
-            });
-            postgres_predicates.push(if either_endpoint {
-                "(spec->>'target'=? OR spec->>'source'=?)".into()
-            } else {
-                "spec->>'target'=?".into()
             });
             params.push(target.as_param());
             if either_endpoint {
                 params.push(target.as_param());
             }
         }
-        let sqlite_sql = format!(
+        let sql = format!(
             "{RESOURCE_SELECT} WHERE {} ORDER BY path",
-            sqlite_predicates.join(" AND ")
+            predicates.join(" AND ")
         );
-        let postgres_sql = format!(
-            "{RESOURCE_SELECT} WHERE {} ORDER BY path",
-            postgres_predicates.join(" AND ")
-        );
-        let mut statement = self
-            .connection
-            .prepare_dialect(&sqlite_sql, &postgres_sql)?;
+        let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map(params, resource_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
@@ -1706,17 +1672,12 @@ impl Store {
         });
         if active_count < limit && !has_active_run {
             let run_path: Option<String> = tx
-                .query_row_dialect(
+                .query_row(
                     "SELECT path FROM resources
                      WHERE json_extract(metadata,'$.manifest')='/builtin/run'
                        AND json_extract(spec,'$.driver')=?
                        AND json_extract(status,'$.metadata.state') IN ('queued','running')
                      ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path LIMIT 1",
-                    "SELECT path FROM resources
-                     WHERE metadata->>'manifest'='/builtin/run'
-                       AND spec->>'driver'=?
-                       AND status#>>'{metadata,state}' IN ('queued','running')
-                     ORDER BY metadata#>>'{\"[kas]\",created_at}',path LIMIT 1",
                     db_params![driver_path],
                     |row| row.get(0),
                 )
@@ -2097,16 +2058,11 @@ impl Store {
         let hash = token_hash(token);
         let credential = self
             .connection
-            .query_row_dialect(
+            .query_row(
                 &format!(
                     "{RESOURCE_SELECT}
                      WHERE json_extract(metadata,'$.manifest')=?
                        AND json_extract(spec,'$.token_hash')=?"
-                ),
-                &format!(
-                    "{RESOURCE_SELECT}
-                     WHERE metadata->>'manifest'=?
-                       AND spec->>'token_hash'=?"
                 ),
                 db_params![CREDENTIAL_MANIFEST, hash],
                 resource_from_row,
@@ -2148,7 +2104,9 @@ impl Store {
             None,
             false,
         )? {
-            if binding.metadata.state == STATE_DELETED {
+            if binding.metadata.state == STATE_DELETED
+                || binding.status.metadata.state != STATE_AVAILABLE
+            {
                 continue;
             }
             let binding_spec: LinkSpec = decode(&binding.spec, "RoleBinding Link spec")?;
@@ -2305,9 +2263,6 @@ fn builtin_documents() -> [BuiltinDocuments; 11] {
 }
 
 fn configure(connection: &Connection) -> Result<(), StoreError> {
-    if connection.is_postgres() {
-        return Ok(());
-    }
     connection.execute_batch(
         "PRAGMA foreign_keys=ON;
          PRAGMA journal_mode=WAL;
@@ -2317,9 +2272,6 @@ fn configure(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn migrate_connection(connection: &Connection) -> Result<u32, StoreError> {
-    if connection.is_postgres() {
-        return migrate_postgres(connection);
-    }
     let current = schema_version(connection)?;
     if current > LATEST_SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema {
@@ -2350,48 +2302,6 @@ fn migrate_connection(connection: &Connection) -> Result<u32, StoreError> {
     Ok(LATEST_SCHEMA_VERSION)
 }
 
-fn migrate_postgres(connection: &Connection) -> Result<u32, StoreError> {
-    let tx = connection.transaction()?;
-    tx.execute_batch(
-        "SELECT pg_advisory_xact_lock(4932287001);
-         CREATE TABLE IF NOT EXISTS kas_schema (
-             version BIGINT NOT NULL
-         );
-         INSERT INTO kas_schema(version)
-         SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM kas_schema);",
-    )?;
-    let current = tx.query_row(
-        "SELECT COALESCE(MAX(version),0) FROM kas_schema",
-        db_params![],
-        |row| row.get::<_, u64>(0),
-    )? as u32;
-    match current {
-        0 => tx.execute_batch(POSTGRES_BASELINE)?,
-        14..=16 => tx.execute_batch(POSTGRES_NATIVE_JSONB)?,
-        LATEST_SCHEMA_VERSION => {}
-        current if current > LATEST_SCHEMA_VERSION => {
-            return Err(StoreError::UnsupportedSchema {
-                current,
-                latest: LATEST_SCHEMA_VERSION,
-            });
-        }
-        current => {
-            return Err(StoreError::MigrationRequired {
-                current,
-                latest: LATEST_SCHEMA_VERSION,
-            });
-        }
-    }
-    tx.execute_batch("ALTER TABLE kas_schema ALTER COLUMN version TYPE BIGINT")?;
-    tx.execute("DELETE FROM kas_schema", db_params![])?;
-    tx.execute(
-        "INSERT INTO kas_schema(version) VALUES ($1)",
-        db_params![LATEST_SCHEMA_VERSION as u64],
-    )?;
-    tx.commit()?;
-    Ok(LATEST_SCHEMA_VERSION)
-}
-
 fn require_current_schema(connection: &Connection) -> Result<(), StoreError> {
     let current = schema_version(connection)?;
     match current.cmp(&LATEST_SCHEMA_VERSION) {
@@ -2408,16 +2318,6 @@ fn require_current_schema(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn schema_version(connection: &Connection) -> Result<u32, StoreError> {
-    if connection.is_postgres() {
-        return connection
-            .query_row(
-                "SELECT COALESCE(MAX(version),0) FROM kas_schema",
-                db_params![],
-                |row| row.get::<_, u64>(0),
-            )
-            .map(|version| version as u32)
-            .map_err(StoreError::from);
-    }
     connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(StoreError::from)
@@ -2446,32 +2346,9 @@ fn resource_from_row(row: &Row<'_>) -> database::Result<Resource> {
     })
 }
 
-fn event_from_row(row: &Row<'_>) -> database::Result<Event> {
-    let event_type: String = row.get(1)?;
-    Ok(Event {
-        sequence: row.get(0)?,
-        event_type: match event_type.as_str() {
-            "created" => EventType::Created,
-            "updated" => EventType::Updated,
-            "deleted" => EventType::Deleted,
-            other => {
-                return Err(from_sql(
-                    1,
-                    std::io::Error::other(format!("invalid event type {other}")),
-                ))
-            }
-        },
-        resource_path: row.get(2)?,
-        revision: row.get(3)?,
-        value: json_from_row(row, 4)?,
-        created_at: time_from_row(row, 5)?,
-    })
-}
-
 fn resource_in(tx: &Transaction, path: &str) -> Result<Resource, StoreError> {
-    tx.query_row_dialect(
+    tx.query_row(
         &format!("{RESOURCE_SELECT} WHERE path=?"),
-        &format!("{RESOURCE_SELECT} WHERE path=? FOR UPDATE"),
         db_params![path],
         resource_from_row,
     )
@@ -2755,7 +2632,9 @@ fn project_resource(
             let spec: DriverSpec = decode(&planned.spec, "Driver spec")?;
             project_driver_manifests(tx, &planned.path, &spec)?;
         }
-        LINK_MANIFEST => {}
+        LINK_MANIFEST => {
+            activate_role_binding_in(tx, &planned.path)?;
+        }
         RUN_MANIFEST => {
             project_run(tx, planned)?;
         }
@@ -3016,6 +2895,7 @@ fn create_system_link(
             existing.metadata.kas.revision += 1;
             existing.metadata.kas.updated_at = now;
             save_resource_in(tx, &existing)?;
+            activate_role_binding_in(tx, path)?;
             existing = resource_in(tx, path)?;
             append_event(tx, EventType::Updated, &existing, now)?;
             enqueue_if_drifted(tx, &existing, "system_link_updated", now)?;
@@ -3024,6 +2904,7 @@ fn create_system_link(
     }
     let planned = normalized_initial_documents(tx, &planned)?;
     insert_resource_row(tx, &planned, true, "system", now)?;
+    activate_role_binding_in(tx, path)?;
     let resource = resource_in(tx, path)?;
     append_event(tx, EventType::Created, &resource, now)?;
     enqueue_if_drifted(tx, &resource, "system_link_created", now)?;
@@ -3050,19 +2931,12 @@ fn active_package_path_for_manifest_in(
     let Some(relation) = relation_path_for_role(tx, RelationRole::PackageManifest)? else {
         return Ok(None);
     };
-    tx.query_row_dialect(
+    tx.query_row(
         "SELECT json_extract(spec,'$.source')
          FROM resources
          WHERE json_extract(metadata,'$.manifest')=?
            AND json_extract(spec,'$.relation')=?
            AND json_extract(spec,'$.target')=?
-         ORDER BY path
-         LIMIT 1",
-        "SELECT spec->>'source'
-         FROM resources
-         WHERE metadata->>'manifest'=?
-           AND spec->>'relation'=?
-           AND spec->>'target'=?
          ORDER BY path
          LIMIT 1",
         db_params![LINK_MANIFEST, relation, manifest_path],
@@ -3127,14 +3001,10 @@ fn gc_superseded_packages_for_manifest_in(
     let mut deleted = Vec::new();
     for package_path in candidates {
         let referenced = tx
-            .query_row_dialect(
+            .query_row(
                 "SELECT 1 FROM resources
                  WHERE json_extract(metadata,'$.\"[kas]\".package')=?
                     OR json_extract(status,'$.metadata.\"[kas]\".package')=?
-                 LIMIT 1",
-                "SELECT 1 FROM resources
-                 WHERE metadata#>>'{\"[kas]\",package}'=?
-                    OR status#>>'{metadata,\"[kas]\",package}'=?
                  LIMIT 1",
                 db_params![package_path, package_path],
                 |_| Ok(()),
@@ -3185,6 +3055,9 @@ fn refresh_projection(
     if resource.manifest == DRIVER_MANIFEST {
         let spec: DriverSpec = decode(&resource.spec, "Driver spec")?;
         project_driver_manifests(tx, &resource.path, &spec)?;
+    }
+    if resource.manifest == LINK_MANIFEST {
+        activate_role_binding_in(tx, &resource.path)?;
     }
     Ok(())
 }
@@ -3450,6 +3323,7 @@ fn apply_mutation(
             save_resource_in(tx, &current)?;
             let updated = resource_in(tx, &resource_path)?;
             refresh_projection(tx, &updated, now)?;
+            let updated = resource_in(tx, &resource_path)?;
             append_event(tx, EventType::Updated, &updated, now)?;
             enqueue_if_drifted(tx, &updated, "driver_spec_updated", now)?;
             Ok(serde_json::to_value(updated)?)
@@ -3532,14 +3406,17 @@ fn hard_delete_resource(
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let resource = resource_in(tx, path)?;
+    let link_dependencies = if resource.manifest == LINK_MANIFEST {
+        decode::<LinkSpec>(&resource.spec, "Link spec")
+            .map(|spec| BTreeSet::from([spec.relation, spec.source, spec.target]))?
+    } else {
+        BTreeSet::new()
+    };
     let run_paths = {
-        let mut statement = tx.prepare_dialect(
+        let mut statement = tx.prepare(
             "SELECT path FROM resources
              WHERE json_extract(metadata,'$.manifest')='/builtin/run'
                AND json_extract(spec,'$.resource')=?",
-            "SELECT path FROM resources
-             WHERE metadata->>'manifest'='/builtin/run'
-               AND spec->>'resource'=?",
         )?;
         statement
             .query_map(db_params![path], |row| row.get::<_, String>(0))?
@@ -3550,6 +3427,11 @@ fn hard_delete_resource(
     }
     append_deleted_event(tx, &resource, now)?;
     tx.execute("DELETE FROM resources WHERE path=?", db_params![path])?;
+    for dependency in link_dependencies {
+        if optional_resource_in(tx, &dependency)?.is_some() {
+            maybe_finish_deleted_resource(tx, &dependency, now)?;
+        }
+    }
     Ok(())
 }
 
@@ -3560,6 +3442,9 @@ fn maybe_finish_deleted_resource(
 ) -> Result<(), StoreError> {
     let resource = resource_in(tx, path)?;
     if resource.metadata.state != STATE_DELETED || resource.status.metadata.state != STATE_DELETED {
+        return Ok(());
+    }
+    if has_dependent_links_in(tx, path)? {
         return Ok(());
     }
     let complete = resource
@@ -3574,6 +3459,22 @@ fn maybe_finish_deleted_resource(
         hard_delete_resource(tx, path, now)?;
     }
     Ok(())
+}
+
+fn has_dependent_links_in(tx: &Transaction, path: &str) -> Result<bool, StoreError> {
+    tx.query_row(
+        "SELECT 1 FROM resources
+         WHERE json_extract(metadata,'$.manifest')=?
+           AND (json_extract(spec,'$.source')=?
+             OR json_extract(spec,'$.target')=?
+             OR json_extract(spec,'$.relation')=?)
+         LIMIT 1",
+        db_params![LINK_MANIFEST, path, path, path],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(StoreError::from)
 }
 
 fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) {
@@ -3713,83 +3614,11 @@ fn run_state_name(state: RunState) -> &'static str {
     }
 }
 
-fn append_event(
-    tx: &Transaction,
-    event_type: EventType,
-    resource: &Resource,
-    now: DateTime<Utc>,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
-         VALUES (?,?,?,?,?)",
-        db_params![
-            event_type_name(event_type),
-            resource.path,
-            resource.revision,
-            serde_json::to_value(resource)?,
-            now
-        ],
-    )?;
-    Ok(())
-}
-
-fn append_deleted_event(
-    tx: &Transaction,
-    resource: &Resource,
-    now: DateTime<Utc>,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
-         VALUES ('deleted',?,?,?,?)",
-        db_params![
-            resource.path,
-            resource.revision,
-            serde_json::to_value(resource)?,
-            now
-        ],
-    )?;
-    Ok(())
-}
-
-fn current_event_sequence_in(tx: &Transaction) -> Result<u64, StoreError> {
-    tx.query_row(
-        "SELECT COALESCE(MAX(sequence),0) FROM events",
-        db_params![],
-        |row| row.get(0),
-    )
-    .map_err(StoreError::from)
-}
-
-fn event_paths_since(tx: &Transaction, cursor: u64) -> Result<Vec<String>, StoreError> {
-    let mut statement = tx.prepare(
-        "SELECT DISTINCT resource_path FROM events
-         WHERE sequence>? ORDER BY resource_path",
-    )?;
-    statement
-        .query_map(db_params![cursor], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
-}
-
-fn event_type_name(event_type: EventType) -> &'static str {
-    match event_type {
-        EventType::Created => "created",
-        EventType::Updated => "updated",
-        EventType::Deleted => "deleted",
-    }
-}
-
 fn all_resources_in(tx: &Transaction) -> Result<Vec<Resource>, StoreError> {
-    let mut statement = tx.prepare_dialect(
-        &format!(
-            "{RESOURCE_SELECT}
+    let mut statement = tx.prepare(&format!(
+        "{RESOURCE_SELECT}
              ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-        ),
-        &format!(
-            "{RESOURCE_SELECT}
-             ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-        ),
-    )?;
+    ))?;
     let rows = statement.query_map(db_params![], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
@@ -3799,18 +3628,11 @@ fn resources_for_manifest_in(
     tx: &Transaction,
     manifest: &str,
 ) -> Result<Vec<Resource>, StoreError> {
-    let mut statement = tx.prepare_dialect(
-        &format!(
-            "{RESOURCE_SELECT}
+    let mut statement = tx.prepare(&format!(
+        "{RESOURCE_SELECT}
              WHERE json_extract(metadata,'$.manifest')=?
              ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-        ),
-        &format!(
-            "{RESOURCE_SELECT}
-             WHERE metadata->>'manifest'=?
-             ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-        ),
-    )?;
+    ))?;
     let rows = statement.query_map(db_params![manifest], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
@@ -3867,18 +3689,6 @@ fn constraint(error: DatabaseError, message: &str) -> StoreError {
                 code.code,
                 rusqlite::ErrorCode::ConstraintViolation | rusqlite::ErrorCode::DatabaseBusy
             ) =>
-        {
-            StoreError::Conflict(message.into())
-        }
-        DatabaseError::Postgres(ref error)
-            if error.as_db_error().is_some_and(|error| {
-                matches!(
-                    error.code(),
-                    &postgres::error::SqlState::UNIQUE_VIOLATION
-                        | &postgres::error::SqlState::CHECK_VIOLATION
-                        | &postgres::error::SqlState::T_R_SERIALIZATION_FAILURE
-                )
-            }) =>
         {
             StoreError::Conflict(message.into())
         }
@@ -4345,6 +4155,7 @@ mod tests {
         assert_eq!(store.links_for_resource(&source.path).unwrap().len(), 1);
         assert_eq!(link.metadata.state, STATE_AVAILABLE);
         assert_eq!(link.status.metadata.state, kas_core::STATE_PENDING);
+        assert!(source.metadata.kas.observed.is_empty());
 
         let unresolved = store
             .create_resource(planned(
@@ -4360,6 +4171,30 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(unresolved.status.metadata.state, kas_core::STATE_PENDING);
+
+        store
+            .update_resource(
+                &source.path,
+                UpdateResource {
+                    expected_revision: source.revision,
+                    metadata: None,
+                    spec: json!({"label": "changed"}),
+                },
+            )
+            .unwrap();
+        let touched = store.get_resource(&link.path).unwrap();
+        let untouched = store.get_resource(&unresolved.path).unwrap();
+        assert_eq!(touched.revision, link.revision + 1);
+        assert_eq!(untouched.revision, unresolved.revision);
+        assert_eq!(
+            touched
+                .metadata
+                .kas
+                .observed
+                .get("/builtin/link/driver")
+                .map(|observation| observation.resource_revision),
+            Some(touched.revision)
+        );
     }
 
     #[test]
@@ -4424,6 +4259,39 @@ mod tests {
         assert_eq!(issued.expires_at, None);
         assert_eq!(auth.driver_path, None);
         assert_eq!(auth.driver_generation, None);
+    }
+
+    #[test]
+    fn authorization_only_uses_available_role_bindings() {
+        let store = Store::memory().unwrap();
+        let driver = store.get_driver("/builtin/link/driver").unwrap();
+        let driver_spec: DriverSpec = decode(&driver.spec, "Driver spec").unwrap();
+        let binding = store
+            .list_links(
+                Some(&driver_spec.service_account),
+                Some(ROLE_BINDING_RELATION),
+                None,
+                false,
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("built-in Driver has a RoleBinding");
+        assert_eq!(binding.status.metadata.state, STATE_AVAILABLE);
+
+        let issued = store
+            .issue_credential(&driver_spec.service_account, None)
+            .unwrap();
+        assert!(!store.authenticate(&issued.token).unwrap().rules.is_empty());
+
+        for state in [kas_core::STATE_PENDING, "invalid"] {
+            let tx = store.connection.transaction().unwrap();
+            let mut binding = resource_in(&tx, &binding.path).unwrap();
+            binding.status.metadata.state = state.into();
+            save_resource_in(&tx, &binding).unwrap();
+            tx.commit().unwrap();
+            assert!(store.authenticate(&issued.token).unwrap().rules.is_empty());
+        }
     }
 
     #[test]

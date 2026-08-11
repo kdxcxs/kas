@@ -6,10 +6,8 @@ use kas_store::Store;
 async fn main() -> anyhow::Result<()> {
     let data_dir = env::var("KAS_DATA_DIR").unwrap_or_else(|_| ".data".into());
     let database = env::var("KAS_DATABASE").unwrap_or_else(|_| format!("{data_dir}/kas.db"));
-    if !is_postgres(&database) {
-        if let Some(parent) = std::path::Path::new(&database).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = std::path::Path::new(&database).parent() {
+        std::fs::create_dir_all(parent)?;
     }
     let address = env::var("KAS_ADDRESS").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let default_api_address = address
@@ -19,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let api_url =
         env::var("KAS_API_URL").unwrap_or_else(|_| format!("http://{default_api_address}"));
     let app = kas_api::app_with_config(
-        Store::open_database(&database)?,
+        Store::open(&database)?,
         kas_api::AppConfig {
             data_dir: data_dir.into(),
             api_url,
@@ -33,8 +31,4 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
-}
-
-fn is_postgres(database: &str) -> bool {
-    database.starts_with("postgres://") || database.starts_with("postgresql://")
 }

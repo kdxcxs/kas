@@ -14,11 +14,7 @@
       "/builtin/relation"
     ],
     "args": [],
-    "watches": [
-      {
-        "manifest": "*"
-      }
-    ],
+    "watches": [],
     "restart": "always"
   },
   "status": {

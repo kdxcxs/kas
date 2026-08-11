@@ -43,7 +43,7 @@ curl http://127.0.0.1:3000/health
 ```
 
 See the [Core technical reference](docs/technical-reference.md) for
-PostgreSQL, configuration, package installation, and Driver development.
+storage, configuration, package installation, and Driver development.
 For complete products and Web UIs, see
 [KAS Studio](https://github.com/kdxcxs/kas/tree/studio/studio) and
 [KAS Forge](https://github.com/kdxcxs/kas/tree/forge/forge).
@@ -171,7 +171,7 @@ interfaces on top as independent Packages.
 
 | Project | Responsibility |
 | --- | --- |
-| **KAS Core** | Resource API, Manifests, Packages, RBAC, Links, Driver runtime, and SQLite/PostgreSQL storage |
+| **KAS Core** | Resource API, Manifests, Packages, RBAC, Links, Driver runtime, and SQLite storage |
 | **KAS Studio** | A people-and-Agent collaboration workspace maintained on the `studio` branch |
 | **KAS Forge** | An Agent-native engineering control plane maintained on the `forge` branch |
 

@@ -38,7 +38,7 @@ cargo run -p kas-api
 curl http://127.0.0.1:3000/health
 ```
 
-PostgreSQL、配置项、Package 安装和 Driver 开发等内容见
+存储、配置项、Package 安装和 Driver 开发等内容见
 [Core 技术参考](docs/technical-reference.zh-CN.md)。完整产品与 Web 界面请参阅
 [KAS Studio](https://github.com/kdxcxs/kas/blob/studio/studio/README.zh-CN.md)
 和 [KAS Forge](https://github.com/kdxcxs/kas/blob/forge/forge/README.zh-CN.md)。
@@ -152,7 +152,7 @@ KAS Core 关注的是这条通用闭环，不内置具体业务。具体产品�
 
 | 项目 | 作用 |
 | --- | --- |
-| **KAS Core** | Resource API、Manifest、Package、RBAC、Link、Driver Runtime、SQLite/PostgreSQL 存储 |
+| **KAS Core** | Resource API、Manifest、Package、RBAC、Link、Driver Runtime、SQLite 存储 |
 | **KAS Studio** | 在 `studio` 分支维护的人与 Agent 协作工作空间 |
 | **KAS Forge** | 在 `forge` 分支维护的 Agent-native 工程控制面 |
 

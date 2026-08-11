@@ -45,8 +45,8 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 
 数据库中的 `resources` 表也严格保持这一形状，只包含 `path`、`metadata`、
 `spec`、`status` 四列；后三列是 JSON 文档。SQLite 使用 JSON text，
-PostgreSQL 原生使用 `jsonb`。Manifest、Run、Link 等查询通过各后端的 JSON
-expression index 加速，不再为平台字段维护平行列。
+Manifest、Run、Link 等查询通过 JSON expression index 加速，不再为平台字段
+维护平行列。
 
 ## Manifest 是定义 Resource 的 Resource
 
@@ -214,7 +214,7 @@ Stopped → Starting → Ready → Stopping → Stopped
 ```text
 crates/kas-core    核心数据结构
 crates/kas-auth    数据库驱动的认证与 RBAC 模型
-crates/kas-store   SQLite/PostgreSQL 持久化、migration 与连接池
+crates/kas-store   SQLite 持久化、migration 与连接池
 crates/kas-driver  Driver 通用接口与持续运行的 Runtime
 apps/kas-admin     初始管理员工具
 apps/kas-migrate   独立数据库 Migration
@@ -257,21 +257,8 @@ cargo run -p kas-api
 ```
 
 `kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
-默认数据库是 `KAS_DATA_DIR/kas.db` 中的 SQLite；把三个命令的
-`KAS_DATABASE` 统一设置为 `postgres://` 或 `postgresql://` URL 即可使用
-PostgreSQL。例如：
-
-```bash
-export KAS_DATABASE=postgresql://kas:password@127.0.0.1:5432/kas
-export KAS_DATABASE_POOL_SIZE=16
-
-cargo run -p kas-migrate
-cargo run -p kas-admin -- bootstrap admin
-cargo run -p kas-api
-```
-
-PostgreSQL 使用原生 `jsonb`、`timestamptz`、expression/partial index 和
-连接池；SQLite 使用 WAL 和连接池。`KAS_DATABASE_POOL_SIZE` 默认是 16。
+默认数据库是 `KAS_DATA_DIR/kas.db` 中的 SQLite；`KAS_DATABASE` 可覆盖
+数据库文件路径，`KAS_DATABASE_POOL_SIZE` 用于配置连接池大小。
 Store 的 clone 共享短生命周期的内存 reconcile 状态，但数据库操作不再经过
 进程级全局 Store mutex。
 
@@ -578,10 +565,12 @@ Relation path 写死在业务逻辑中。Driver 凭据、RBAC、Run 和 Package 
 
 Relation 只声明允许的端点、metadata schema 和删除策略，不声明数量约束，
 也不承担 Driver 触发语义。`/builtin/link` 包提供一个 singleton
-Relationship Driver，同时管理 Relation 和 Link 两个 Manifest，并 watch
-所有 Resource；它负责 Relation status、端点校验、`unlink`/`cascade` 和
-Link status。业务上的数量与关系平衡仍由相应业务 Driver 使用普通 mutation
-维护。
+Relationship Driver，同时管理 Relation 和 Link 两个 Manifest；它负责
+Relation status、端点校验、`unlink`/`cascade` 和 Link status。它不再 watch
+或读取全量 Resource。Store 利用 source、target、Relation 索引，只推进受到
+变化影响的 Link revision，再通过普通 observation queue 投递这些尚未完成
+reconcile 的 Link；每次投递最多读取该 Link 引用的三个 Resource。业务上的
+数量与关系平衡仍由相应业务 Driver 使用普通 mutation 维护。
 
 Link 不再拥有单独的 CRUD。客户端使用通用 `/resources` 创建、读取、更新和
 删除 Link Resource，并使用
@@ -651,14 +640,6 @@ cargo test --workspace
 
 ```bash
 tests/e2e.sh
-```
-
-安装 Docker 后还可以用同一套黑盒流程验证 PostgreSQL；该脚本会启动临时
-PostgreSQL 17、验证新库原生 schema，并验证旧版 text schema 到
-`jsonb`/`timestamptz` 的升级：
-
-```bash
-tests/e2e-postgres.sh
 ```
 
 脚本使用临时数据库和数据目录完成：
