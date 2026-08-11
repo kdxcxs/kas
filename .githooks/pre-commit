@@ -3,16 +3,13 @@ set -euo pipefail
 
 BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
 
-reject_paths() {
-  local mode="$1"
+reject_product_paths() {
   local invalid=""
   local path
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
-    case "$mode:$path" in
-      core:platform/*) invalid+="${path}"$'\n' ;;
-      master:platform/*) ;;
-      master:*) invalid+="${path}"$'\n' ;;
+    case "$path" in
+      studio/* | forge/* | platform/*) invalid+="${path}"$'\n' ;;
     esac
   done < <(git diff --cached --name-only --diff-filter=ACMRDTUXB)
   if [[ -n "$invalid" ]]; then
@@ -22,16 +19,46 @@ reject_paths() {
   fi
 }
 
+reject_outside() {
+  local owned_root="$1"
+  local invalid=""
+  local path
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      "$owned_root"/*) ;;
+      *) invalid+="${path}"$'\n' ;;
+    esac
+  done < <(git diff --cached --name-only --diff-filter=ACMRDTUXB)
+  if [[ -n "$invalid" ]]; then
+    echo "branch ownership violation on $BRANCH:" >&2
+    printf '%s' "$invalid" >&2
+    echo "make Core changes on master, then merge master into $BRANCH" >&2
+    return 1
+  fi
+}
+
+is_master_merge() {
+  local merge_head_path
+  merge_head_path="$(git rev-parse --git-path MERGE_HEAD)"
+  [[ -f "$merge_head_path" ]] &&
+    git merge-base --is-ancestor master "$(cat "$merge_head_path")"
+}
+
 case "$BRANCH" in
-  core)
-    reject_paths core
-    ;;
   master)
-    MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD)"
-    if [[ -f "$MERGE_HEAD_PATH" ]] &&
-      git merge-base --is-ancestor core "$(cat "$MERGE_HEAD_PATH")"; then
+    reject_product_paths
+    ;;
+  studio)
+    if is_master_merge; then
       exit 0
     fi
-    reject_paths master
+    reject_outside studio
+    ;;
+  forge)
+    if is_master_merge; then
+      exit 0
+    fi
+    reject_outside forge
     ;;
 esac

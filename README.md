@@ -11,11 +11,11 @@ KAS is a Resource-oriented application control plane. You describe what should
 exist; KAS stores those objects, enforces permissions, records relationships,
 and sends each relevant change to the Driver responsible for handling it.
 
-It is a foundation for Agent platforms, automation control planes, integration
+It is a foundation for Agent products, automation control planes, integration
 hubs, and other systems where multiple background capabilities collaborate
-around shared objects. The `core` branch contains the generic kernel. The
-`master` branch also includes the ready-to-use
-[KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform).
+around shared objects. The `master` branch contains only this generic kernel.
+Product distributions are maintained independently on the `studio` and
+`forge` branches.
 
 ![KAS control plane coordinating Resources and Drivers](docs/assets/core-control-plane.png)
 
@@ -44,8 +44,9 @@ curl http://127.0.0.1:3000/health
 
 See the [Core technical reference](docs/technical-reference.md) for
 PostgreSQL, configuration, package installation, and Driver development.
-For the complete product and Web UI, use
-[KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform).
+For complete products and Web UIs, see
+[KAS Studio](https://github.com/kdxcxs/kas/tree/studio/studio) and
+[KAS Forge](https://github.com/kdxcxs/kas/tree/forge/forge).
 
 ## Why KAS
 
@@ -163,23 +164,25 @@ definition, relationships, permissions, and runtime behavior.
 > advances status until it matches the desired document.
 
 KAS Core implements this generic control loop without embedding product
-domains. KAS Platform supplies Agents, Threads, Messages, Files, Skills,
-Approvals, and a pluggable frontend as ordinary Packages.
+domains. Products build their domain Resources, Drivers, permissions, and user
+interfaces on top as independent Packages.
 
-## Core and Platform
+## Core and products
 
 | Project | Responsibility |
 | --- | --- |
 | **KAS Core** | Resource API, Manifests, Packages, RBAC, Links, Driver runtime, and SQLite/PostgreSQL storage |
-| **KAS Platform** | A batteries-included multi-Agent collaboration product and Web UI built on Core |
+| **KAS Studio** | A people-and-Agent collaboration workspace maintained on the `studio` branch |
+| **KAS Forge** | An Agent-native engineering control plane maintained on the `forge` branch |
 
-Core lives in the root `crates/`, `apps/`, and `builtins/` directories.
-Product-specific Packages, Drivers, UI, deployment, and tests stay under
-`platform/`, allowing Core to merge into the complete Platform without
-entangling generic and product code.
+Core lives in the root `crates/`, `apps/`, and `builtins/` directories on
+`master`. Studio-specific code stays under `studio/`; Forge-specific code stays
+under `forge/`. Both product branches merge from `master`, while product code
+never flows back into Core or sideways into the other product.
 
 ## Learn more
 
 - [Documentation index](docs/README.md)
 - [Core technical reference](docs/technical-reference.md)
-- [KAS Platform](https://github.com/kdxcxs/kas/tree/master/platform)
+- [KAS Studio](https://github.com/kdxcxs/kas/tree/studio/studio)
+- [KAS Forge](https://github.com/kdxcxs/kas/tree/forge/forge)

@@ -293,12 +293,15 @@ the database is not ready.
 
 ## Repository boundaries
 
-The `core` branch owns generic files in the repository root, including
-`crates/`, `apps/`, `builtins/`, tests, benchmarks, and these documents.
+The `master` branch owns KAS Core: the generic files in the repository root,
+including `crates/`, `apps/`, `builtins/`, tests, benchmarks, and these
+documents. It never contains product directories.
 
-The `master` branch adds the batteries-included product exclusively under
-`platform/`. Product code depends on Core; Core never depends on Platform.
-Core changes are committed on `core` and then merged into `master`.
+The `studio` branch adds KAS Studio exclusively under `studio/`. The `forge`
+branch adds KAS Forge exclusively under `forge/`. Both products depend on Core;
+Core never depends on either product. Core changes are committed on `master`
+and then merged independently into both product branches. Product branches do
+not merge into each other.
 
 Install the repository hooks with:
 
@@ -306,9 +309,9 @@ Install the repository hooks with:
 scripts/install-git-hooks.sh
 ```
 
-The hooks reject Core commits that contain `platform/**`, reject direct
-master-only edits outside `platform/**`, and verify that `master` contains the
-latest Core history with an identical non-Platform tree.
+The hooks reject product files on `master`, reject direct product-branch edits
+outside that product's directory, and verify that each product branch contains
+the latest `master` history with an identical non-product tree.
 
 ## Validation
 
