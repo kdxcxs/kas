@@ -61,10 +61,20 @@ check_product() {
     fi
   fi
 
+  local policy_start
+  policy_start="$(git rev-list --reverse "$product_ref" -- "$owned_root/" | head -n 1)"
+  if [[ -z "$policy_start" ]]; then
+    echo "$product_name does not contain its owned $owned_root/** directory" >&2
+    return 1
+  fi
+
   local invalid_commits=0
   local commit
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
+    if ! git merge-base --is-ancestor "$policy_start" "$commit"; then
+      continue
+    fi
     read -r -a commit_and_parents <<<"$(git rev-list --parents -n 1 "$commit")"
     local parent_count=$((${#commit_and_parents[@]} - 1))
     local changed_paths
