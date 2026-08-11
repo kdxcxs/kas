@@ -10,26 +10,17 @@ use std::{
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use postgres::{
-    types::{ToSql as PgToSql, Type},
-    NoTls,
-};
 use r2d2::{Pool, PooledConnection};
-use r2d2_postgres::PostgresConnectionManager;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::types::{ToSqlOutput, ValueRef};
 use serde_json::Value as JsonValue;
 
 type SqlitePool = Pool<SqliteConnectionManager>;
 type SqliteConnection = PooledConnection<SqliteConnectionManager>;
-type PostgresManager = PostgresConnectionManager<NoTls>;
-type PostgresPool = Pool<PostgresManager>;
-type PostgresConnection = PooledConnection<PostgresManager>;
 
 #[derive(Debug)]
 pub enum Error {
     Sqlite(rusqlite::Error),
-    Postgres(postgres::Error),
     Pool(String),
     Decode(String),
     NoRows,
@@ -39,22 +30,6 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite(error) => write!(formatter, "{error}"),
-            Self::Postgres(error) => {
-                if let Some(database) = error.as_db_error() {
-                    write!(
-                        formatter,
-                        "{} (SQLSTATE {})",
-                        database.message(),
-                        database.code().code()
-                    )?;
-                    if let Some(detail) = database.detail() {
-                        write!(formatter, ": {detail}")?;
-                    }
-                    Ok(())
-                } else {
-                    write!(formatter, "{error}")
-                }
-            }
             Self::Pool(error) | Self::Decode(error) => formatter.write_str(error),
             Self::NoRows => formatter.write_str("query returned no rows"),
         }
@@ -70,12 +45,6 @@ impl From<rusqlite::Error> for Error {
         } else {
             Self::Sqlite(error)
         }
-    }
-}
-
-impl From<postgres::Error> for Error {
-    fn from(error: postgres::Error) -> Self {
-        Self::Postgres(error)
     }
 }
 
@@ -287,7 +256,7 @@ impl<T> OptionalExtension<T> for Result<T> {
 }
 
 #[derive(Clone)]
-pub(crate) struct SqliteDatabase {
+struct SqliteDatabase {
     pool: SqlitePool,
     writer: Arc<SqliteWriterGate>,
 }
@@ -312,7 +281,7 @@ impl SqliteWriterGate {
     }
 }
 
-pub(crate) struct SqliteWriterLease {
+struct SqliteWriterLease {
     gate: Arc<SqliteWriterGate>,
 }
 
@@ -328,9 +297,8 @@ impl Drop for SqliteWriterLease {
 }
 
 #[derive(Clone)]
-pub enum Connection {
-    Sqlite(SqliteDatabase),
-    Postgres(PostgresPool),
+pub struct Connection {
+    database: SqliteDatabase,
 }
 
 impl Connection {
@@ -346,10 +314,12 @@ impl Connection {
             .max_size(database_pool_size())
             .build(manager)
             .map_err(pool_error)?;
-        Ok(Self::Sqlite(SqliteDatabase {
-            pool,
-            writer: Arc::new(SqliteWriterGate::default()),
-        }))
+        Ok(Self {
+            database: SqliteDatabase {
+                pool,
+                writer: Arc::new(SqliteWriterGate::default()),
+            },
+        })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -363,66 +333,37 @@ impl Connection {
             .max_size(1)
             .build(manager)
             .map_err(pool_error)?;
-        Ok(Self::Sqlite(SqliteDatabase {
-            pool,
-            writer: Arc::new(SqliteWriterGate::default()),
-        }))
-    }
-
-    pub fn open_database(database: &str) -> Result<Self> {
-        if database.starts_with("postgres://") || database.starts_with("postgresql://") {
-            let config = database.parse().map_err(Error::Postgres)?;
-            let manager = PostgresConnectionManager::new(config, NoTls);
-            let pool = Pool::builder()
-                .max_size(database_pool_size())
-                .build(manager)
-                .map_err(pool_error)?;
-            Ok(Self::Postgres(pool))
-        } else {
-            Self::open(database)
-        }
-    }
-
-    pub fn is_postgres(&self) -> bool {
-        matches!(self, Self::Postgres(_))
+        Ok(Self {
+            database: SqliteDatabase {
+                pool,
+                writer: Arc::new(SqliteWriterGate::default()),
+            },
+        })
     }
 
     pub fn transaction(&self) -> Result<Transaction> {
-        let connection = self.clone();
-        run_database_blocking(move || match connection {
-            Self::Sqlite(database) => {
-                let writer = database.writer.acquire();
-                let connection = database.pool.get().map_err(pool_error)?;
-                connection.execute_batch("BEGIN IMMEDIATE")?;
-                Ok(Transaction::Sqlite {
-                    connection: Arc::new(Mutex::new(Some(connection))),
-                    completed: Arc::new(AtomicBool::new(false)),
-                    _writer: writer,
-                })
-            }
-            Self::Postgres(pool) => {
-                let mut connection = pool.get().map_err(pool_error)?;
-                connection.batch_execute("BEGIN")?;
-                Ok(Transaction::Postgres {
-                    connection: Arc::new(Mutex::new(Some(connection))),
-                    completed: Arc::new(AtomicBool::new(false)),
-                })
-            }
+        let database = self.database.clone();
+        run_database_blocking(move || {
+            let writer = database.writer.acquire();
+            let connection = database.pool.get().map_err(pool_error)?;
+            connection.execute_batch("BEGIN IMMEDIATE")?;
+            Ok(Transaction {
+                connection: Arc::new(Mutex::new(Some(connection))),
+                completed: Arc::new(AtomicBool::new(false)),
+                _writer: writer,
+            })
         })
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
-        let connection = self.clone();
+        let database = self.database.clone();
         let sql = sql.to_owned();
         run_database_blocking(move || -> Result<()> {
-            match connection {
-                Self::Sqlite(database) => database
-                    .pool
-                    .get()
-                    .map_err(pool_error)?
-                    .execute_batch(&sql)?,
-                Self::Postgres(pool) => pool.get().map_err(pool_error)?.batch_execute(&sql)?,
-            }
+            database
+                .pool
+                .get()
+                .map_err(pool_error)?
+                .execute_batch(&sql)?;
             Ok(())
         })
     }
@@ -430,20 +371,7 @@ impl Connection {
     pub fn prepare<'a>(&'a self, sql: &str) -> Result<Statement<'a>> {
         Ok(Statement {
             executor: Executor::Connection(self),
-            sqlite_sql: sql.to_owned(),
-            postgres_sql: sql.to_owned(),
-        })
-    }
-
-    pub fn prepare_dialect<'a>(
-        &'a self,
-        sqlite_sql: &str,
-        postgres_sql: &str,
-    ) -> Result<Statement<'a>> {
-        Ok(Statement {
-            executor: Executor::Connection(self),
-            sqlite_sql: sqlite_sql.to_owned(),
-            postgres_sql: postgres_sql.to_owned(),
+            sql: sql.to_owned(),
         })
     }
 
@@ -451,22 +379,7 @@ impl Connection {
     where
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
-        let rows = query_connection(self, sql, sql, params)?;
-        let row = rows.first().ok_or(Error::NoRows)?;
-        mapper(row)
-    }
-
-    pub fn query_row_dialect<T, F>(
-        &self,
-        sqlite_sql: &str,
-        postgres_sql: &str,
-        params: Vec<Param>,
-        mapper: F,
-    ) -> Result<T>
-    where
-        F: FnOnce(&Row<'_>) -> Result<T>,
-    {
-        let rows = query_connection(self, sqlite_sql, postgres_sql, params)?;
+        let rows = query_connection(self, sql, params)?;
         let row = rows.first().ok_or(Error::NoRows)?;
         mapper(row)
     }
@@ -477,13 +390,11 @@ impl Connection {
         pragma: &str,
         value: T,
     ) -> Result<()> {
-        if let Self::Sqlite(database) = self {
-            database
-                .pool
-                .get()
-                .map_err(pool_error)?
-                .pragma_update(schema, pragma, value)?;
-        }
+        self.database
+            .pool
+            .get()
+            .map_err(pool_error)?
+            .pragma_update(schema, pragma, value)?;
         Ok(())
     }
 
@@ -496,102 +407,45 @@ impl Connection {
     where
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
-        match self {
-            Self::Sqlite(database) => {
-                let connection = database.pool.get().map_err(pool_error)?;
-                let value = connection.pragma_query_value(schema, pragma, |row| {
-                    let row = sqlite_row(row)?;
-                    mapper(&row).map_err(to_sqlite_error)
-                })?;
-                Ok(value)
-            }
-            Self::Postgres(_) => Err(Error::Decode(
-                "PostgreSQL does not support SQLite pragmas".into(),
-            )),
-        }
+        let connection = self.database.pool.get().map_err(pool_error)?;
+        let value = connection.pragma_query_value(schema, pragma, |row| {
+            let row = sqlite_row(row)?;
+            mapper(&row).map_err(to_sqlite_error)
+        })?;
+        Ok(value)
     }
 }
 
-pub enum Transaction {
-    Sqlite {
-        connection: Arc<Mutex<Option<SqliteConnection>>>,
-        completed: Arc<AtomicBool>,
-        _writer: SqliteWriterLease,
-    },
-    Postgres {
-        connection: Arc<Mutex<Option<PostgresConnection>>>,
-        completed: Arc<AtomicBool>,
-    },
-}
-
-enum TransactionConnection {
-    Sqlite(Arc<Mutex<Option<SqliteConnection>>>),
-    Postgres(Arc<Mutex<Option<PostgresConnection>>>),
+pub struct Transaction {
+    connection: Arc<Mutex<Option<SqliteConnection>>>,
+    completed: Arc<AtomicBool>,
+    _writer: SqliteWriterLease,
 }
 
 impl Transaction {
     pub fn execute(&self, sql: &str, params: Vec<Param>) -> Result<usize> {
-        self.execute_dialect(sql, sql, params)
-    }
-
-    pub fn execute_dialect(
-        &self,
-        sqlite_sql: &str,
-        postgres_sql: &str,
-        params: Vec<Param>,
-    ) -> Result<usize> {
-        let connection = match self {
-            Self::Sqlite { connection, .. } => TransactionConnection::Sqlite(connection.clone()),
-            Self::Postgres { connection, .. } => {
-                TransactionConnection::Postgres(connection.clone())
-            }
-        };
-        let sqlite_sql = sqlite_sql.to_owned();
-        let postgres_sql = postgres_sql.to_owned();
-        run_database_blocking(move || match connection {
-            TransactionConnection::Sqlite(connection) => Ok(connection
+        let connection = self.connection.clone();
+        let sql = sql.to_owned();
+        run_database_blocking(move || {
+            Ok(connection
                 .lock()
                 .expect("SQLite transaction lock poisoned")
                 .as_ref()
                 .expect("active SQLite transaction")
-                .execute(&sqlite_sql, rusqlite::params_from_iter(params.iter()))?),
-            TransactionConnection::Postgres(connection) => {
-                let values = postgres_values(&params);
-                let references = postgres_references(&values);
-                let postgres_sql = postgres_parameters(&postgres_sql);
-                Ok(connection
-                    .lock()
-                    .expect("PostgreSQL transaction lock poisoned")
-                    .as_mut()
-                    .expect("active PostgreSQL transaction")
-                    .execute(&postgres_sql, &references)? as usize)
-            }
+                .execute(&sql, rusqlite::params_from_iter(params.iter()))?)
         })
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
-        let connection = match self {
-            Self::Sqlite { connection, .. } => TransactionConnection::Sqlite(connection.clone()),
-            Self::Postgres { connection, .. } => {
-                TransactionConnection::Postgres(connection.clone())
-            }
-        };
+        let connection = self.connection.clone();
         let sql = sql.to_owned();
         run_database_blocking(move || -> Result<()> {
-            match connection {
-                TransactionConnection::Sqlite(connection) => connection
-                    .lock()
-                    .expect("SQLite transaction lock poisoned")
-                    .as_ref()
-                    .expect("active SQLite transaction")
-                    .execute_batch(&sql)?,
-                TransactionConnection::Postgres(connection) => connection
-                    .lock()
-                    .expect("PostgreSQL transaction lock poisoned")
-                    .as_mut()
-                    .expect("active PostgreSQL transaction")
-                    .batch_execute(&sql)?,
-            }
+            connection
+                .lock()
+                .expect("SQLite transaction lock poisoned")
+                .as_ref()
+                .expect("active SQLite transaction")
+                .execute_batch(&sql)?;
             Ok(())
         })
     }
@@ -599,20 +453,7 @@ impl Transaction {
     pub fn prepare<'b>(&'b self, sql: &str) -> Result<Statement<'b>> {
         Ok(Statement {
             executor: Executor::Transaction(self),
-            sqlite_sql: sql.to_owned(),
-            postgres_sql: sql.to_owned(),
-        })
-    }
-
-    pub fn prepare_dialect<'b>(
-        &'b self,
-        sqlite_sql: &str,
-        postgres_sql: &str,
-    ) -> Result<Statement<'b>> {
-        Ok(Statement {
-            executor: Executor::Transaction(self),
-            sqlite_sql: sqlite_sql.to_owned(),
-            postgres_sql: postgres_sql.to_owned(),
+            sql: sql.to_owned(),
         })
     }
 
@@ -620,20 +461,7 @@ impl Transaction {
     where
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
-        self.query_row_dialect(sql, sql, params, mapper)
-    }
-
-    pub fn query_row_dialect<T, F>(
-        &self,
-        sqlite_sql: &str,
-        postgres_sql: &str,
-        params: Vec<Param>,
-        mapper: F,
-    ) -> Result<T>
-    where
-        F: FnOnce(&Row<'_>) -> Result<T>,
-    {
-        let rows = query_transaction(self, sqlite_sql, postgres_sql, params)?;
+        let rows = query_transaction(self, sql, params)?;
         let row = rows.first().ok_or(Error::NoRows)?;
         mapper(row)
     }
@@ -644,64 +472,30 @@ impl Transaction {
         pragma: &str,
         value: T,
     ) -> Result<()> {
-        if let Self::Sqlite { connection, .. } = self {
+        self.connection
+            .lock()
+            .expect("SQLite transaction lock poisoned")
+            .as_ref()
+            .expect("active SQLite transaction")
+            .pragma_update(schema, pragma, value)?;
+        Ok(())
+    }
+
+    pub fn commit(self) -> Result<()> {
+        let connection = self.connection.clone();
+        let completed = self.completed.clone();
+        run_database_blocking(move || -> Result<()> {
             connection
                 .lock()
                 .expect("SQLite transaction lock poisoned")
                 .as_ref()
                 .expect("active SQLite transaction")
-                .pragma_update(schema, pragma, value)?;
-        }
-        Ok(())
-    }
-
-    pub fn commit(self) -> Result<()> {
-        let (connection, completed) = match &self {
-            Self::Sqlite {
-                connection,
-                completed,
-                ..
-            } => (
-                TransactionConnection::Sqlite(connection.clone()),
-                completed.clone(),
-            ),
-            Self::Postgres {
-                connection,
-                completed,
-            } => (
-                TransactionConnection::Postgres(connection.clone()),
-                completed.clone(),
-            ),
-        };
-        run_database_blocking(move || -> Result<()> {
-            match connection {
-                TransactionConnection::Sqlite(connection) => {
-                    connection
-                        .lock()
-                        .expect("SQLite transaction lock poisoned")
-                        .as_ref()
-                        .expect("active SQLite transaction")
-                        .execute_batch("COMMIT")?;
-                    completed.store(true, Ordering::Release);
-                    connection
-                        .lock()
-                        .expect("SQLite transaction lock poisoned")
-                        .take();
-                }
-                TransactionConnection::Postgres(connection) => {
-                    connection
-                        .lock()
-                        .expect("PostgreSQL transaction lock poisoned")
-                        .as_mut()
-                        .expect("active PostgreSQL transaction")
-                        .batch_execute("COMMIT")?;
-                    completed.store(true, Ordering::Release);
-                    connection
-                        .lock()
-                        .expect("PostgreSQL transaction lock poisoned")
-                        .take();
-                }
-            }
+                .execute_batch("COMMIT")?;
+            completed.store(true, Ordering::Release);
+            connection
+                .lock()
+                .expect("SQLite transaction lock poisoned")
+                .take();
             Ok(())
         })
     }
@@ -709,49 +503,20 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        let rollback = match self {
-            Self::Sqlite {
-                connection,
-                completed,
-                ..
-            } if !completed.load(Ordering::Acquire) => {
-                completed.store(true, Ordering::Release);
-                Some(TransactionConnection::Sqlite(connection.clone()))
-            }
-            Self::Postgres {
-                connection,
-                completed,
-            } if !completed.load(Ordering::Acquire) => {
-                completed.store(true, Ordering::Release);
-                Some(TransactionConnection::Postgres(connection.clone()))
-            }
-            _ => None,
-        };
-        if let Some(connection) = rollback {
-            let _ = run_database_blocking(move || -> Result<()> {
-                match connection {
-                    TransactionConnection::Sqlite(connection) => {
-                        if let Some(connection) = connection
-                            .lock()
-                            .expect("SQLite transaction lock poisoned")
-                            .take()
-                        {
-                            connection.execute_batch("ROLLBACK")?;
-                        }
-                    }
-                    TransactionConnection::Postgres(connection) => {
-                        if let Some(mut connection) = connection
-                            .lock()
-                            .expect("PostgreSQL transaction lock poisoned")
-                            .take()
-                        {
-                            connection.batch_execute("ROLLBACK")?;
-                        }
-                    }
-                }
-                Ok(())
-            });
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
         }
+        let connection = self.connection.clone();
+        let _ = run_database_blocking(move || -> Result<()> {
+            if let Some(connection) = connection
+                .lock()
+                .expect("SQLite transaction lock poisoned")
+                .take()
+            {
+                connection.execute_batch("ROLLBACK")?;
+            }
+            Ok(())
+        });
     }
 }
 
@@ -762,8 +527,7 @@ enum Executor<'a> {
 
 pub struct Statement<'a> {
     executor: Executor<'a>,
-    sqlite_sql: String,
-    postgres_sql: String,
+    sql: String,
 }
 
 impl Statement<'_> {
@@ -776,11 +540,9 @@ impl Statement<'_> {
         F: FnMut(&Row<'_>) -> Result<T>,
     {
         let rows = match self.executor {
-            Executor::Connection(connection) => {
-                query_connection(connection, &self.sqlite_sql, &self.postgres_sql, params)?
-            }
+            Executor::Connection(connection) => query_connection(connection, &self.sql, params)?,
             Executor::Transaction(transaction) => {
-                query_transaction(transaction, &self.sqlite_sql, &self.postgres_sql, params)?
+                query_transaction(transaction, &self.sql, params)?
             }
         };
         Ok(rows.iter().map(mapper).collect::<Vec<_>>().into_iter())
@@ -789,63 +551,34 @@ impl Statement<'_> {
 
 fn query_connection(
     connection: &Connection,
-    sqlite_sql: &str,
-    postgres_sql: &str,
+    sql: &str,
     params: Vec<Param>,
 ) -> Result<Vec<Row<'static>>> {
-    let connection = connection.clone();
-    let sqlite_sql = sqlite_sql.to_owned();
-    let postgres_sql = postgres_sql.to_owned();
-    run_database_blocking(move || match connection {
-        Connection::Sqlite(database) => {
-            let connection = database.pool.get().map_err(pool_error)?;
-            query_sqlite(&connection, &sqlite_sql, &params)
-        }
-        Connection::Postgres(pool) => {
-            let mut connection = pool.get().map_err(pool_error)?;
-            query_postgres(
-                &mut connection,
-                &postgres_parameters(&postgres_sql),
-                &params,
-            )
-        }
+    let database = connection.database.clone();
+    let sql = sql.to_owned();
+    run_database_blocking(move || {
+        let connection = database.pool.get().map_err(pool_error)?;
+        query_sqlite(&connection, &sql, &params)
     })
 }
 
 fn query_transaction(
     transaction: &Transaction,
-    sqlite_sql: &str,
-    postgres_sql: &str,
+    sql: &str,
     params: Vec<Param>,
 ) -> Result<Vec<Row<'static>>> {
-    let connection = match transaction {
-        Transaction::Sqlite { connection, .. } => TransactionConnection::Sqlite(connection.clone()),
-        Transaction::Postgres { connection, .. } => {
-            TransactionConnection::Postgres(connection.clone())
-        }
-    };
-    let sqlite_sql = sqlite_sql.to_owned();
-    let postgres_sql = postgres_sql.to_owned();
-    run_database_blocking(move || match connection {
-        TransactionConnection::Sqlite(connection) => query_sqlite(
+    let connection = transaction.connection.clone();
+    let sql = sql.to_owned();
+    run_database_blocking(move || {
+        query_sqlite(
             connection
                 .lock()
                 .expect("SQLite transaction lock poisoned")
                 .as_ref()
                 .expect("active SQLite transaction"),
-            &sqlite_sql,
+            &sql,
             &params,
-        ),
-        TransactionConnection::Postgres(connection) => {
-            let mut connection = connection
-                .lock()
-                .expect("PostgreSQL transaction lock poisoned");
-            query_postgres(
-                connection.as_mut().expect("active PostgreSQL transaction"),
-                &postgres_parameters(&postgres_sql),
-                &params,
-            )
-        }
+        )
     })
 }
 
@@ -878,78 +611,6 @@ fn sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row<'static>> {
         values,
         _lifetime: PhantomData,
     })
-}
-
-fn query_postgres(
-    client: &mut postgres::Client,
-    sql: &str,
-    params: &[Param],
-) -> Result<Vec<Row<'static>>> {
-    let values = postgres_values(params);
-    let references = postgres_references(&values);
-    client
-        .query(sql, &references)?
-        .into_iter()
-        .map(postgres_row)
-        .collect()
-}
-
-fn postgres_row(row: postgres::Row) -> Result<Row<'static>> {
-    let mut values = Vec::with_capacity(row.len());
-    for (index, column) in row.columns().iter().enumerate() {
-        let kind = column.type_();
-        let value = if *kind == Type::INT8 {
-            row.try_get::<_, Option<i64>>(index)?
-                .map(CellValue::Integer)
-                .unwrap_or(CellValue::Null)
-        } else if *kind == Type::INT4 {
-            row.try_get::<_, Option<i32>>(index)?
-                .map(|value| CellValue::Integer(value as i64))
-                .unwrap_or(CellValue::Null)
-        } else if *kind == Type::BOOL {
-            row.try_get::<_, Option<bool>>(index)?
-                .map(|value| CellValue::Integer(i64::from(value)))
-                .unwrap_or(CellValue::Null)
-        } else if *kind == Type::JSON || *kind == Type::JSONB {
-            row.try_get::<_, Option<JsonValue>>(index)?
-                .map(|value| CellValue::Text(value.to_string()))
-                .unwrap_or(CellValue::Null)
-        } else if *kind == Type::TIMESTAMPTZ {
-            row.try_get::<_, Option<DateTime<Utc>>>(index)?
-                .map(|value| CellValue::Text(value.to_rfc3339_opts(SecondsFormat::Micros, true)))
-                .unwrap_or(CellValue::Null)
-        } else {
-            row.try_get::<_, Option<String>>(index)?
-                .map(CellValue::Text)
-                .unwrap_or(CellValue::Null)
-        };
-        values.push(value);
-    }
-    Ok(Row {
-        values,
-        _lifetime: PhantomData,
-    })
-}
-
-type PgValue = Box<dyn PgToSql + Sync>;
-
-fn postgres_values(params: &[Param]) -> Vec<PgValue> {
-    params
-        .iter()
-        .map(|value| match value {
-            Param::Text(value) => Box::new(value.clone()) as PgValue,
-            Param::Integer(value) => Box::new(*value) as PgValue,
-            Param::Json(value) => Box::new(value.clone()) as PgValue,
-            Param::Timestamp(value) => Box::new(*value) as PgValue,
-        })
-        .collect()
-}
-
-fn postgres_references(values: &[PgValue]) -> Vec<&(dyn PgToSql + Sync)> {
-    values
-        .iter()
-        .map(|value| value.as_ref() as &(dyn PgToSql + Sync))
-        .collect()
 }
 
 fn database_pool_size() -> u32 {
@@ -986,37 +647,6 @@ fn run_database_blocking<T: Send + 'static>(operation: impl FnOnce() -> T + Send
     }
 }
 
-fn postgres_parameters(sql: &str) -> String {
-    let mut converted = String::with_capacity(sql.len() + 16);
-    let bytes = sql.as_bytes();
-    let mut index = 0;
-    let mut anonymous = 1usize;
-    while index < bytes.len() {
-        if bytes[index] != b'?' {
-            converted.push(bytes[index] as char);
-            index += 1;
-            continue;
-        }
-        index += 1;
-        let start = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        let number = if start == index {
-            let number = anonymous;
-            anonymous += 1;
-            number
-        } else {
-            let number = sql[start..index].parse::<usize>().unwrap_or(anonymous);
-            anonymous = anonymous.max(number + 1);
-            number
-        };
-        converted.push('$');
-        converted.push_str(&number.to_string());
-    }
-    converted
-}
-
 fn pool_error(error: r2d2::Error) -> Error {
     Error::Pool(error.to_string())
 }
@@ -1028,14 +658,6 @@ fn to_sqlite_error(error: Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn postgres_placeholders_preserve_explicit_and_anonymous_positions() {
-        assert_eq!(
-            postgres_parameters("SELECT ?1, ?, ?3, ?"),
-            "SELECT $1, $2, $3, $4"
-        );
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn database_work_leaves_the_tokio_runtime() {

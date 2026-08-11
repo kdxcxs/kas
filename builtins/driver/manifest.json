@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/driver",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/driver/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "driver",
   "version": 1,
   "description": "Defines singleton Driver Resources",
+  "paths": [
+    "/packages/*/*/driver"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [

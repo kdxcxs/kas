@@ -1,9 +1,12 @@
 {
-  "path": "/manifests/integration-demo",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/test/integration/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "integration-demo",
   "version": 1,
   "description": "Data-only Manifest registered after a wildcard Driver",
+  "paths": [
+    "./resources/*"
+  ],
   "states": [],
   "default_state": "available",
   "initial_state": "available",

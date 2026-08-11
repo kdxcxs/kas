@@ -1,7 +1,7 @@
 {
   "path": "./driver",
   "metadata": {
-    "manifest": "/builtin/driver",
+    "manifest": "/packages/kas/driver/manifest",
     "name": "relationship-driver",
     "state": "running"
   },
@@ -11,14 +11,10 @@
     "service_account": "./service-accounts/driver",
     "manages": [
       ".",
-      "/builtin/relation"
+      "/packages/kas/relation/manifest"
     ],
     "args": [],
-    "watches": [
-      {
-        "manifest": "*"
-      }
-    ],
+    "watches": [],
     "restart": "always"
   },
   "status": {

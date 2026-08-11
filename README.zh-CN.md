@@ -38,7 +38,7 @@ cargo run -p kas-api
 curl http://127.0.0.1:3000/health
 ```
 
-PostgreSQL、配置项、Package 安装和 Driver 开发等内容见
+存储、配置项、Package 安装和 Driver 开发等内容见
 [Core 技术参考](docs/technical-reference.zh-CN.md)。完整产品与 Web 界面请参阅
 [KAS Studio](https://github.com/kdxcxs/kas/blob/studio/studio/README.zh-CN.md)
 和 [KAS Forge](https://github.com/kdxcxs/kas/blob/forge/forge/README.zh-CN.md)。
@@ -84,9 +84,9 @@ KAS 中唯一的持久化原语。Agent、Message、Role、Driver，甚至 Manif
 
 ```json
 {
-  "path": "/agents/planner",
+  "path": "/packages/acme/agent/resources/planner",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "state": "available"
   },
   "spec": {
@@ -108,6 +108,10 @@ KAS 中唯一的持久化原语。Agent、Message、Role、Driver，甚至 Manif
 定义一类 Resource 的结构、状态和可用能力，类似一份可以被平台理解的“类定义”。
 Manifest 本身也是 Resource，因此新的领域类型可以动态安装，不需要修改 KAS
 内核。
+
+每个 Package 都拥有稳定的 `/packages/{publisher}/{package}` 沙箱；Manifest、
+Driver、权限、关系和业务 Resource 都位于该 Root 下，跨 Package 访问必须获得
+明确的 RBAC 授权。
 
 ### Driver
 
@@ -152,7 +156,7 @@ KAS Core 关注的是这条通用闭环，不内置具体业务。具体产品�
 
 | 项目 | 作用 |
 | --- | --- |
-| **KAS Core** | Resource API、Manifest、Package、RBAC、Link、Driver Runtime、SQLite/PostgreSQL 存储 |
+| **KAS Core** | Resource API、Manifest、Package、RBAC、Link、Driver Runtime、SQLite 存储 |
 | **KAS Studio** | 在 `studio` 分支维护的人与 Agent 协作工作空间 |
 | **KAS Forge** | 在 `forge` 分支维护的 Agent-native 工程控制面 |
 

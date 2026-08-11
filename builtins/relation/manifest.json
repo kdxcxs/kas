@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/relation",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/relation/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "relation",
   "version": 1,
   "description": "Defines Relation Resources",
+  "paths": [
+    "/packages/*/*/relations/*"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [

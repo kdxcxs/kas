@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/service-account",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/service-account/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "service-account",
   "version": 1,
   "description": "Defines ServiceAccount Resources",
+  "paths": [
+    "/packages/*/*/service-accounts/*"
+  ],
   "resource_schema": {
     "type": "object"
   },

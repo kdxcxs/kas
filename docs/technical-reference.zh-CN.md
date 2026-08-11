@@ -11,15 +11,17 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 
 ```json
 {
-  "path": "/agents/planner",
+  "path": "/packages/acme/agent/resources/planner",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "name": "Planner",
     "state": "available",
     "[kas]": {
       "revision": 1,
+      "package": "/packages/acme/agent",
+      "package_revision": 3,
       "observed": {
-        "/manifests/agent/driver": {
+        "/packages/acme/agent/driver": {
           "driver_revision": 2,
           "resource_revision": 1
         }
@@ -45,8 +47,8 @@ KAS 只有一个公开的持久化原语：`Resource`。系统中所有可以被
 
 数据库中的 `resources` 表也严格保持这一形状，只包含 `path`、`metadata`、
 `spec`、`status` 四列；后三列是 JSON 文档。SQLite 使用 JSON text，
-PostgreSQL 原生使用 `jsonb`。Manifest、Run、Link 等查询通过各后端的 JSON
-expression index 加速，不再为平台字段维护平行列。
+Manifest、Run、Link 等查询通过 JSON expression index 加速，不再为平台字段
+维护平行列。
 
 ## Manifest 是定义 Resource 的 Resource
 
@@ -54,21 +56,21 @@ Manifest 不是与 Resource 并列的原语，而是类似“类定义”的一�
 根 Manifest 自描述：
 
 ```text
-/builtin/manifest
-  manifest → /builtin/manifest
+/packages/kas/manifest/manifest
+  manifest → /packages/kas/manifest/manifest
 ```
 
 其他 Manifest 都是它的实例：
 
 ```text
-/builtin/relation
-  manifest → /builtin/manifest
+/packages/kas/relation/manifest
+  manifest → /packages/kas/manifest/manifest
 
-/manifests/agent
-  manifest → /builtin/manifest
+/packages/acme/agent/manifest
+  manifest → /packages/kas/manifest/manifest
 
-/agents/planner
-  manifest → /manifests/agent
+/packages/acme/agent/resources/planner
+  manifest → /packages/acme/agent/manifest
 ```
 
 根 Manifest 是启动时唯一需要由 KAS 内核直接信任并加载的自引用种子。它就绪
@@ -80,33 +82,34 @@ Manifest 不是与 Resource 并列的原语，而是类似“类定义”的一�
 KAS 启动时自动安装一组 built-in Manifest：
 
 ```text
-/builtin/manifest
-/builtin/action
-/builtin/relation
-/builtin/link
-/builtin/driver
-/builtin/run
-/builtin/user
-/builtin/service-account
-/builtin/role
-/builtin/credential
-/builtin/package
+/packages/kas/manifest/manifest
+/packages/kas/action/manifest
+/packages/kas/relation/manifest
+/packages/kas/link/manifest
+/packages/kas/driver/manifest
+/packages/kas/run/manifest
+/packages/kas/user/manifest
+/packages/kas/service-account/manifest
+/packages/kas/role/manifest
+/packages/kas/credential/manifest
+/packages/kas/package/manifest
 ```
 
-`/builtin` 是 KAS 保留且受保护的标准库命名空间，不代表新的对象类型。
-系统提供的具体 Relation 和 Role 也位于这个命名空间，例如
-`/builtin/relations/run-action` 和 `/builtin/roles/admin`。业务 Manifest
-仍使用 `/manifests/{name}`，业务 Resource 可以按自己的领域选择 path。
+`/packages/kas` 是 KAS 保留且受保护的标准库 Package publisher，不代表
+新的对象类型。系统提供的具体 Relation 和 Role 也位于对应 Package，例如
+`/packages/kas/run/relations/run-action` 和 `/packages/kas/role/roles/admin`。业务 Manifest
+固定在 `/packages/{publisher}/{package}/manifest`，业务 Resource 位于同一
+Package Root 内。
 
 Action、Relation、Link、Driver、Run、User、ServiceAccount、Role 和 Credential
 因而都只是由 built-in Manifest 定义的 Resource。例如：
 
 ```text
-/manifests/message/relations/mentioned
-  manifest → /builtin/relation
+/packages/acme/message/relations/mentioned
+  manifest → /packages/kas/relation/manifest
 
-/messages/123/links/mentioned/planner
-  manifest → /builtin/link
+/packages/acme/message/resources/123/links/mentioned/planner
+  manifest → /packages/kas/link/manifest
 ```
 
 具体 Relation、Link、Role 或 Run 并不是 built-in；built-in 的是定义它们结构
@@ -129,8 +132,8 @@ Relation selector 直接按 Manifest path 工作，不再按对象 kind 工作�
 
 ```json
 {
-  "sources": [{"manifest": "/manifests/message"}],
-  "targets": [{"manifest": ["/manifests/user", "/manifests/agent"]}]
+  "sources": [{"manifest": "/packages/acme/message/manifest"}],
+  "targets": [{"manifest": ["/packages/acme/user/manifest", "/packages/acme/agent/manifest"]}]
 }
 ```
 
@@ -150,7 +153,7 @@ Agent 是 target，`mentioned` Relation 负责约束两端的 Manifest。
 两个 Resource 之间的有方向关系。任何 Resource 都可以作为 source 或
 target，因此 Manifest、Action、Driver、User、Role 等不需要专门的 Link
 端点类型。Link 自己也是 Resource，其 `manifest` 固定指向
-`/builtin/link`。API 只按 Manifest schema 接受 Link；内置 Relationship Driver
+`/packages/kas/link/manifest`。API 只按 Manifest schema 接受 Link；内置 Relationship Driver
 异步读取 Relation、source 和 target，校验端点 selector 与 metadata，并把
 结果写入 Link status。无效 Link 会进入 `invalid` 状态。
 
@@ -183,15 +186,43 @@ Manifest Resource
 Driver、Link、Event 或 RBAC 暴露对象 UUID。例如：
 
 ```text
-/manifests/computer
-/computers/team-a/computer-01
-/computers/team-a/computer-01/runs/{request-id}
-/manifests/agent/service-accounts/driver
-/roles/team-a/computer-reader
+/packages/acme/computer
+/packages/acme/computer/manifest
+/packages/acme/computer/resources/computer-01
+/packages/acme/computer/resources/computer-01/runs/{request-id}
+/packages/acme/computer/service-accounts/driver
+/packages/acme/computer/roles/reader
 ```
 
-Path 创建后不能重命名，禁止空段、`.`、`..`、重复 `/` 和尾部 `/`。
-`request_id`、`delivery_id` 等协议关联 ID 仍使用 UUID。
+Path 创建后不能重命名。持久化 Path 必须具有唯一的规范写法：每段长度为
+1 至 128 字节，以小写 ASCII 字母或数字开头和结尾，中间只允许小写 ASCII
+字母、数字和 `-`；完整 Path 最长 1024 字节。禁止大写、Unicode、空格、
+percent-encoded 别名、空段、`.`、`..`、重复 `/` 和尾部 `/`。
+
+`*` 和 `**` 只能作为完整 pattern 段，分别匹配一段和递归多段；
+`/packages/acme/integration-*/manifest` 这样的段内通配符不合法。Manifest
+使用相对于 Package Root 的 `paths` 声明其实例允许出现的位置：
+
+```json
+{
+  "path": "/packages/acme/agent/manifest",
+  "paths": ["./resources/*", "./resources/groups/*"]
+}
+```
+
+安装后它们分别解析为 `/packages/acme/agent/resources/*` 和
+`/packages/acme/agent/resources/groups/*`。普通 Package 的 Manifest 不允许
+声明绝对 pattern 或越出自己的 Package Root；只有受信任的
+`/packages/kas/**` 平台 Package 可以定义 Action、Link、Role、Run 等跨包
+通用类型。
+
+创建 Resource 时必须同时满足 Package 边界、Manifest `paths` 和调用者的
+RBAC path rule；执行通用 CRUD 前，对应 Package Root 必须已经安装。包含
+`credentials` 段的子树只能通过 Credential API 写入。
+
+Path 层级表示身份、归属和权限边界，不会隐式创建 Link，也不会让普通删除
+自动级联。Package 中的 `./...` 仅是安装前的相对记法，解析并校验后才会
+持久化。`request_id`、`delivery_id` 等协议关联 ID 仍使用 UUID。
 
 ## MVP 约束
 
@@ -214,7 +245,7 @@ Stopped → Starting → Ready → Stopping → Stopped
 ```text
 crates/kas-core    核心数据结构
 crates/kas-auth    数据库驱动的认证与 RBAC 模型
-crates/kas-store   SQLite/PostgreSQL 持久化、migration 与连接池
+crates/kas-store   SQLite 持久化、migration 与连接池
 crates/kas-driver  Driver 通用接口与持续运行的 Runtime
 apps/kas-admin     初始管理员工具
 apps/kas-migrate   独立数据库 Migration
@@ -257,21 +288,8 @@ cargo run -p kas-api
 ```
 
 `kas-api` 不会自动修改数据库结构。如果数据库尚未迁移，它会直接拒绝启动。
-默认数据库是 `KAS_DATA_DIR/kas.db` 中的 SQLite；把三个命令的
-`KAS_DATABASE` 统一设置为 `postgres://` 或 `postgresql://` URL 即可使用
-PostgreSQL。例如：
-
-```bash
-export KAS_DATABASE=postgresql://kas:password@127.0.0.1:5432/kas
-export KAS_DATABASE_POOL_SIZE=16
-
-cargo run -p kas-migrate
-cargo run -p kas-admin -- bootstrap admin
-cargo run -p kas-api
-```
-
-PostgreSQL 使用原生 `jsonb`、`timestamptz`、expression/partial index 和
-连接池；SQLite 使用 WAL 和连接池。`KAS_DATABASE_POOL_SIZE` 默认是 16。
+默认数据库是 `KAS_DATA_DIR/kas.db` 中的 SQLite；`KAS_DATABASE` 可覆盖
+数据库文件路径，`KAS_DATABASE_POOL_SIZE` 用于配置连接池大小。
 Store 的 clone 共享短生命周期的内存 reconcile 状态，但数据库操作不再经过
 进程级全局 Store mutex。
 
@@ -309,20 +327,26 @@ agent.kas
 初始化 Resource。文件目录只用于组织，Resource 身份始终来自 JSON 顶层
 `path`；文件同样使用通用的 `path/metadata/spec/status` envelope。
 
-初始化 Resource 使用相对于 Manifest path 的 `./` 路径：
+Manifest path 必须严格采用
+`/packages/{publisher}/{package}/manifest`；KAS 移除尾部 `/manifest`
+得到稳定的 Package Root。初始化 Resource 顶层 `path` 必须使用相对于
+Package Root 的 `./` 路径：
 
 ```text
 ./actions/message
 ./relations/has-thread
 ./driver
-./driver/bin/kas-agent-driver
 ```
 
-对象路径分别解析为 `/manifests/agent/actions/message`、
-`/manifests/agent/relations/has-thread` 和 `/manifests/agent/driver`。
+对于 `/packages/acme/agent`，对象路径分别解析为
+`/packages/acme/agent/actions/message`、
+`/packages/acme/agent/relations/has-thread` 和
+`/packages/acme/agent/driver`。Manifest selector 中的 `.` 表示
+`/packages/acme/agent/manifest`；绝对路径只用于跨 Package 引用。
 每个初始化 Resource 同时声明自己的 built-in Manifest；entrypoint 仍作为
-包内相对文件保存。例如 Driver Resource 使用 `/builtin/driver`，Role 使用
-`/builtin/role`。
+包内相对文件保存而不是 Resource Path，例如
+`./driver/bin/kas-agent-driver`。Driver Resource 使用
+`/packages/kas/driver/manifest`，Role 使用 `/packages/kas/role/manifest`。
 
 API 对整个 tar 计算 SHA-256，先解压到 staging，校验完成后原子移动到：
 
@@ -330,37 +354,37 @@ API 对整个 tar 计算 SHA-256，先解压到 staging，校验完成后原子�
 ${KAS_DATA_DIR}/packages/sha256/<digest>/
 ```
 
-安装命令根据 digest 创建受保护的 Package Resource：
+安装命令在稳定的 Package Root 创建受保护的 Package Resource：
 
 ```text
-/packages/sha256/<hex>
-  manifest → /builtin/package
+/packages/acme/agent
+  manifest → /packages/kas/package/manifest
 ```
 
 其 `spec` 和 `status.spec` 保存 `digest`、`size_bytes`、`media_type`、
 `manifest` 和 `manifest_version`，
 生命周期 state 位于各自 metadata；Resource 不保存数据目录的绝对路径。
 KAS 同时创建
-`/builtin/relations/package-manifest` Link：
+`/packages/kas/package/relations/package-manifest` Link：
 
 ```text
 Package Resource ──package-manifest──> Manifest Resource
 ```
 
-Manifest spec 因此不再重复保存 `package_digest`。运行时使用 Package 安装
-事务建立的内部 ownership 投影找到 artifact；上述 Link 仍作为普通 Resource
-表达同一事实，不参与控制面 bootstrap。Package Resource 只能由
+Manifest spec 因此不再重复保存 `package_digest`。运行时通过上述
+Package-to-Manifest Link 找到稳定 Package Resource，再由其 `spec.digest`
+定位 artifact。Package Resource 只能由
 `POST /packages` 创建并受保护，不能通过普通 Resource CRUD 伪造。
 
-同一 Manifest path 和 digest 的重复安装是幂等操作；同一路径安装不同 digest
-会执行原子更新。更新会替换该 Package 管理的 Manifest 和初始化 Resource，
-创建新增成员、删除已移除成员，并把 package-manifest Link 切换到新的
-Package Resource。该 Manifest 的普通业务 Resource 不会被删除或直接改写
-业务 `spec`；KAS 只把它们的 `metadata["[kas]"].package` 推进到新 Package，
-由既有 Reconcile 机制完成业务转换并推进
-`status.metadata["[kas]"].package`。调用方需要
-分别拥有已有成员的 `update`、新增成员的 `create`、移除成员和旧 Package 的
-`delete` 权限。`POST /packages` 返回新的 Package Resource；安装后的 Manifest
+同一 Package path 和 digest 的重复安装是幂等操作；同一路径安装不同 digest
+会执行原子更新。Package Resource 的 path 不变，revision 递增；更新替换
+Package 管理的 Manifest 和初始化 Resource，创建新增成员并删除已移除成员。
+普通业务 Resource 不会被删除或直接改写业务 `spec`；它们的
+`metadata["[kas]"].package` 始终保存稳定 Package Path，
+`package_revision` 推进到新版本，由既有 Reconcile 完成业务转换并推进
+`status.metadata["[kas]"].package_revision`。调用方需要分别拥有 Package 和
+已有成员的 `update`、新增成员的 `create`、移除成员的 `delete` 权限。
+`POST /packages` 返回创建或更新后的同一 Package Resource；安装后的 Manifest
 和初始化 Resource 通过 `GET /resources` 或
 `GET /resources/by-path?path=...` 查询，没有第二套 Manifest CRUD。
 
@@ -371,23 +395,22 @@ entrypoint。Supervisor 管理 singleton、generation、临时 Credential、hell
 `KAS_MANIFEST_PATH` 和 `KAS_PACKAGE_ROOT`。更新 Package 时，仍处于 running
 目标状态的 Driver 会先停止旧进程，再以递增的 generation 和新的
 `KAS_PACKAGE_ROOT` 启动；同一路径不会同时运行两个 Driver 进程。
-旧 Package Resource 会保留到所有引用它的 status 都收敛到新 Package，之后
-由 KAS 回收；不需要单独的 migration mode 或另一套 Driver 协议。
+不需要单独的 migration mode 或另一套 Driver 协议。
 
 ## 权限
 
 权限规则同样以 Resource 保存到数据库，不从配置文件加载。User、
 ServiceAccount、Role 和 Credential 分别由对应的系统 Manifest 定义；授权
-关系是 `/builtin/relations/role-binding` 下的普通 Link。所有 API 默认拒绝，
+关系是 `/packages/kas/link/relations/role-binding` 下的普通 Link。所有 API 默认拒绝，
 `/health` 除外。
 
 Rule 同时约束 Resource 的 Manifest、verb 和实例 path：
 
 ```json
 {
-  "manifests": ["/manifests/computer"],
+  "manifests": ["/packages/acme/computer/manifest"],
   "verbs": ["get", "update"],
-  "paths": ["/computers/team-a/**"]
+  "paths": ["/packages/acme/computer/resources/team-a/**"]
 }
 ```
 
@@ -414,9 +437,9 @@ role-binding Link，不是签发 Credential 时固化的权限快照。
 
 ```json
 {
-  "manifest": "/manifests/file",
+  "manifest": "/packages/acme/file/manifest",
   "verb": "download",
-  "path": "/files/report"
+  "path": "/packages/acme/file/resources/report"
 }
 ```
 
@@ -445,20 +468,21 @@ Resource 会呈现为：
 
 ```json
 {
-  "path": "/agents/reviewer",
+  "path": "/packages/acme/agent/resources/reviewer",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "name": "reviewer",
     "state": "available",
     "[kas]": {
       "revision": 4,
-      "package": "/packages/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "package": "/packages/acme/agent",
+      "package_revision": 3,
       "observed": {
-        "/manifests/agent/driver": {
+        "/packages/acme/agent/driver": {
           "driver_revision": 2,
           "resource_revision": 4
         },
-        "/manifests/audit/driver": {
+        "/packages/acme/audit/driver": {
           "driver_revision": 1,
           "resource_revision": 4
         }
@@ -470,18 +494,19 @@ Resource 会呈现为：
   "spec": {"model": "gpt-5"},
   "status": {
     "metadata": {
-      "manifest": "/manifests/agent",
+      "manifest": "/packages/acme/agent/manifest",
       "name": "reviewer",
       "state": "available",
       "[kas]": {
         "revision": 4,
-        "package": "/packages/sha256/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "package": "/packages/acme/agent",
+        "package_revision": 3,
         "observed": {
-          "/manifests/agent/driver": {
+          "/packages/acme/agent/driver": {
             "driver_revision": 2,
             "resource_revision": 4
           },
-          "/manifests/audit/driver": {
+          "/packages/acme/audit/driver": {
             "driver_revision": 1,
             "resource_revision": 3
           }
@@ -516,23 +541,23 @@ Manifest；未显式声明时，Package 展开器会填入该 Driver 所属的 M
 ```json
 {
   "manages": [
-    "/builtin/relation",
-    "/builtin/link"
+    "/packages/kas/relation/manifest",
+    "/packages/kas/link/manifest"
   ],
   "watches": [
     {
-      "manifest": "/builtin/link",
-      "paths": ["/manifests/message/relations/recipient/links/**"]
+      "manifest": "/packages/kas/link/manifest",
+      "paths": ["/packages/acme/message/relations/recipient/links/**"]
     },
     {
-      "manifest": "/manifests/integration-*",
+      "manifest": "/packages/acme/integration/manifest",
       "paths": ["/resources/integrations/**"]
     }
   ]
 }
 ```
 
-Manifest 和 path pattern 支持精确匹配、段内 `*`、单段 `*` 和递归 `**`。
+Manifest 和 path pattern 支持精确匹配、单段 `*` 和递归 `**`。
 watch 不理解 Relation；需要只消费某类 Link 时，应使用普通 path 分区，或者
 由 Driver 读取 `spec.relation` 后自行过滤。KAS 为每个匹配的
 Driver/Resource 组合独立投递；完成后把消费版本写入
@@ -577,15 +602,17 @@ Relation path 写死在业务逻辑中。Driver 凭据、RBAC、Run 和 Package 
 启动完成，从而避免 bootstrap 循环。
 
 Relation 只声明允许的端点、metadata schema 和删除策略，不声明数量约束，
-也不承担 Driver 触发语义。`/builtin/link` 包提供一个 singleton
-Relationship Driver，同时管理 Relation 和 Link 两个 Manifest，并 watch
-所有 Resource；它负责 Relation status、端点校验、`unlink`/`cascade` 和
-Link status。业务上的数量与关系平衡仍由相应业务 Driver 使用普通 mutation
-维护。
+也不承担 Driver 触发语义。`/packages/kas/link/manifest` 包提供一个 singleton
+Relationship Driver，同时管理 Relation 和 Link 两个 Manifest；它负责
+Relation status、端点校验、`unlink`/`cascade` 和 Link status。它不再 watch
+或读取全量 Resource。Store 利用 source、target、Relation 索引，只推进受到
+变化影响的 Link revision，再通过普通 observation queue 投递这些尚未完成
+reconcile 的 Link；每次投递最多读取该 Link 引用的三个 Resource。业务上的
+数量与关系平衡仍由相应业务 Driver 使用普通 mutation 维护。
 
 Link 不再拥有单独的 CRUD。客户端使用通用 `/resources` 创建、读取、更新和
 删除 Link Resource，并使用
-`GET /resources?manifest=/builtin/link` 列出 Link。API 创建成功只表示
+`GET /resources?manifest=/packages/kas/link/manifest` 列出 Link。API 创建成功只表示
 Resource 已持久化；调用方应以 `status.metadata.state == "available"` 判断
 Link 已通过内置 Driver 校验。
 
@@ -611,7 +638,7 @@ API 服务本身重启后，则从尚未收敛的 observation 与 queued/running
 `hello.driver`、`reconcile.resource` 以及 Run 投递中的 `run`、`resource`、
 `action` 都使用同一个 Resource envelope。Driver 的异步
 `reconcile(&Resource)` 直接返回 mutation；它不需要判断另一套 ObjectKind，
-Link 也只是 manifest 为 `/builtin/link` 的 Resource。
+Link 也只是 manifest 为 `/packages/kas/link/manifest` 的 Resource。
 
 Mutation 只保留 `create_resource`、`update_resource`、`delete_resource`、
 `update_resource_status` 和 `complete_run`。Driver 因而可以在同一事务中创建
@@ -653,14 +680,6 @@ cargo test --workspace
 tests/e2e.sh
 ```
 
-安装 Docker 后还可以用同一套黑盒流程验证 PostgreSQL；该脚本会启动临时
-PostgreSQL 17、验证新库原生 schema，并验证旧版 text schema 到
-`jsonb`/`timestamptz` 的升级：
-
-```bash
-tests/e2e-postgres.sh
-```
-
 脚本使用临时数据库和数据目录完成：
 
 ```text
@@ -679,7 +698,7 @@ tests/e2e-postgres.sh
   → 使用通用 API 创建 Run Resource
   → 验证 Run 到 Resource/Action/Driver 的系统 Link
   → Driver 执行 echo 并完成 Run
-  → 更新同一 Manifest 的 Package，验证旧 Package 被替换且业务 Resource 保留
+  → 更新同一 Package Resource 的 digest 与 revision，验证业务 Resource 保留并 reconcile
   → 验证 running Driver generation 递增并由新进程再次完成 Run
   → DELETE Resource，经 Driver reconcile 后验证硬删除及 path 可复用
   → 创建 User/Role/role-binding Link/Credential Resource 并验证 RBAC

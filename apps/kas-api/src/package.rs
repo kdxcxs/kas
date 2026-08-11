@@ -68,7 +68,7 @@ pub(crate) fn inspect(archive: &[u8]) -> anyhow::Result<PackageExpansion> {
     }
     .expand(digest)?;
     for resource in &expansion.resources {
-        if resource.manifest != "/builtin/driver" {
+        if resource.manifest != "/packages/kas/driver/manifest" {
             continue;
         }
         let driver: DriverSpec = serde_json::from_value(resource.spec.clone())?;
@@ -186,8 +186,8 @@ mod tests {
     #[test]
     fn installs_and_resolves_relative_paths() {
         let manifest = serde_json::json!({
-            "path": "/manifests/echo",
-            "manifest": "/builtin/manifest",
+            "path": "/packages/test/echo/manifest",
+            "manifest": "/packages/kas/manifest/manifest",
             "name": "echo",
             "version": 1,
             "description": "Echo",
@@ -199,7 +199,7 @@ mod tests {
         let action = serde_json::json!({
             "path": "./actions/echo",
             "metadata": {
-                "manifest": "/builtin/action",
+                "manifest": "/packages/kas/action/manifest",
                 "name": "echo"
             },
             "spec": {
@@ -211,14 +211,14 @@ mod tests {
         let account = serde_json::json!({
             "path": "./service-accounts/driver",
             "metadata": {
-                "manifest": "/builtin/service-account",
+                "manifest": "/packages/kas/service-account/manifest",
                 "name": "driver"
             }
         });
         let driver = serde_json::json!({
             "path": "./driver",
             "metadata": {
-                "manifest": "/builtin/driver",
+                "manifest": "/packages/kas/driver/manifest",
                 "name": "driver"
             },
             "spec": {
@@ -265,22 +265,22 @@ mod tests {
         assert_eq!(installed.size_bytes, bytes.len() as u64);
         assert_eq!(
             installed.expansion.resources[1].path,
-            "/manifests/echo/actions/echo"
+            "/packages/test/echo/actions/echo"
         );
         let driver_resource = installed
             .expansion
             .resources
             .iter()
-            .find(|resource| resource.manifest == "/builtin/driver")
+            .find(|resource| resource.manifest == "/packages/kas/driver/manifest")
             .unwrap();
         let driver: DriverSpec = serde_json::from_value(driver_resource.spec.clone()).unwrap();
-        assert_eq!(driver_resource.path, "/manifests/echo/driver");
+        assert_eq!(driver_resource.path, "/packages/test/echo/driver");
         assert_eq!(driver.entrypoint, "./driver/bin/driver");
         assert_eq!(
             driver.service_account,
-            "/manifests/echo/service-accounts/driver"
+            "/packages/test/echo/service-accounts/driver"
         );
-        assert_eq!(driver.manages, ["/manifests/echo"]);
+        assert_eq!(driver.manages, ["/packages/test/echo/manifest"]);
         let package_root = data.path().join("packages/sha256").join(
             installed
                 .expansion

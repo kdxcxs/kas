@@ -1,19 +1,19 @@
 {
-  "path": "/builtin/relations/run-action",
+  "path": "./relations/run-action",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "run-action"
   },
   "spec": {
     "role": "run_action",
     "sources": [
       {
-        "manifest": "/builtin/run"
+        "manifest": "/packages/kas/run/manifest"
       }
     ],
     "targets": [
       {
-        "manifest": "/builtin/action"
+        "manifest": "/packages/kas/action/manifest"
       }
     ],
     "on_source_delete": "unlink",

@@ -9,19 +9,21 @@ use tar::{Builder, Header};
 
 use crate::config::Scenario;
 
-pub const MANIFEST_PREFIX: &str = "/benchmark/manifests/m";
-pub const RESOURCE_PREFIX: &str = "/benchmark/resources/r";
+pub const PACKAGE_PREFIX: &str = "/packages/benchmark/m";
 
 pub fn manifest_path(index: usize) -> String {
-    format!("{MANIFEST_PREFIX}{index:05}")
+    format!("{PACKAGE_PREFIX}{index:05}/manifest")
 }
 
 pub fn driver_path(index: usize) -> String {
     format!("{}/driver", manifest_path(index))
 }
 
-pub fn resource_path(index: usize) -> String {
-    format!("{RESOURCE_PREFIX}{index:09}")
+pub fn resource_path(index: usize, manifests: usize) -> String {
+    format!(
+        "{PACKAGE_PREFIX}{:05}/resources/r{index:09}",
+        index % manifests
+    )
 }
 
 pub fn resource_manifest(index: usize, manifests: usize) -> String {
@@ -29,7 +31,7 @@ pub fn resource_manifest(index: usize, manifests: usize) -> String {
 }
 
 pub fn create_resource(index: usize, scenario: &Scenario, revision_marker: u64) -> Value {
-    let path = resource_path(index);
+    let path = resource_path(index, scenario.manifests);
     let manifest = resource_manifest(index, scenario.manifests);
     let mut spec = generated_spec(scenario.spec_fields, scenario.spec_depth, revision_marker);
     let mut document = json!({
@@ -96,10 +98,11 @@ impl PackageGenerator {
         let has_driver = manifest_index < self.scenario.drivers;
         let manifest = json!({
             "path": manifest_path(manifest_index),
-            "manifest": "/builtin/manifest",
+            "manifest": "/packages/kas/manifest/manifest",
             "name": format!("benchmark-{manifest_index:05}"),
             "version": 1,
             "description": "Generated KAS end-to-end benchmark Manifest",
+            "paths": ["./resources/*"],
             "states": [],
             "default_state": "available",
             "initial_state": if has_driver { "pending" } else { "available" },
@@ -119,7 +122,7 @@ impl PackageGenerator {
                 &json!({
                     "path": "./driver",
                     "metadata": {
-                        "manifest": "/builtin/driver",
+                        "manifest": "/packages/kas/driver/manifest",
                         "name": format!("benchmark-driver-{manifest_index:05}"),
                         "state": "running"
                     },
@@ -149,7 +152,7 @@ impl PackageGenerator {
                 &json!({
                     "path": "./service-accounts/driver",
                     "metadata": {
-                        "manifest": "/builtin/service-account",
+                        "manifest": "/packages/kas/service-account/manifest",
                         "name": format!("benchmark-driver-{manifest_index:05}")
                     }
                 }),
@@ -160,7 +163,7 @@ impl PackageGenerator {
                 &json!({
                     "path": "./roles/driver",
                     "metadata": {
-                        "manifest": "/builtin/role",
+                        "manifest": "/packages/kas/role/manifest",
                         "name": format!("benchmark-driver-{manifest_index:05}")
                     },
                     "spec": {
@@ -175,11 +178,11 @@ impl PackageGenerator {
                 &json!({
                     "path": "./links/driver-role",
                     "metadata": {
-                        "manifest": "/builtin/link",
+                        "manifest": "/packages/kas/link/manifest",
                         "name": "benchmark-driver-role"
                     },
                     "spec": {
-                        "relation": "/builtin/relations/role-binding",
+                        "relation": "/packages/kas/link/relations/role-binding",
                         "source": "./service-accounts/driver",
                         "target": "./roles/driver",
                         "metadata": {}
@@ -252,7 +255,7 @@ mod tests {
             ..Scenario::default()
         };
         let resource = create_resource(1, &scenario, 0);
-        assert_eq!(resource["path"], resource_path(1));
+        assert_eq!(resource["path"], resource_path(1, scenario.manifests));
         assert_eq!(resource["metadata"]["manifest"], manifest_path(1));
         assert!(serde_json::to_vec(&resource).unwrap().len() >= 2048);
         assert!(resource["spec"]["level_001"]["level_002"]["level_003"].is_object());

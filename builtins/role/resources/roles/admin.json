@@ -1,7 +1,7 @@
 {
-  "path": "/builtin/roles/admin",
+  "path": "./roles/admin",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "system:admin"
   },
   "spec": {

@@ -1,7 +1,7 @@
 {
   "path": "./actions/echo",
   "metadata": {
-    "manifest": "/builtin/action",
+    "manifest": "/packages/kas/action/manifest",
     "name": "echo"
   },
   "spec": {

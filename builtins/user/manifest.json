@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/user",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/user/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "user",
   "version": 1,
   "description": "Defines User Resources",
+  "paths": [
+    "/packages/*/*/users/*"
+  ],
   "resource_schema": {
     "type": "object",
     "properties": {

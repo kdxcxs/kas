@@ -1,19 +1,19 @@
 {
-  "path": "/builtin/relations/run-driver",
+  "path": "./relations/run-driver",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "run-driver"
   },
   "spec": {
     "role": "run_driver",
     "sources": [
       {
-        "manifest": "/builtin/run"
+        "manifest": "/packages/kas/run/manifest"
       }
     ],
     "targets": [
       {
-        "manifest": "/builtin/driver"
+        "manifest": "/packages/kas/driver/manifest"
       }
     ],
     "on_source_delete": "unlink",

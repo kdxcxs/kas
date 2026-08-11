@@ -1,19 +1,26 @@
 //! Persistence for KAS's single-Resource model.
 
+mod authorization;
 mod database;
+mod events;
 mod reconcile;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use authorization::activate_role_binding_in;
 use chrono::{DateTime, Duration, Utc};
 use database::{
     Connection, Error as DatabaseError, IntoParam, OptionalExtension, Param, Row, Transaction,
 };
+use events::{
+    append_deleted_event, append_event, current_event_sequence_in, event_from_row,
+    event_paths_since,
+};
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
-    package_path_for_digest, ActionSpec, CreateResource, CreateRun, CredentialSpec, DeliveryStatus,
+    package_root_for_path, ActionSpec, CreateResource, CreateRun, CredentialSpec, DeliveryStatus,
     DriverDelivery, DriverObservation, DriverReady, DriverSpec, DriverState, DriverWork, Event,
     EventFilter, EventType, FinishRun, KasMetadata, LinkSpec, ManifestDefinition, ManifestSpec,
     Mutation, PackageDefinition, PackageExpansion, PackageSpec, PlannedResource, RelationRole,
@@ -30,20 +37,20 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 17;
+pub const LATEST_SCHEMA_VERSION: u32 = 19;
 
-pub const MANIFEST_MANIFEST: &str = "/builtin/manifest";
-pub const ACTION_MANIFEST: &str = "/builtin/action";
-pub const RELATION_MANIFEST: &str = "/builtin/relation";
-pub const LINK_MANIFEST: &str = "/builtin/link";
-pub const DRIVER_MANIFEST: &str = "/builtin/driver";
-pub const RUN_MANIFEST: &str = "/builtin/run";
-pub const USER_MANIFEST: &str = "/builtin/user";
-pub const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
-pub const ROLE_MANIFEST: &str = "/builtin/role";
-pub const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
-pub const CREDENTIAL_MANIFEST: &str = "/builtin/credential";
-pub const PACKAGE_MANIFEST: &str = "/builtin/package";
+pub const MANIFEST_MANIFEST: &str = "/packages/kas/manifest/manifest";
+pub const ACTION_MANIFEST: &str = "/packages/kas/action/manifest";
+pub const RELATION_MANIFEST: &str = "/packages/kas/relation/manifest";
+pub const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+pub const DRIVER_MANIFEST: &str = "/packages/kas/driver/manifest";
+pub const RUN_MANIFEST: &str = "/packages/kas/run/manifest";
+pub const USER_MANIFEST: &str = "/packages/kas/user/manifest";
+pub const SERVICE_ACCOUNT_MANIFEST: &str = "/packages/kas/service-account/manifest";
+pub const ROLE_MANIFEST: &str = "/packages/kas/role/manifest";
+pub const ROLE_BINDING_RELATION: &str = "/packages/kas/link/relations/role-binding";
+pub const CREDENTIAL_MANIFEST: &str = "/packages/kas/credential/manifest";
+pub const PACKAGE_MANIFEST: &str = "/packages/kas/package/manifest";
 
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
@@ -99,10 +106,15 @@ const MIGRATIONS: &[(u32, &str)] = &[
         17,
         include_str!("../migrations/0017_run_resource_index.sql"),
     ),
+    (
+        18,
+        include_str!("../migrations/0018_link_relation_index.sql"),
+    ),
+    (
+        19,
+        include_str!("../migrations/0019_package_sandbox_paths.sql"),
+    ),
 ];
-
-const POSTGRES_BASELINE: &str = include_str!("../migrations/postgres/0001_native.sql");
-const POSTGRES_NATIVE_JSONB: &str = include_str!("../migrations/postgres/0017_native_jsonb.sql");
 
 const RESOURCE_SELECT: &str = "SELECT path,metadata,spec,status FROM resources";
 const DRIVER_DELIVERY_LEASE_SECONDS: i64 = 15;
@@ -143,12 +155,7 @@ struct PackageInstallation {
 }
 
 pub fn migrate(path: impl AsRef<Path>) -> Result<u32, StoreError> {
-    let database = path.as_ref().to_string_lossy();
-    migrate_database(&database)
-}
-
-pub fn migrate_database(database: &str) -> Result<u32, StoreError> {
-    let connection = Connection::open_database(database)?;
+    let connection = Connection::open(path)?;
     configure(&connection)?;
     migrate_connection(&connection)
 }
@@ -214,12 +221,7 @@ impl Store {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let database = path.as_ref().to_string_lossy();
-        Self::open_database(&database)
-    }
-
-    pub fn open_database(database: &str) -> Result<Self, StoreError> {
-        let connection = Connection::open_database(database)?;
+        let connection = Connection::open(path)?;
         configure(&connection)?;
         require_current_schema(&connection)?;
         let store = Self {
@@ -227,6 +229,7 @@ impl Store {
             runtime: Arc::new(Mutex::new(StoreRuntime::default())),
         };
         store.ensure_builtins()?;
+        store.validate_persisted_paths()?;
         reconcile_package_metadata(&store)?;
         reconcile_platform_state(&store)?;
         store.rebuild_reconcile_queue()?;
@@ -242,10 +245,54 @@ impl Store {
         };
         migrate_connection(&store.connection)?;
         store.ensure_builtins()?;
+        store.validate_persisted_paths()?;
         reconcile_package_metadata(&store)?;
         reconcile_platform_state(&store)?;
         store.rebuild_reconcile_queue()?;
         Ok(store)
+    }
+
+    fn validate_persisted_paths(&self) -> Result<(), StoreError> {
+        let tx = self.connection.transaction()?;
+        for resource in all_resources_in(&tx)? {
+            kas_core::validate_path(&resource.path).map_err(|error| {
+                StoreError::Invalid(format!(
+                    "database contains invalid Resource path {}: {error}",
+                    resource.path
+                ))
+            })?;
+            kas_core::validate_path(&resource.manifest).map_err(|error| {
+                StoreError::Invalid(format!(
+                    "Resource {} contains invalid Manifest path: {error}",
+                    resource.path
+                ))
+            })?;
+            let package_root = package_root_for_path(&resource.path).ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "database Resource {} is outside every Package sandbox",
+                    resource.path
+                ))
+            })?;
+            if resource.path == package_root {
+                if resource.manifest != PACKAGE_MANIFEST {
+                    return Err(StoreError::Invalid(format!(
+                        "Package Root {} must use Manifest {}",
+                        resource.path, PACKAGE_MANIFEST
+                    )));
+                }
+            } else {
+                let package = optional_resource_in(&tx, &package_root)?.ok_or_else(|| {
+                    StoreError::Invalid(format!(
+                        "database Resource {} belongs to missing Package Root {}",
+                        resource.path, package_root
+                    ))
+                })?;
+                require_manifest(&package, PACKAGE_MANIFEST)?;
+            }
+            validate_resource_path_for_manifest(&tx, &resource.path, &resource.manifest)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn ensure_builtins(&self) -> Result<(), StoreError> {
@@ -277,10 +324,10 @@ impl Store {
         }
         if self.get_resource(MANIFEST_MANIFEST).is_ok() {
             for package in packages {
-                self.install_packages(vec![package])?;
+                self.install_packages(vec![package], true)?;
             }
         } else {
-            self.install_packages(packages)?;
+            self.install_packages(packages, true)?;
         }
         Ok(())
     }
@@ -291,11 +338,14 @@ impl Store {
         package_size: u64,
         media_type: &str,
     ) -> Result<Resource, StoreError> {
-        self.install_packages(vec![PackageInstallation {
-            expansion,
-            size_bytes: package_size,
-            media_type: media_type.into(),
-        }])?
+        self.install_packages(
+            vec![PackageInstallation {
+                expansion,
+                size_bytes: package_size,
+                media_type: media_type.into(),
+            }],
+            false,
+        )?
         .into_iter()
         .next()
         .ok_or_else(|| StoreError::Invalid("Manifest package is empty".into()))
@@ -304,6 +354,7 @@ impl Store {
     fn install_packages(
         &self,
         installations: Vec<PackageInstallation>,
+        trusted_builtin: bool,
     ) -> Result<Vec<Resource>, StoreError> {
         if installations.is_empty() {
             return Ok(Vec::new());
@@ -314,6 +365,9 @@ impl Store {
         let mut existing_packages = Vec::with_capacity(installations.len());
         let mut existing_count = 0;
         for installation in &installations {
+            for resource in &installation.expansion.resources {
+                validate_resource_identity(resource)?;
+            }
             let root = installation
                 .expansion
                 .resources
@@ -329,8 +383,22 @@ impl Store {
             if installation.expansion.resource_owners.get(&root.path) != Some(&root.path) {
                 return Err(StoreError::Invalid("package root must own itself".into()));
             }
-            let package_path = package_path_for_digest(&installation.expansion.artifact_digest)
-                .ok_or_else(|| StoreError::Invalid("Package digest must be sha256 hex".into()))?;
+            let package_path = installation.expansion.package_path.clone();
+            if !trusted_builtin && package_path.starts_with("/packages/kas/") {
+                return Err(StoreError::Invalid(
+                    "the /packages/kas namespace is reserved for built-in Packages".into(),
+                ));
+            }
+            if installation
+                .expansion
+                .resources
+                .iter()
+                .any(|resource| !resource.path.starts_with(&format!("{package_path}/")))
+            {
+                return Err(StoreError::Invalid(format!(
+                    "Package {package_path} contains a Resource outside its sandbox"
+                )));
+            }
             if self.get_resource(&root.path).is_ok() {
                 existing_count += 1;
                 let package = self.package_for_manifest(&root.path)?;
@@ -343,7 +411,14 @@ impl Store {
             let existing = existing_packages
                 .pop()
                 .expect("an existing Manifest has an existing Package");
-            if existing.path == package_paths[0] {
+            if existing.path != package_paths[0] {
+                return Err(StoreError::Conflict(format!(
+                    "Manifest {} is linked to Package {}, expected {}",
+                    roots[0].path, existing.path, package_paths[0]
+                )));
+            }
+            let existing_spec: PackageSpec = decode(&existing.spec, "Package spec")?;
+            if existing_spec.digest == installations[0].expansion.artifact_digest {
                 return Ok(vec![existing]);
             }
             let installation = installations
@@ -359,7 +434,7 @@ impl Store {
                 .next()
                 .expect("one Package path was validated");
             return self
-                .update_package(installation, root, package_path, existing)
+                .update_package(installation, root, package_path)
                 .map(|package| vec![package]);
         }
         if existing_count == installations.len() {
@@ -385,7 +460,7 @@ impl Store {
         // self-describing bootstrap cycle while keeping each definition and
         // Package independent.
         for roots_pass in [true, false] {
-            for (installation, root) in installations.iter().zip(&roots) {
+            for installation in &installations {
                 for planned in &installation.expansion.resources {
                     let owner_manifest = installation
                         .expansion
@@ -406,7 +481,10 @@ impl Store {
                         &tx,
                         &planned,
                         true,
-                        &format!("package:{}", root.path),
+                        &format!(
+                            "package:{package_path}",
+                            package_path = installation.expansion.package_path
+                        ),
                         now,
                     )?;
                     stored_paths.push(planned.path.clone());
@@ -444,7 +522,11 @@ impl Store {
                 path: package_path.clone(),
                 metadata: kas_core::PlannedResourceMetadata {
                     manifest: PACKAGE_MANIFEST.into(),
-                    name: package_spec.digest.clone(),
+                    name: package_path
+                        .rsplit('/')
+                        .next()
+                        .expect("Package path has a name")
+                        .into(),
                     state: String::new(),
                 },
                 spec: serde_json::to_value(&package_spec)?,
@@ -455,7 +537,7 @@ impl Store {
             };
             validate_resource_identity(&package)?;
             let package = normalized_initial_documents(&tx, &package)?;
-            insert_resource_row(&tx, &package, true, &format!("package:{}", root.path), now)?;
+            insert_resource_row(&tx, &package, true, &format!("package:{package_path}"), now)?;
             project_resource(&tx, &package, &root.path, now)?;
             let package_resource = resource_in(&tx, &package.path)?;
             append_event(&tx, EventType::Created, &package_resource, now)?;
@@ -476,7 +558,13 @@ impl Store {
                     &root.path,
                     now,
                 )?;
-                set_manifest_package_in(&tx, &root.path, package_path, now)?;
+                set_manifest_package_in(
+                    &tx,
+                    &root.path,
+                    package_path,
+                    package.metadata.kas.revision,
+                    now,
+                )?;
             }
         }
         for installation in &installations {
@@ -538,9 +626,8 @@ impl Store {
         installation: PackageInstallation,
         root: PlannedResource,
         package_path: String,
-        old_package: Resource,
     ) -> Result<Resource, StoreError> {
-        let owner = format!("package:{}", root.path);
+        let owner = format!("package:{package_path}");
         let old_members = self
             .list_resources(None)?
             .into_iter()
@@ -622,10 +709,7 @@ impl Store {
         let mut deletion_paths = Vec::new();
         for link in resources_for_manifest_in(&tx, LINK_MANIFEST)? {
             let spec: LinkSpec = decode(&link.spec, "Link spec")?;
-            if removed_paths.contains(&spec.source)
-                || removed_paths.contains(&spec.target)
-                || spec.source == old_package.path
-            {
+            if removed_paths.contains(&spec.source) || removed_paths.contains(&spec.target) {
                 deletion_paths.push(link.path);
             }
         }
@@ -657,7 +741,11 @@ impl Store {
                 path: package_path.clone(),
                 metadata: kas_core::PlannedResourceMetadata {
                     manifest: PACKAGE_MANIFEST.into(),
-                    name: package_spec.digest.clone(),
+                    name: package_path
+                        .rsplit('/')
+                        .next()
+                        .expect("Package path has a name")
+                        .into(),
                     state: String::new(),
                 },
                 spec: serde_json::to_value(&package_spec)?,
@@ -696,7 +784,13 @@ impl Store {
                 &root.path,
                 now,
             )?;
-            set_manifest_package_in(&tx, &root.path, &package_path, now)?;
+            set_manifest_package_in(
+                &tx,
+                &root.path,
+                &package_path,
+                package_resource.metadata.kas.revision,
+                now,
+            )?;
         }
         for planned in installation.expansion.resources.iter().filter(|resource| {
             installation
@@ -725,10 +819,6 @@ impl Store {
             let resource = resource_in(&tx, path)?;
             project_declared_relationships(&tx, &planned_from_resource(resource), now)?;
         }
-        deletion_paths.extend(gc_superseded_packages_for_manifest_in(
-            &tx, &root.path, now,
-        )?);
-
         let new_drivers = stored_paths
             .iter()
             .filter_map(|path| resource_in(&tx, path).ok())
@@ -787,6 +877,7 @@ impl Store {
             ));
         }
         let tx = self.connection.transaction()?;
+        validate_external_create_path(&tx, &input.path)?;
         let now = Utc::now();
         let event_cursor = current_event_sequence_in(&tx)?;
         let input = normalized_initial_documents(&tx, &input)?;
@@ -816,34 +907,23 @@ impl Store {
     }
 
     pub fn list_resources(&self, manifest: Option<&str>) -> Result<Vec<Resource>, StoreError> {
-        let (sqlite_sql, postgres_sql) = if manifest.is_some() {
-            (
-                format!(
-                    "{RESOURCE_SELECT}
-                     WHERE json_extract(metadata,'$.manifest')=?
-                     ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-                ),
-                format!(
-                    "{RESOURCE_SELECT}
-                     WHERE metadata->>'manifest'=?
-                     ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-                ),
+        if let Some(manifest) = manifest {
+            kas_core::validate_path(manifest)
+                .map_err(|error| StoreError::Invalid(format!("invalid Manifest path: {error}")))?;
+        }
+        let sql = if manifest.is_some() {
+            format!(
+                "{RESOURCE_SELECT}
+                 WHERE json_extract(metadata,'$.manifest')=?
+                 ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
             )
         } else {
-            (
-                format!(
-                    "{RESOURCE_SELECT}
-                     ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-                ),
-                format!(
-                    "{RESOURCE_SELECT}
-                     ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-                ),
+            format!(
+                "{RESOURCE_SELECT}
+                 ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
             )
         };
-        let mut statement = self
-            .connection
-            .prepare_dialect(&sqlite_sql, &postgres_sql)?;
+        let mut statement = self.connection.prepare(&sql)?;
         if let Some(manifest) = manifest {
             let rows = statement.query_map(db_params![manifest], resource_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -856,6 +936,8 @@ impl Store {
     }
 
     pub fn get_resource(&self, path: &str) -> Result<Resource, StoreError> {
+        kas_core::validate_path(path)
+            .map_err(|error| StoreError::Invalid(format!("invalid Resource path: {error}")))?;
         self.connection
             .query_row(
                 &format!("{RESOURCE_SELECT} WHERE path=?"),
@@ -899,6 +981,7 @@ impl Store {
         save_resource_in(&tx, &current)?;
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
+        let resource = resource_in(&tx, path)?;
         let affected = reconcile_driver_change(&tx, Some(&previous), Some(&resource))?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         enqueue_if_drifted(&tx, &resource, "spec_updated", now)?;
@@ -927,7 +1010,6 @@ impl Store {
         let event_cursor = current_event_sequence_in(&tx)?;
         assert_driver_owns(&tx, path, driver_path, generation)?;
         let current = resource_in(&tx, path)?;
-        let package_changed = current.status.metadata.kas.package != current.metadata.kas.package;
         normalize_submitted_status(&current, &mut input.status);
         validate_against_manifest(
             &tx,
@@ -947,9 +1029,6 @@ impl Store {
         refresh_projection(&tx, &resource, now)?;
         append_event(&tx, EventType::Updated, &resource, now)?;
         maybe_finish_deleted_resource(&tx, path, now)?;
-        if package_changed {
-            gc_superseded_packages_for_manifest_in(&tx, &current.manifest, now)?;
-        }
         let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
         for path in touched_paths {
@@ -1013,24 +1092,28 @@ impl Store {
         target: Option<&str>,
         either_endpoint: bool,
     ) -> Result<Vec<Resource>, StoreError> {
-        let mut sqlite_predicates = vec!["json_extract(metadata,'$.manifest')=?".to_string()];
-        let mut postgres_predicates = vec!["metadata->>'manifest'=?".to_string()];
+        for (kind, path) in [
+            ("source", source),
+            ("Relation", relation),
+            ("target", target),
+        ] {
+            if let Some(path) = path {
+                kas_core::validate_path(path).map_err(|error| {
+                    StoreError::Invalid(format!("invalid Link {kind} path: {error}"))
+                })?;
+            }
+        }
+        let mut predicates = vec!["json_extract(metadata,'$.manifest')=?".to_string()];
         let mut params: Vec<Param> = vec![LINK_MANIFEST.as_param()];
         if let Some(relation) = relation {
-            sqlite_predicates.push("json_extract(spec,'$.relation')=?".into());
-            postgres_predicates.push("spec->>'relation'=?".into());
+            predicates.push("json_extract(spec,'$.relation')=?".into());
             params.push(relation.as_param());
         }
         if let Some(source) = source {
-            sqlite_predicates.push(if either_endpoint {
+            predicates.push(if either_endpoint {
                 "(json_extract(spec,'$.source')=? OR json_extract(spec,'$.target')=?)".into()
             } else {
                 "json_extract(spec,'$.source')=?".into()
-            });
-            postgres_predicates.push(if either_endpoint {
-                "(spec->>'source'=? OR spec->>'target'=?)".into()
-            } else {
-                "spec->>'source'=?".into()
             });
             params.push(source.as_param());
             if either_endpoint {
@@ -1038,32 +1121,21 @@ impl Store {
             }
         }
         if let Some(target) = target {
-            sqlite_predicates.push(if either_endpoint {
+            predicates.push(if either_endpoint {
                 "(json_extract(spec,'$.target')=? OR json_extract(spec,'$.source')=?)".into()
             } else {
                 "json_extract(spec,'$.target')=?".into()
-            });
-            postgres_predicates.push(if either_endpoint {
-                "(spec->>'target'=? OR spec->>'source'=?)".into()
-            } else {
-                "spec->>'target'=?".into()
             });
             params.push(target.as_param());
             if either_endpoint {
                 params.push(target.as_param());
             }
         }
-        let sqlite_sql = format!(
+        let sql = format!(
             "{RESOURCE_SELECT} WHERE {} ORDER BY path",
-            sqlite_predicates.join(" AND ")
+            predicates.join(" AND ")
         );
-        let postgres_sql = format!(
-            "{RESOURCE_SELECT} WHERE {} ORDER BY path",
-            postgres_predicates.join(" AND ")
-        );
-        let mut statement = self
-            .connection
-            .prepare_dialect(&sqlite_sql, &postgres_sql)?;
+        let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map(params, resource_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
@@ -1554,15 +1626,11 @@ impl Store {
 
         let tx = self.connection.transaction()?;
         let now = Utc::now();
-        let mut gc_manifest = None;
         if let Ok(mut current) = resource_in(&tx, &resource.path) {
             if driver_for_resource(&tx, &current)?.as_deref() == Some(driver_path) {
-                let package_changed =
-                    current.status.metadata.kas.package != current.metadata.kas.package;
                 current.status.metadata.kas.package = current.metadata.kas.package.clone();
-                if package_changed {
-                    gc_manifest = Some(current.manifest.clone());
-                }
+                current.status.metadata.kas.package_revision =
+                    current.metadata.kas.package_revision;
             }
             current.status.metadata.kas.observed.insert(
                 driver_path.into(),
@@ -1574,9 +1642,6 @@ impl Store {
             save_resource_in(&tx, &current)?;
             enqueue_if_drifted(&tx, &current, "delivery_completed", now)?;
             maybe_finish_deleted_resource(&tx, &resource.path, now)?;
-        }
-        if let Some(manifest) = gc_manifest {
-            gc_superseded_packages_for_manifest_in(&tx, &manifest, now)?;
         }
         tx.commit()?;
         self.remove_completed_delivery(delivery_id)?;
@@ -1706,17 +1771,12 @@ impl Store {
         });
         if active_count < limit && !has_active_run {
             let run_path: Option<String> = tx
-                .query_row_dialect(
+                .query_row(
                     "SELECT path FROM resources
-                     WHERE json_extract(metadata,'$.manifest')='/builtin/run'
+                     WHERE json_extract(metadata,'$.manifest')='/packages/kas/run/manifest'
                        AND json_extract(spec,'$.driver')=?
                        AND json_extract(status,'$.metadata.state') IN ('queued','running')
                      ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path LIMIT 1",
-                    "SELECT path FROM resources
-                     WHERE metadata->>'manifest'='/builtin/run'
-                       AND spec->>'driver'=?
-                       AND status#>>'{metadata,state}' IN ('queued','running')
-                     ORDER BY metadata#>>'{\"[kas]\",created_at}',path LIMIT 1",
                     db_params![driver_path],
                     |row| row.get(0),
                 )
@@ -1935,7 +1995,8 @@ impl Store {
         &self,
         manifest_path: &str,
     ) -> Result<Vec<Resource>, StoreError> {
-        let owner = format!("package:{manifest_path}");
+        let package = self.package_for_manifest(manifest_path)?;
+        let owner = format!("package:{}", package.path);
         Ok(self
             .list_resources(None)?
             .into_iter()
@@ -1950,7 +2011,7 @@ impl Store {
 
     pub fn bootstrap_admin(&self, name: &str) -> Result<IssuedCredential, StoreError> {
         validate_name("User name", name)?;
-        let path = format!("/users/{}", permission_segment(name));
+        let path = format!("/packages/kas/user/users/{}", permission_segment(name));
         if self.get_resource(&path).is_err() {
             self.create_resource(PlannedResource {
                 path: path.clone(),
@@ -2097,16 +2158,11 @@ impl Store {
         let hash = token_hash(token);
         let credential = self
             .connection
-            .query_row_dialect(
+            .query_row(
                 &format!(
                     "{RESOURCE_SELECT}
                      WHERE json_extract(metadata,'$.manifest')=?
                        AND json_extract(spec,'$.token_hash')=?"
-                ),
-                &format!(
-                    "{RESOURCE_SELECT}
-                     WHERE metadata->>'manifest'=?
-                       AND spec->>'token_hash'=?"
                 ),
                 db_params![CREDENTIAL_MANIFEST, hash],
                 resource_from_row,
@@ -2148,7 +2204,9 @@ impl Store {
             None,
             false,
         )? {
-            if binding.metadata.state == STATE_DELETED {
+            if binding.metadata.state == STATE_DELETED
+                || binding.status.metadata.state != STATE_AVAILABLE
+            {
                 continue;
             }
             let binding_spec: LinkSpec = decode(&binding.spec, "RoleBinding Link spec")?;
@@ -2305,9 +2363,6 @@ fn builtin_documents() -> [BuiltinDocuments; 11] {
 }
 
 fn configure(connection: &Connection) -> Result<(), StoreError> {
-    if connection.is_postgres() {
-        return Ok(());
-    }
     connection.execute_batch(
         "PRAGMA foreign_keys=ON;
          PRAGMA journal_mode=WAL;
@@ -2317,9 +2372,6 @@ fn configure(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn migrate_connection(connection: &Connection) -> Result<u32, StoreError> {
-    if connection.is_postgres() {
-        return migrate_postgres(connection);
-    }
     let current = schema_version(connection)?;
     if current > LATEST_SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema {
@@ -2350,48 +2402,6 @@ fn migrate_connection(connection: &Connection) -> Result<u32, StoreError> {
     Ok(LATEST_SCHEMA_VERSION)
 }
 
-fn migrate_postgres(connection: &Connection) -> Result<u32, StoreError> {
-    let tx = connection.transaction()?;
-    tx.execute_batch(
-        "SELECT pg_advisory_xact_lock(4932287001);
-         CREATE TABLE IF NOT EXISTS kas_schema (
-             version BIGINT NOT NULL
-         );
-         INSERT INTO kas_schema(version)
-         SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM kas_schema);",
-    )?;
-    let current = tx.query_row(
-        "SELECT COALESCE(MAX(version),0) FROM kas_schema",
-        db_params![],
-        |row| row.get::<_, u64>(0),
-    )? as u32;
-    match current {
-        0 => tx.execute_batch(POSTGRES_BASELINE)?,
-        14..=16 => tx.execute_batch(POSTGRES_NATIVE_JSONB)?,
-        LATEST_SCHEMA_VERSION => {}
-        current if current > LATEST_SCHEMA_VERSION => {
-            return Err(StoreError::UnsupportedSchema {
-                current,
-                latest: LATEST_SCHEMA_VERSION,
-            });
-        }
-        current => {
-            return Err(StoreError::MigrationRequired {
-                current,
-                latest: LATEST_SCHEMA_VERSION,
-            });
-        }
-    }
-    tx.execute_batch("ALTER TABLE kas_schema ALTER COLUMN version TYPE BIGINT")?;
-    tx.execute("DELETE FROM kas_schema", db_params![])?;
-    tx.execute(
-        "INSERT INTO kas_schema(version) VALUES ($1)",
-        db_params![LATEST_SCHEMA_VERSION as u64],
-    )?;
-    tx.commit()?;
-    Ok(LATEST_SCHEMA_VERSION)
-}
-
 fn require_current_schema(connection: &Connection) -> Result<(), StoreError> {
     let current = schema_version(connection)?;
     match current.cmp(&LATEST_SCHEMA_VERSION) {
@@ -2408,16 +2418,6 @@ fn require_current_schema(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn schema_version(connection: &Connection) -> Result<u32, StoreError> {
-    if connection.is_postgres() {
-        return connection
-            .query_row(
-                "SELECT COALESCE(MAX(version),0) FROM kas_schema",
-                db_params![],
-                |row| row.get::<_, u64>(0),
-            )
-            .map(|version| version as u32)
-            .map_err(StoreError::from);
-    }
     connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(StoreError::from)
@@ -2446,32 +2446,9 @@ fn resource_from_row(row: &Row<'_>) -> database::Result<Resource> {
     })
 }
 
-fn event_from_row(row: &Row<'_>) -> database::Result<Event> {
-    let event_type: String = row.get(1)?;
-    Ok(Event {
-        sequence: row.get(0)?,
-        event_type: match event_type.as_str() {
-            "created" => EventType::Created,
-            "updated" => EventType::Updated,
-            "deleted" => EventType::Deleted,
-            other => {
-                return Err(from_sql(
-                    1,
-                    std::io::Error::other(format!("invalid event type {other}")),
-                ))
-            }
-        },
-        resource_path: row.get(2)?,
-        revision: row.get(3)?,
-        value: json_from_row(row, 4)?,
-        created_at: time_from_row(row, 5)?,
-    })
-}
-
 fn resource_in(tx: &Transaction, path: &str) -> Result<Resource, StoreError> {
-    tx.query_row_dialect(
+    tx.query_row(
         &format!("{RESOURCE_SELECT} WHERE path=?"),
-        &format!("{RESOURCE_SELECT} WHERE path=? FOR UPDATE"),
         db_params![path],
         resource_from_row,
     )
@@ -2498,12 +2475,64 @@ fn optional_resource_in(tx: &Transaction, path: &str) -> Result<Option<Resource>
 }
 
 fn validate_resource_identity(resource: &PlannedResource) -> Result<(), StoreError> {
-    kas_auth::validate_path(&resource.path)
+    kas_core::validate_path(&resource.path)
         .map_err(|error| StoreError::Invalid(format!("invalid Resource path: {error}")))?;
-    kas_auth::validate_path(&resource.manifest)
+    kas_core::validate_path(&resource.manifest)
         .map_err(|error| StoreError::Invalid(format!("invalid Manifest path: {error}")))?;
     validate_name("Resource name", &resource.name)?;
     Ok(())
+}
+
+fn validate_external_create_path(tx: &Transaction, path: &str) -> Result<(), StoreError> {
+    let segments = path[1..].split('/').collect::<Vec<_>>();
+    let credential_subtree = segments.contains(&"credentials");
+    if credential_subtree {
+        return Err(StoreError::Invalid(format!(
+            "Resource path {path} is reserved for KAS"
+        )));
+    }
+    let package_root = package_root_for_path(path).ok_or_else(|| {
+        StoreError::Invalid(format!(
+            "Resource path {path} must be inside /packages/{{publisher}}/{{package}}"
+        ))
+    })?;
+    if package_root == path {
+        return Err(StoreError::Invalid(
+            "Package Roots can only be created by POST /packages".into(),
+        ));
+    }
+    let package = optional_resource_in(tx, &package_root)?.ok_or_else(|| {
+        StoreError::Invalid(format!("Package Root {package_root} is not installed"))
+    })?;
+    require_manifest(&package, PACKAGE_MANIFEST)?;
+    Ok(())
+}
+
+fn validate_resource_path_for_manifest(
+    tx: &Transaction,
+    path: &str,
+    manifest_path: &str,
+) -> Result<(), StoreError> {
+    if path == MANIFEST_MANIFEST
+        && manifest_path == MANIFEST_MANIFEST
+        && optional_resource_in(tx, MANIFEST_MANIFEST)?.is_none()
+    {
+        return Ok(());
+    }
+    let manifest = resource_read_in(tx, manifest_path)?;
+    require_manifest(&manifest, MANIFEST_MANIFEST)?;
+    let spec: ManifestSpec = decode(&manifest.spec, "Manifest spec")?;
+    if spec
+        .paths
+        .iter()
+        .any(|pattern| kas_core::path_matches(pattern, path))
+    {
+        Ok(())
+    } else {
+        Err(StoreError::Invalid(format!(
+            "Resource path {path} is not allowed by Manifest {manifest_path}"
+        )))
+    }
 }
 
 fn validate_name(kind: &str, name: &str) -> Result<(), StoreError> {
@@ -2649,7 +2678,17 @@ fn insert_resource_row(
     managed_by: &str,
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
-    let package = active_package_path_for_manifest_in(tx, &planned.manifest)?.unwrap_or_default();
+    validate_resource_path_for_manifest(tx, &planned.path, &planned.manifest)?;
+    let active_package = active_package_path_for_manifest_in(tx, &planned.manifest)?
+        .and_then(|path| resource_in(tx, &path).ok());
+    let package = active_package
+        .as_ref()
+        .map(|resource| resource.path.clone())
+        .unwrap_or_default();
+    let package_revision = active_package
+        .as_ref()
+        .map(|resource| resource.metadata.kas.revision)
+        .unwrap_or_default();
     let metadata = ResourceMetadata {
         manifest: planned.manifest.clone(),
         name: planned.name.clone(),
@@ -2661,6 +2700,7 @@ fn insert_resource_row(
             protected,
             managed_by: managed_by.into(),
             package: package.clone(),
+            package_revision,
             created_at: now,
             updated_at: now,
         },
@@ -2675,6 +2715,7 @@ fn insert_resource_row(
         protected,
         managed_by: managed_by.into(),
         package,
+        package_revision,
         created_at: now,
         updated_at: now,
     };
@@ -2704,6 +2745,7 @@ fn replace_packaged_resource_in(
     planned: &PlannedResource,
     now: DateTime<Utc>,
 ) -> Result<Resource, StoreError> {
+    validate_resource_path_for_manifest(tx, &planned.path, &planned.manifest)?;
     let mut updated = existing.clone();
     updated.metadata.manifest = planned.manifest.clone();
     updated.metadata.name = planned.name.clone();
@@ -2746,8 +2788,24 @@ fn project_resource(
         MANIFEST_MANIFEST => {
             let spec: ManifestSpec = decode(&planned.spec, "Manifest spec")?;
             validate_manifest_states(&spec)?;
+            validate_manifest_paths(&planned.path, &spec)?;
+            for resource in resources_for_manifest_in(tx, &planned.path)? {
+                if !spec
+                    .paths
+                    .iter()
+                    .any(|pattern| kas_core::path_matches(pattern, &resource.path))
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "existing Resource path {} is not allowed by Manifest {}",
+                        resource.path, planned.path
+                    )));
+                }
+            }
         }
-        RELATION_MANIFEST => {}
+        RELATION_MANIFEST => {
+            let spec: RelationSpec = decode(&planned.spec, "Relation spec")?;
+            validate_relation_selectors(&spec)?;
+        }
         ACTION_MANIFEST => {
             let _: ActionSpec = decode(&planned.spec, "Action spec")?;
         }
@@ -2755,15 +2813,31 @@ fn project_resource(
             let spec: DriverSpec = decode(&planned.spec, "Driver spec")?;
             project_driver_manifests(tx, &planned.path, &spec)?;
         }
-        LINK_MANIFEST => {}
+        LINK_MANIFEST => {
+            let spec: LinkSpec = decode(&planned.spec, "Link spec")?;
+            for (kind, path) in [
+                ("Relation", spec.relation.as_str()),
+                ("source", spec.source.as_str()),
+                ("target", spec.target.as_str()),
+            ] {
+                kas_core::validate_path(path).map_err(|error| {
+                    StoreError::Invalid(format!("invalid Link {kind} path: {error}"))
+                })?;
+            }
+            activate_role_binding_in(tx, &planned.path)?;
+        }
         RUN_MANIFEST => {
             project_run(tx, planned)?;
         }
         ROLE_MANIFEST => {
-            let _: RoleSpec = decode(&planned.spec, "Role spec")?;
+            let spec: RoleSpec = decode(&planned.spec, "Role spec")?;
+            validate_role_paths(&spec)?;
         }
         CREDENTIAL_MANIFEST => {
-            let _: CredentialSpec = decode(&planned.spec, "Credential spec")?;
+            let spec: CredentialSpec = decode(&planned.spec, "Credential spec")?;
+            kas_core::validate_path(&spec.subject).map_err(|error| {
+                StoreError::Invalid(format!("invalid Credential subject path: {error}"))
+            })?;
         }
         PACKAGE_MANIFEST => {
             let _: PackageSpec = decode(&planned.spec, "Package spec")?;
@@ -2773,6 +2847,99 @@ fn project_resource(
         }
         SERVICE_ACCOUNT_MANIFEST => {}
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_manifest_paths(manifest_path: &str, spec: &ManifestSpec) -> Result<(), StoreError> {
+    if spec.paths.is_empty() {
+        return Err(StoreError::Invalid(
+            "Manifest paths must contain at least one pattern".into(),
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    let package_root = kas_core::package_root_for_manifest_path(manifest_path).ok_or_else(|| {
+        StoreError::Invalid(format!(
+            "Manifest {manifest_path} must be located at /packages/{{publisher}}/{{package}}/manifest"
+        ))
+    })?;
+    let platform_manifest = package_root.starts_with("/packages/kas/");
+    for pattern in &spec.paths {
+        kas_core::validate_path_pattern(pattern).map_err(|error| {
+            StoreError::Invalid(format!("invalid Manifest Resource path pattern: {error}"))
+        })?;
+        if !unique.insert(pattern) {
+            return Err(StoreError::Invalid(format!(
+                "Manifest declares path pattern {pattern} more than once"
+            )));
+        }
+        if !platform_manifest
+            && pattern != &package_root
+            && !pattern.starts_with(&format!("{package_root}/"))
+        {
+            return Err(StoreError::Invalid(format!(
+                "Manifest path pattern {pattern} escapes Package sandbox {package_root}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_selector_pattern(
+    kind: &str,
+    pattern: &str,
+    allow_global_selector: bool,
+) -> Result<(), StoreError> {
+    if allow_global_selector && pattern == "*" {
+        return Ok(());
+    }
+    kas_core::validate_path_pattern(pattern)
+        .map_err(|error| StoreError::Invalid(format!("invalid {kind} pattern: {error}")))
+}
+
+fn validate_manifest_selector(
+    kind: &str,
+    selector: &kas_core::ManifestSelector,
+) -> Result<(), StoreError> {
+    match selector {
+        kas_core::ManifestSelector::One(pattern) => validate_selector_pattern(kind, pattern, true),
+        kas_core::ManifestSelector::Many(patterns) => {
+            if patterns.is_empty() {
+                return Err(StoreError::Invalid(format!(
+                    "{kind} selector must not be empty"
+                )));
+            }
+            for pattern in patterns {
+                validate_selector_pattern(kind, pattern, true)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_relation_selectors(spec: &RelationSpec) -> Result<(), StoreError> {
+    for (kind, selectors) in [
+        ("Relation source", &spec.sources),
+        ("Relation target", &spec.targets),
+    ] {
+        for selector in selectors {
+            validate_manifest_selector(kind, &selector.manifest)?;
+            for pattern in &selector.paths {
+                validate_selector_pattern(&format!("{kind} path"), pattern, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_role_paths(spec: &RoleSpec) -> Result<(), StoreError> {
+    for rule in &spec.rules {
+        for pattern in &rule.manifests {
+            validate_selector_pattern("Role Manifest", pattern, true)?;
+        }
+        for pattern in &rule.paths {
+            validate_selector_pattern("Role Resource path", pattern, false)?;
+        }
     }
     Ok(())
 }
@@ -2812,6 +2979,20 @@ fn project_driver_manifests(
     driver_path: &str,
     spec: &DriverSpec,
 ) -> Result<(), StoreError> {
+    kas_core::validate_path(&spec.service_account).map_err(|error| {
+        StoreError::Invalid(format!("invalid Driver ServiceAccount path: {error}"))
+    })?;
+    for manifest_path in &spec.manages {
+        kas_core::validate_path(manifest_path).map_err(|error| {
+            StoreError::Invalid(format!("invalid Driver managed Manifest path: {error}"))
+        })?;
+    }
+    for watch in &spec.watches {
+        validate_manifest_selector("Driver watch Manifest", &watch.manifest)?;
+        for pattern in &watch.paths {
+            validate_selector_pattern("Driver watch Resource path", pattern, false)?;
+        }
+    }
     if spec.manages.is_empty() {
         return Err(StoreError::Invalid(
             "Driver must manage at least one Manifest".into(),
@@ -3016,6 +3197,7 @@ fn create_system_link(
             existing.metadata.kas.revision += 1;
             existing.metadata.kas.updated_at = now;
             save_resource_in(tx, &existing)?;
+            activate_role_binding_in(tx, path)?;
             existing = resource_in(tx, path)?;
             append_event(tx, EventType::Updated, &existing, now)?;
             enqueue_if_drifted(tx, &existing, "system_link_updated", now)?;
@@ -3024,6 +3206,7 @@ fn create_system_link(
     }
     let planned = normalized_initial_documents(tx, &planned)?;
     insert_resource_row(tx, &planned, true, "system", now)?;
+    activate_role_binding_in(tx, path)?;
     let resource = resource_in(tx, path)?;
     append_event(tx, EventType::Created, &resource, now)?;
     enqueue_if_drifted(tx, &resource, "system_link_created", now)?;
@@ -3050,19 +3233,12 @@ fn active_package_path_for_manifest_in(
     let Some(relation) = relation_path_for_role(tx, RelationRole::PackageManifest)? else {
         return Ok(None);
     };
-    tx.query_row_dialect(
+    tx.query_row(
         "SELECT json_extract(spec,'$.source')
          FROM resources
          WHERE json_extract(metadata,'$.manifest')=?
            AND json_extract(spec,'$.relation')=?
            AND json_extract(spec,'$.target')=?
-         ORDER BY path
-         LIMIT 1",
-        "SELECT spec->>'source'
-         FROM resources
-         WHERE metadata->>'manifest'=?
-           AND spec->>'relation'=?
-           AND spec->>'target'=?
          ORDER BY path
          LIMIT 1",
         db_params![LINK_MANIFEST, relation, manifest_path],
@@ -3076,23 +3252,29 @@ fn set_manifest_package_in(
     tx: &Transaction,
     manifest_path: &str,
     package_path: &str,
+    package_revision: u64,
     now: DateTime<Utc>,
 ) -> Result<Vec<String>, StoreError> {
     let mut changed_paths = Vec::new();
     for listed in resources_for_manifest_in(tx, manifest_path)? {
         let mut resource = resource_in(tx, &listed.path)?;
-        if resource.metadata.kas.package == package_path {
+        if resource.metadata.kas.package == package_path
+            && resource.metadata.kas.package_revision == package_revision
+        {
             continue;
         }
         if resource.metadata.kas.package.is_empty() {
             resource.metadata.kas.package = package_path.into();
+            resource.metadata.kas.package_revision = package_revision;
             resource.status.metadata.kas.package = package_path.into();
+            resource.status.metadata.kas.package_revision = package_revision;
             save_resource_in(tx, &resource)?;
             changed_paths.push(resource.path);
             continue;
         }
 
         resource.metadata.kas.package = package_path.into();
+        resource.metadata.kas.package_revision = package_revision;
         resource.metadata.kas.revision += 1;
         resource.metadata.kas.updated_at = now;
         if driver_for_resource(tx, &resource)?.is_none() {
@@ -3107,58 +3289,6 @@ fn set_manifest_package_in(
         changed_paths.push(resource.path);
     }
     Ok(changed_paths)
-}
-
-fn gc_superseded_packages_for_manifest_in(
-    tx: &Transaction,
-    manifest_path: &str,
-    now: DateTime<Utc>,
-) -> Result<Vec<String>, StoreError> {
-    let Some(active_package) = active_package_path_for_manifest_in(tx, manifest_path)? else {
-        return Ok(Vec::new());
-    };
-    let mut candidates = Vec::new();
-    for resource in resources_for_manifest_in(tx, PACKAGE_MANIFEST)? {
-        let spec: PackageSpec = decode(&resource.spec, "Package spec")?;
-        if spec.manifest == manifest_path && resource.path != active_package {
-            candidates.push(resource.path.clone());
-        }
-    }
-    let mut deleted = Vec::new();
-    for package_path in candidates {
-        let referenced = tx
-            .query_row_dialect(
-                "SELECT 1 FROM resources
-                 WHERE json_extract(metadata,'$.\"[kas]\".package')=?
-                    OR json_extract(status,'$.metadata.\"[kas]\".package')=?
-                 LIMIT 1",
-                "SELECT 1 FROM resources
-                 WHERE metadata#>>'{\"[kas]\",package}'=?
-                    OR status#>>'{metadata,\"[kas]\",package}'=?
-                 LIMIT 1",
-                db_params![package_path, package_path],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if referenced {
-            continue;
-        }
-        let mut links = Vec::new();
-        for link in resources_for_manifest_in(tx, LINK_MANIFEST)? {
-            let spec: LinkSpec = decode(&link.spec, "Link spec")?;
-            if spec.source == package_path || spec.target == package_path {
-                links.push(link.path);
-            }
-        }
-        for link in links {
-            hard_delete_resource(tx, &link, now)?;
-            deleted.push(link);
-        }
-        hard_delete_resource(tx, &package_path, now)?;
-        deleted.push(package_path);
-    }
-    Ok(deleted)
 }
 
 fn owner_manifest_for_driver_in(
@@ -3180,11 +3310,10 @@ fn owner_manifest_for_driver_in(
 fn refresh_projection(
     tx: &Transaction,
     resource: &Resource,
-    _now: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
-    if resource.manifest == DRIVER_MANIFEST {
-        let spec: DriverSpec = decode(&resource.spec, "Driver spec")?;
-        project_driver_manifests(tx, &resource.path, &spec)?;
+    if resource.manifest != RUN_MANIFEST {
+        project_resource(tx, &planned_from_resource(resource.clone()), "", now)?;
     }
     Ok(())
 }
@@ -3355,7 +3484,6 @@ fn reconcile_package_metadata(store: &Store) -> Result<(), StoreError> {
             links.push(spec);
         }
     }
-    let mut manifests = BTreeSet::new();
     for link in links {
         let manifest = resource_in(&tx, &link.target)?;
         let manifest_spec: ManifestSpec = decode(&manifest.spec, "Manifest spec")?;
@@ -3376,11 +3504,13 @@ fn reconcile_package_metadata(store: &Store) -> Result<(), StoreError> {
             save_resource_in(&tx, &package)?;
             append_event(&tx, EventType::Updated, &package, now)?;
         }
-        set_manifest_package_in(&tx, &manifest.path, &package.path, now)?;
-        manifests.insert(manifest.path);
-    }
-    for manifest in manifests {
-        gc_superseded_packages_for_manifest_in(&tx, &manifest, now)?;
+        set_manifest_package_in(
+            &tx,
+            &manifest.path,
+            &package.path,
+            package.metadata.kas.revision,
+            now,
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -3396,6 +3526,7 @@ fn apply_mutation(
     match operation {
         Mutation::CreateResource { resource } => {
             validate_resource_identity(&resource)?;
+            validate_external_create_path(tx, &resource.path)?;
             if resource.manifest == PACKAGE_MANIFEST {
                 return Err(StoreError::Invalid(
                     "Package Resources can only be created by POST /packages".into(),
@@ -3450,6 +3581,7 @@ fn apply_mutation(
             save_resource_in(tx, &current)?;
             let updated = resource_in(tx, &resource_path)?;
             refresh_projection(tx, &updated, now)?;
+            let updated = resource_in(tx, &resource_path)?;
             append_event(tx, EventType::Updated, &updated, now)?;
             enqueue_if_drifted(tx, &updated, "driver_spec_updated", now)?;
             Ok(serde_json::to_value(updated)?)
@@ -3532,14 +3664,17 @@ fn hard_delete_resource(
     now: DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let resource = resource_in(tx, path)?;
+    let link_dependencies = if resource.manifest == LINK_MANIFEST {
+        decode::<LinkSpec>(&resource.spec, "Link spec")
+            .map(|spec| BTreeSet::from([spec.relation, spec.source, spec.target]))?
+    } else {
+        BTreeSet::new()
+    };
     let run_paths = {
-        let mut statement = tx.prepare_dialect(
+        let mut statement = tx.prepare(
             "SELECT path FROM resources
-             WHERE json_extract(metadata,'$.manifest')='/builtin/run'
+             WHERE json_extract(metadata,'$.manifest')='/packages/kas/run/manifest'
                AND json_extract(spec,'$.resource')=?",
-            "SELECT path FROM resources
-             WHERE metadata->>'manifest'='/builtin/run'
-               AND spec->>'resource'=?",
         )?;
         statement
             .query_map(db_params![path], |row| row.get::<_, String>(0))?
@@ -3550,6 +3685,11 @@ fn hard_delete_resource(
     }
     append_deleted_event(tx, &resource, now)?;
     tx.execute("DELETE FROM resources WHERE path=?", db_params![path])?;
+    for dependency in link_dependencies {
+        if optional_resource_in(tx, &dependency)?.is_some() {
+            maybe_finish_deleted_resource(tx, &dependency, now)?;
+        }
+    }
     Ok(())
 }
 
@@ -3560,6 +3700,9 @@ fn maybe_finish_deleted_resource(
 ) -> Result<(), StoreError> {
     let resource = resource_in(tx, path)?;
     if resource.metadata.state != STATE_DELETED || resource.status.metadata.state != STATE_DELETED {
+        return Ok(());
+    }
+    if has_dependent_links_in(tx, path)? {
         return Ok(());
     }
     let complete = resource
@@ -3576,6 +3719,22 @@ fn maybe_finish_deleted_resource(
     Ok(())
 }
 
+fn has_dependent_links_in(tx: &Transaction, path: &str) -> Result<bool, StoreError> {
+    tx.query_row(
+        "SELECT 1 FROM resources
+         WHERE json_extract(metadata,'$.manifest')=?
+           AND (json_extract(spec,'$.source')=?
+             OR json_extract(spec,'$.target')=?
+             OR json_extract(spec,'$.relation')=?)
+         LIMIT 1",
+        db_params![LINK_MANIFEST, path, path, path],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(StoreError::from)
+}
+
 fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) {
     status.metadata.manifest = resource.metadata.manifest.clone();
     status.metadata.name = resource.metadata.name.clone();
@@ -3584,6 +3743,7 @@ fn normalize_submitted_status(resource: &Resource, status: &mut ResourceStatus) 
     status.metadata.kas.protected = resource.metadata.kas.protected;
     status.metadata.kas.managed_by = resource.metadata.kas.managed_by.clone();
     status.metadata.kas.package = resource.metadata.kas.package.clone();
+    status.metadata.kas.package_revision = resource.metadata.kas.package_revision;
     status.metadata.kas.created_at = resource.metadata.kas.created_at;
     status.metadata.kas.updated_at = resource.metadata.kas.updated_at;
     status.metadata.kas.observed = resource.status.metadata.kas.observed.clone();
@@ -3713,83 +3873,11 @@ fn run_state_name(state: RunState) -> &'static str {
     }
 }
 
-fn append_event(
-    tx: &Transaction,
-    event_type: EventType,
-    resource: &Resource,
-    now: DateTime<Utc>,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
-         VALUES (?,?,?,?,?)",
-        db_params![
-            event_type_name(event_type),
-            resource.path,
-            resource.revision,
-            serde_json::to_value(resource)?,
-            now
-        ],
-    )?;
-    Ok(())
-}
-
-fn append_deleted_event(
-    tx: &Transaction,
-    resource: &Resource,
-    now: DateTime<Utc>,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
-         VALUES ('deleted',?,?,?,?)",
-        db_params![
-            resource.path,
-            resource.revision,
-            serde_json::to_value(resource)?,
-            now
-        ],
-    )?;
-    Ok(())
-}
-
-fn current_event_sequence_in(tx: &Transaction) -> Result<u64, StoreError> {
-    tx.query_row(
-        "SELECT COALESCE(MAX(sequence),0) FROM events",
-        db_params![],
-        |row| row.get(0),
-    )
-    .map_err(StoreError::from)
-}
-
-fn event_paths_since(tx: &Transaction, cursor: u64) -> Result<Vec<String>, StoreError> {
-    let mut statement = tx.prepare(
-        "SELECT DISTINCT resource_path FROM events
-         WHERE sequence>? ORDER BY resource_path",
-    )?;
-    statement
-        .query_map(db_params![cursor], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
-}
-
-fn event_type_name(event_type: EventType) -> &'static str {
-    match event_type {
-        EventType::Created => "created",
-        EventType::Updated => "updated",
-        EventType::Deleted => "deleted",
-    }
-}
-
 fn all_resources_in(tx: &Transaction) -> Result<Vec<Resource>, StoreError> {
-    let mut statement = tx.prepare_dialect(
-        &format!(
-            "{RESOURCE_SELECT}
+    let mut statement = tx.prepare(&format!(
+        "{RESOURCE_SELECT}
              ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-        ),
-        &format!(
-            "{RESOURCE_SELECT}
-             ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-        ),
-    )?;
+    ))?;
     let rows = statement.query_map(db_params![], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
@@ -3799,18 +3887,11 @@ fn resources_for_manifest_in(
     tx: &Transaction,
     manifest: &str,
 ) -> Result<Vec<Resource>, StoreError> {
-    let mut statement = tx.prepare_dialect(
-        &format!(
-            "{RESOURCE_SELECT}
+    let mut statement = tx.prepare(&format!(
+        "{RESOURCE_SELECT}
              WHERE json_extract(metadata,'$.manifest')=?
              ORDER BY json_extract(metadata,'$.\"[kas]\".created_at'),path"
-        ),
-        &format!(
-            "{RESOURCE_SELECT}
-             WHERE metadata->>'manifest'=?
-             ORDER BY metadata#>>'{{\"[kas]\",created_at}}',path"
-        ),
-    )?;
+    ))?;
     let rows = statement.query_map(db_params![manifest], resource_from_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
@@ -3870,18 +3951,6 @@ fn constraint(error: DatabaseError, message: &str) -> StoreError {
         {
             StoreError::Conflict(message.into())
         }
-        DatabaseError::Postgres(ref error)
-            if error.as_db_error().is_some_and(|error| {
-                matches!(
-                    error.code(),
-                    &postgres::error::SqlState::UNIQUE_VIOLATION
-                        | &postgres::error::SqlState::CHECK_VIOLATION
-                        | &postgres::error::SqlState::T_R_SERIALIZATION_FAILURE
-                )
-            }) =>
-        {
-            StoreError::Conflict(message.into())
-        }
         other => StoreError::Database(other),
     }
 }
@@ -3909,11 +3978,12 @@ mod tests {
     fn echo_manifest() -> PackageExpansion {
         PackageDefinition {
             manifest: ManifestDefinition {
-                path: "/manifests/test/echo".into(),
+                path: "/packages/test/echo/manifest".into(),
                 manifest: MANIFEST_MANIFEST.into(),
                 name: "echo".into(),
                 version: 1,
                 description: "Store test Manifest".into(),
+                paths: vec!["./resources/*".into()],
                 resource_schema: json!({
                     "type": "object",
                     "properties": {"label": {"type": "string"}},
@@ -3932,8 +4002,8 @@ mod tests {
                     state: String::new(),
                 },
                 spec: json!({
-                    "sources": [{"manifest": "/manifests/test/echo"}],
-                    "targets": [{"manifest": "/manifests/test/echo"}],
+                    "sources": [{"manifest": "."}],
+                    "targets": [{"manifest": "."}],
                     "on_source_delete": "unlink",
                     "metadata_schema": {"type": "object"}
                 }),
@@ -3951,10 +4021,10 @@ mod tests {
         expansion.resources[0].spec["description"] = json!("Updated Store test Manifest");
         expansion
             .resources
-            .retain(|resource| resource.path == "/manifests/test/echo");
+            .retain(|resource| resource.path == "/packages/test/echo/manifest");
         expansion
             .resource_owners
-            .retain(|path, _| path == "/manifests/test/echo");
+            .retain(|path, _| path == "/packages/test/echo/manifest");
         expansion
     }
 
@@ -3963,7 +4033,7 @@ mod tests {
         expansion.artifact_digest = format!("sha256:{}", digest_word.repeat(8));
         expansion.resources[0].spec["version"] = json!(version);
         expansion.resources.push(PlannedResource {
-            path: "/manifests/test/echo/service-accounts/driver".into(),
+            path: "/packages/test/echo/service-accounts/driver".into(),
             metadata: PlannedResourceMetadata {
                 manifest: SERVICE_ACCOUNT_MANIFEST.into(),
                 name: "echo-driver".into(),
@@ -3973,7 +4043,7 @@ mod tests {
             status: ResourceStatus::default(),
         });
         expansion.resources.push(PlannedResource {
-            path: "/manifests/test/echo/driver".into(),
+            path: "/packages/test/echo/driver".into(),
             metadata: PlannedResourceMetadata {
                 manifest: DRIVER_MANIFEST.into(),
                 name: "echo-driver".into(),
@@ -3982,8 +4052,8 @@ mod tests {
             spec: json!({
                 "runtime": "process",
                 "entrypoint": "./driver/test",
-                "service_account": "/manifests/test/echo/service-accounts/driver",
-                "manages": ["/manifests/test/echo"],
+                "service_account": "/packages/test/echo/service-accounts/driver",
+                "manages": ["/packages/test/echo/manifest"],
                 "args": [],
                 "watches": [],
                 "restart": "never"
@@ -3997,12 +4067,12 @@ mod tests {
             },
         });
         expansion.resource_owners.insert(
-            "/manifests/test/echo/service-accounts/driver".into(),
-            "/manifests/test/echo".into(),
+            "/packages/test/echo/service-accounts/driver".into(),
+            "/packages/test/echo/manifest".into(),
         );
         expansion.resource_owners.insert(
-            "/manifests/test/echo/driver".into(),
-            "/manifests/test/echo".into(),
+            "/packages/test/echo/driver".into(),
+            "/packages/test/echo/manifest".into(),
         );
         expansion
     }
@@ -4060,10 +4130,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let link_driver = store.driver_for_manifest(LINK_MANIFEST).unwrap().unwrap();
-        assert_eq!(relation_driver.path, "/builtin/link/driver");
+        assert_eq!(relation_driver.path, "/packages/kas/link/driver");
         assert_eq!(relation_driver.path, link_driver.path);
         assert!(matches!(
-            store.get_resource("/builtin/relation/driver"),
+            store.get_resource("/packages/kas/relation/driver"),
             Err(StoreError::NotFound(_))
         ));
     }
@@ -4077,8 +4147,8 @@ mod tests {
 
         let created = store
             .create_resource(planned(
-                "/resources/test/echo-1",
-                "/manifests/test/echo",
+                "/packages/test/echo/resources/echo-1",
+                "/packages/test/echo/manifest",
                 "echo-1",
                 json!({"label": "one"}),
             ))
@@ -4089,9 +4159,15 @@ mod tests {
         assert_eq!(created.status.metadata.state, kas_core::STATE_PENDING);
         assert_eq!(created.status.metadata.manifest, created.metadata.manifest);
         assert_eq!(created.status.metadata.name, created.metadata.name);
-        let package = store.package_for_manifest("/manifests/test/echo").unwrap();
+        let package = store
+            .package_for_manifest("/packages/test/echo/manifest")
+            .unwrap();
         assert_eq!(created.metadata.kas.package, package.path);
         assert_eq!(created.status.metadata.kas.package, package.path);
+        assert_eq!(
+            created.metadata.kas.package_revision,
+            package.metadata.kas.revision
+        );
         assert_eq!(
             created.status.metadata.kas.revision,
             created.metadata.kas.revision
@@ -4109,15 +4185,34 @@ mod tests {
         );
 
         let invalid = store.create_resource(planned(
-            "/resources/test/invalid",
-            "/manifests/test/echo",
+            "/packages/test/echo/resources/invalid",
+            "/packages/test/echo/manifest",
             "invalid",
             json!({"label": 7}),
         ));
         assert!(matches!(invalid, Err(StoreError::Invalid(_))));
 
+        let outside_manifest_paths = store.create_resource(planned(
+            "/packages/test/echo/outside/echo",
+            "/packages/test/echo/manifest",
+            "outside",
+            json!({"label": "outside"}),
+        ));
+        assert!(matches!(
+            outside_manifest_paths,
+            Err(StoreError::Invalid(_))
+        ));
+
+        let noncanonical = store.create_resource(planned(
+            "/packages/test/echo/resources/Uppercase",
+            "/packages/test/echo/manifest",
+            "uppercase",
+            json!({"label": "uppercase"}),
+        ));
+        assert!(matches!(noncanonical, Err(StoreError::Invalid(_))));
+
         let forged_package = store.create_resource(planned(
-            "/packages/sha256/cafe",
+            "/packages/test/forged",
             PACKAGE_MANIFEST,
             "sha256:cafe",
             json!({
@@ -4129,8 +4224,8 @@ mod tests {
         assert!(matches!(forged_package, Err(StoreError::Invalid(_))));
 
         let mut unknown = planned(
-            "/resources/test/unknown-state",
-            "/manifests/test/echo",
+            "/packages/test/echo/resources/unknown-state",
+            "/packages/test/echo/manifest",
             "unknown-state",
             json!({"label": "invalid"}),
         );
@@ -4147,14 +4242,14 @@ mod tests {
             .unwrap();
         let instance = store
             .create_resource(planned(
-                "/resources/test/echo-1",
-                "/manifests/test/echo",
+                "/packages/test/echo/resources/echo-1",
+                "/packages/test/echo/manifest",
                 "echo-1",
                 json!({"label": "one"}),
             ))
             .unwrap();
         let first_manifest_revision = store
-            .get_resource("/manifests/test/echo")
+            .get_resource("/packages/test/echo/manifest")
             .unwrap()
             .metadata
             .kas
@@ -4168,23 +4263,29 @@ mod tests {
             )
             .unwrap();
 
-        assert_ne!(second_package.path, first_package.path);
+        assert_eq!(second_package.path, first_package.path);
+        assert!(second_package.metadata.kas.revision > first_package.metadata.kas.revision);
         assert_eq!(
             store
-                .package_for_manifest("/manifests/test/echo")
+                .package_for_manifest("/packages/test/echo/manifest")
                 .unwrap()
                 .path,
             second_package.path
         );
+        assert_eq!(
+            decode::<PackageSpec>(
+                &store.get_resource(&first_package.path).unwrap().spec,
+                "Package spec"
+            )
+            .unwrap()
+            .digest,
+            format!("sha256:{}", "feedface".repeat(8))
+        );
         assert!(matches!(
-            store.get_resource(&first_package.path),
+            store.get_resource("/packages/test/echo/relations/peer"),
             Err(StoreError::NotFound(_))
         ));
-        assert!(matches!(
-            store.get_resource("/manifests/test/echo/relations/peer"),
-            Err(StoreError::NotFound(_))
-        ));
-        let updated_manifest = store.get_resource("/manifests/test/echo").unwrap();
+        let updated_manifest = store.get_resource("/packages/test/echo/manifest").unwrap();
         assert_eq!(updated_manifest.spec["version"], 2);
         assert!(updated_manifest.metadata.kas.revision > first_manifest_revision);
         assert_eq!(
@@ -4196,6 +4297,10 @@ mod tests {
         assert_eq!(
             updated_instance.status.metadata.kas.package,
             second_package.path
+        );
+        assert_eq!(
+            updated_instance.metadata.kas.package_revision,
+            second_package.metadata.kas.revision
         );
 
         let idempotent = store
@@ -4209,7 +4314,7 @@ mod tests {
     }
 
     #[test]
-    fn package_update_reconciles_business_instances_before_collecting_old_package() {
+    fn package_update_reconciles_business_instances_against_the_new_package_revision() {
         let store = Store::memory().unwrap();
         let first_package = store
             .install_package(
@@ -4218,7 +4323,7 @@ mod tests {
                 kas_core::MANIFEST_PACKAGE_MEDIA_TYPE,
             )
             .unwrap();
-        let driver_path = "/manifests/test/echo/driver";
+        let driver_path = "/packages/test/echo/driver";
         store.start_driver(driver_path).unwrap();
         let generation = store.driver_generation(driver_path).unwrap();
         store
@@ -4233,14 +4338,18 @@ mod tests {
             .unwrap();
         let instance = store
             .create_resource(planned(
-                "/resources/test/echo-package-version",
-                "/manifests/test/echo",
+                "/packages/test/echo/resources/echo-package-version",
+                "/packages/test/echo/manifest",
                 "echo-package-version",
                 json!({"label": "one"}),
             ))
             .unwrap();
         assert_eq!(instance.metadata.kas.package, first_package.path);
         assert_eq!(instance.status.metadata.kas.package, first_package.path);
+        assert_eq!(
+            instance.metadata.kas.package_revision,
+            first_package.metadata.kas.revision
+        );
 
         let second_package = store
             .install_package(
@@ -4252,7 +4361,14 @@ mod tests {
         let pending = store.get_resource(&instance.path).unwrap();
         assert_eq!(pending.metadata.kas.package, second_package.path);
         assert_eq!(pending.status.metadata.kas.package, first_package.path);
-        assert!(store.get_resource(&first_package.path).is_ok());
+        assert_eq!(
+            pending.metadata.kas.package_revision,
+            second_package.metadata.kas.revision
+        );
+        assert_eq!(
+            pending.status.metadata.kas.package_revision,
+            first_package.metadata.kas.revision
+        );
 
         let delivery = store
             .claim_driver_delivery(driver_path, generation)
@@ -4271,10 +4387,10 @@ mod tests {
 
         let converged = store.get_resource(&instance.path).unwrap();
         assert_eq!(converged.status.metadata.kas.package, second_package.path);
-        assert!(matches!(
-            store.get_resource(&first_package.path),
-            Err(StoreError::NotFound(_))
-        ));
+        assert_eq!(
+            converged.status.metadata.kas.package_revision,
+            second_package.metadata.kas.revision
+        );
     }
 
     #[test]
@@ -4285,6 +4401,35 @@ mod tests {
 
         let result = store.install_package(package, 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE);
         assert!(matches!(result, Err(StoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn external_packages_cannot_claim_the_kas_publisher() {
+        let mut package = echo_manifest();
+        package.package_path = "/packages/kas/echo".into();
+        for resource in &mut package.resources {
+            resource.path = resource
+                .path
+                .replacen("/packages/test/echo", "/packages/kas/echo", 1);
+        }
+        package.resource_owners = package
+            .resource_owners
+            .into_iter()
+            .map(|(path, owner)| {
+                (
+                    path.replacen("/packages/test/echo", "/packages/kas/echo", 1),
+                    owner.replacen("/packages/test/echo", "/packages/kas/echo", 1),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            Store::memory().unwrap().install_package(
+                package,
+                123,
+                kas_core::MANIFEST_PACKAGE_MEDIA_TYPE
+            ),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -4306,6 +4451,28 @@ mod tests {
     }
 
     #[test]
+    fn external_creation_cannot_enter_kas_owned_path_trees() {
+        let store = Store::memory().unwrap();
+        store
+            .install_package(echo_manifest(), 123, kas_core::MANIFEST_PACKAGE_MEDIA_TYPE)
+            .unwrap();
+        let tx = store.connection.transaction().unwrap();
+        for path in [
+            "/builtin/forged",
+            "/packages/test/missing/resources/forged",
+            "/packages/test/echo/users/alice/credentials/forged",
+        ] {
+            assert!(matches!(
+                validate_external_create_path(&tx, path),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+        assert!(
+            validate_external_create_path(&tx, "/packages/test/echo/resources/primary").is_ok()
+        );
+    }
+
+    #[test]
     fn links_are_ordinary_resources_pending_driver_validation() {
         let store = Store::memory().unwrap();
         store
@@ -4313,27 +4480,27 @@ mod tests {
             .unwrap();
         let source = store
             .create_resource(planned(
-                "/resources/test/echo-1",
-                "/manifests/test/echo",
+                "/packages/test/echo/resources/echo-1",
+                "/packages/test/echo/manifest",
                 "echo-1",
                 json!({"label": "one"}),
             ))
             .unwrap();
         let target = store
             .create_resource(planned(
-                "/resources/test/echo-2",
-                "/manifests/test/echo",
+                "/packages/test/echo/resources/echo-2",
+                "/packages/test/echo/manifest",
                 "echo-2",
                 json!({"label": "two"}),
             ))
             .unwrap();
         let link = store
             .create_resource(planned(
-                "/links/test/peer",
+                "/packages/test/echo/links/peer",
                 LINK_MANIFEST,
                 "peer",
                 json!({
-                    "relation": "/manifests/test/echo/relations/peer",
+                    "relation": "/packages/test/echo/relations/peer",
                     "source": source.path.as_str(),
                     "target": target.path.as_str(),
                     "metadata": {}
@@ -4345,27 +4512,52 @@ mod tests {
         assert_eq!(store.links_for_resource(&source.path).unwrap().len(), 1);
         assert_eq!(link.metadata.state, STATE_AVAILABLE);
         assert_eq!(link.status.metadata.state, kas_core::STATE_PENDING);
+        assert!(source.metadata.kas.observed.is_empty());
 
         let unresolved = store
             .create_resource(planned(
-                "/links/test/unresolved",
+                "/packages/test/echo/links/unresolved",
                 LINK_MANIFEST,
                 "unresolved",
                 json!({
-                    "relation": "/manifests/test/echo/relations/peer",
-                    "source": "/resources/test/missing",
+                    "relation": "/packages/test/echo/relations/peer",
+                    "source": "/packages/test/echo/resources/missing",
                     "target": target.path.as_str(),
                     "metadata": {}
                 }),
             ))
             .unwrap();
         assert_eq!(unresolved.status.metadata.state, kas_core::STATE_PENDING);
+
+        store
+            .update_resource(
+                &source.path,
+                UpdateResource {
+                    expected_revision: source.revision,
+                    metadata: None,
+                    spec: json!({"label": "changed"}),
+                },
+            )
+            .unwrap();
+        let touched = store.get_resource(&link.path).unwrap();
+        let untouched = store.get_resource(&unresolved.path).unwrap();
+        assert_eq!(touched.revision, link.revision + 1);
+        assert_eq!(untouched.revision, unresolved.revision);
+        assert_eq!(
+            touched
+                .metadata
+                .kas
+                .observed
+                .get("/packages/kas/link/driver")
+                .map(|observation| observation.resource_revision),
+            Some(touched.revision)
+        );
     }
 
     #[test]
     fn driver_credentials_are_link_bound_and_generation_scoped() {
         let store = Store::memory().unwrap();
-        let driver_path = "/builtin/link/driver";
+        let driver_path = "/packages/kas/link/driver";
         store.start_driver(driver_path).unwrap();
         let generation = store.driver_generation(driver_path).unwrap();
 
@@ -4414,7 +4606,7 @@ mod tests {
     #[test]
     fn ordinary_service_account_credentials_are_not_driver_credentials() {
         let store = Store::memory().unwrap();
-        let driver = store.get_driver("/builtin/link/driver").unwrap();
+        let driver = store.get_driver("/packages/kas/link/driver").unwrap();
         let driver_spec: DriverSpec = decode(&driver.spec, "Driver spec").unwrap();
 
         let issued = store
@@ -4427,9 +4619,42 @@ mod tests {
     }
 
     #[test]
+    fn authorization_only_uses_available_role_bindings() {
+        let store = Store::memory().unwrap();
+        let driver = store.get_driver("/packages/kas/link/driver").unwrap();
+        let driver_spec: DriverSpec = decode(&driver.spec, "Driver spec").unwrap();
+        let binding = store
+            .list_links(
+                Some(&driver_spec.service_account),
+                Some(ROLE_BINDING_RELATION),
+                None,
+                false,
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("built-in Driver has a RoleBinding");
+        assert_eq!(binding.status.metadata.state, STATE_AVAILABLE);
+
+        let issued = store
+            .issue_credential(&driver_spec.service_account, None)
+            .unwrap();
+        assert!(!store.authenticate(&issued.token).unwrap().rules.is_empty());
+
+        for state in [kas_core::STATE_PENDING, "invalid"] {
+            let tx = store.connection.transaction().unwrap();
+            let mut binding = resource_in(&tx, &binding.path).unwrap();
+            binding.status.metadata.state = state.into();
+            save_resource_in(&tx, &binding).unwrap();
+            tx.commit().unwrap();
+            assert!(store.authenticate(&issued.token).unwrap().rules.is_empty());
+        }
+    }
+
+    #[test]
     fn completed_driver_deliveries_are_not_retained() {
         let store = Store::memory().unwrap();
-        let driver_path = "/builtin/link/driver";
+        let driver_path = "/packages/kas/link/driver";
         store.start_driver(driver_path).unwrap();
         let generation = store.driver_generation(driver_path).unwrap();
         store
@@ -4463,7 +4688,7 @@ mod tests {
     #[test]
     fn reconciliation_mutation_does_not_complete_and_redelivery_keeps_id() {
         let store = Store::memory().unwrap();
-        let driver_path = "/builtin/link/driver";
+        let driver_path = "/packages/kas/link/driver";
         store.start_driver(driver_path).unwrap();
         let generation = store.driver_generation(driver_path).unwrap();
         store
@@ -4573,7 +4798,7 @@ mod tests {
     fn unfinished_work_is_rederived_after_store_restart() {
         let database = std::env::temp_dir().join(format!("kas-store-{}.db", Uuid::new_v4()));
         migrate(&database).unwrap();
-        let driver_path = "/builtin/link/driver";
+        let driver_path = "/packages/kas/link/driver";
         let first_delivery_id;
         let generation;
         {
