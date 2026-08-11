@@ -90,6 +90,36 @@ impl MessageDriver {
         })
     }
 
+    fn reconcile_message(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
+        let body = resource
+            .spec
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if body.trim().is_empty()
+            && !self.list_links()?.iter().any(|link_resource| {
+                serde_json::from_value::<LinkSpec>(link_resource.spec.clone()).is_ok_and(|link| {
+                    link.relation == ATTACHED_TO
+                        && link.target == resource.path
+                        && link_resource.metadata.state != kas_core::STATE_DELETED
+                })
+            })
+        {
+            return Err(execution_error(format!(
+                "Message {} requires text or an attached File",
+                resource.path
+            )));
+        }
+        Ok(vec![Mutation::UpdateResourceStatus {
+            resource_path: resource.path.clone(),
+            expected_revision: resource.revision,
+            status: ResourceStatus {
+                metadata: resource.status_metadata(resource.metadata.state.clone()),
+                spec: resource.spec.clone(),
+            },
+        }])
+    }
+
     fn fanout_ready_mentions(&self) -> Result<Vec<Mutation>, DriverError> {
         let links = self.list_links()?;
         let mut mutations = Vec::new();
@@ -158,41 +188,21 @@ impl Driver for MessageDriver {
 
     async fn reconcile(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
         if resource.manifest == MESSAGE_MANIFEST {
-            let body = resource
-                .spec
-                .get("body")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            if body.trim().is_empty()
-                && !self.list_links()?.iter().any(|link_resource| {
-                    serde_json::from_value::<LinkSpec>(link_resource.spec.clone()).is_ok_and(
-                        |link| {
-                            link.relation == ATTACHED_TO
-                                && link.target == resource.path
-                                && link_resource.metadata.state != kas_core::STATE_DELETED
-                        },
-                    )
-                })
-            {
-                return Err(execution_error(format!(
-                    "Message {} requires text or an attached File",
-                    resource.path
-                )));
-            }
-            return Ok(vec![Mutation::UpdateResourceStatus {
-                resource_path: resource.path.clone(),
-                expected_revision: resource.revision,
-                status: ResourceStatus {
-                    metadata: resource.status_metadata(resource.metadata.state.clone()),
-                    spec: resource.spec.clone(),
-                },
-            }]);
+            return self.reconcile_message(resource);
         }
         if resource.manifest == LINK_MANIFEST {
-            let relation = serde_json::from_value::<LinkSpec>(resource.spec.clone())
-                .map(|link| link.relation)
-                .unwrap_or_default();
-            if [MENTIONED, MESSAGE_THREAD, PARTICIPANTS].contains(&relation.as_str()) {
+            let Ok(link) = serde_json::from_value::<LinkSpec>(resource.spec.clone()) else {
+                return Ok(Vec::new());
+            };
+            if link.relation == ATTACHED_TO {
+                let Some(message) = self.fetch_resource(&link.target)? else {
+                    return Ok(Vec::new());
+                };
+                if message.manifest == MESSAGE_MANIFEST {
+                    return self.reconcile_message(&message);
+                }
+            }
+            if [MENTIONED, MESSAGE_THREAD, PARTICIPANTS].contains(&link.relation.as_str()) {
                 return self.fanout_ready_mentions();
             }
         }

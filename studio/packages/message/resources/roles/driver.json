@@ -9,7 +9,19 @@
     "rules": [
       {
         "manifests": [
-          "/manifests/message",
+          "/manifests/message"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/messages/**"
+        ]
+      },
+      {
+        "manifests": [
           "/manifests/thread",
           "/manifests/agent"
         ],
@@ -18,7 +30,6 @@
           "list"
         ],
         "paths": [
-          "/messages/**",
           "/threads/**",
           "/agents/**"
         ]
