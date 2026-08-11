@@ -10,10 +10,9 @@ KAS 是一个面向 Resource 的应用控制面。你只需要描述系统中“
 KAS 负责保存这些对象、检查权限、记录关系，并把需要处理的变化交给对应的
 Driver。
 
-它适合构建 Agent 平台、自动化控制面、集成中心，以及任何需要让多个后台能力
-围绕共享对象持续协作的系统。仓库中的 `core` 分支提供通用内核；
-`master` 分支还包含一个可直接使用的
-[KAS Platform](https://github.com/kdxcxs/kas/blob/master/platform/README.zh-CN.md)。
+它适合构建 Agent 产品、自动化控制面、集成中心，以及任何需要让多个后台能力
+围绕共享对象持续协作的系统。仓库中的 `master` 分支只维护通用内核；完整产品
+分别维护在 `studio` 和 `forge` 分支中。
 
 ![KAS 控制面协调 Resource 与 Driver](docs/assets/core-control-plane.png)
 
@@ -40,9 +39,9 @@ curl http://127.0.0.1:3000/health
 ```
 
 PostgreSQL、配置项、Package 安装和 Driver 开发等内容见
-[Core 技术参考](docs/technical-reference.zh-CN.md)。如果需要完整产品与 Web
-界面，请使用
-[KAS Platform](https://github.com/kdxcxs/kas/blob/master/platform/README.zh-CN.md)。
+[Core 技术参考](docs/technical-reference.zh-CN.md)。完整产品与 Web 界面请参阅
+[KAS Studio](https://github.com/kdxcxs/kas/blob/studio/studio/README.zh-CN.md)
+和 [KAS Forge](https://github.com/kdxcxs/kas/blob/forge/forge/README.zh-CN.md)。
 
 ## 为什么是 KAS
 
@@ -146,23 +145,24 @@ Driver。一个功能由此能够自带自己的数据定义、关系、权限�
 > （4）Driver 提交 mutation 并明确完成；（5）KAS 推进 status，直至其与
 > 期望文档一致。
 
-KAS Core 关注的是这条通用闭环，不内置具体业务。完整的 Agent、Thread、
-Message、File、Skill、Approval 和可插拔前端由 KAS Platform 以普通 Package
-提供。
+KAS Core 关注的是这条通用闭环，不内置具体业务。具体产品通过独立 Package
+在 Core 之上提供自己的领域 Resource、Driver、权限和用户界面。
 
-## Core 与 Platform
+## Core 与产品
 
 | 项目 | 作用 |
 | --- | --- |
 | **KAS Core** | Resource API、Manifest、Package、RBAC、Link、Driver Runtime、SQLite/PostgreSQL 存储 |
-| **KAS Platform** | 基于 Core 构建的开箱即用多 Agent 协作产品和 Web UI |
+| **KAS Studio** | 在 `studio` 分支维护的人与 Agent 协作工作空间 |
+| **KAS Forge** | 在 `forge` 分支维护的 Agent-native 工程控制面 |
 
-核心代码位于根目录的 `crates/`、`apps/`、`builtins/`；Platform 的产品能力
-独立维护在 `platform/`，因此 Core 可以持续合并进完整平台，而不与业务包互相
-缠绕。
+Core 位于 `master` 分支根目录的 `crates/`、`apps/` 和 `builtins/`。Studio
+专属代码位于 `studio/`，Forge 专属代码位于 `forge/`。两个产品分支只从
+`master` 合并 Core，不向 Core 回流产品代码，也不互相合并。
 
 ## 继续阅读
 
 - [文档索引](docs/README.zh-CN.md)
 - [Core 技术参考](docs/technical-reference.zh-CN.md)
-- [KAS Platform 介绍](https://github.com/kdxcxs/kas/blob/master/platform/README.zh-CN.md)
+- [KAS Studio](https://github.com/kdxcxs/kas/blob/studio/studio/README.zh-CN.md)
+- [KAS Forge](https://github.com/kdxcxs/kas/blob/forge/forge/README.zh-CN.md)

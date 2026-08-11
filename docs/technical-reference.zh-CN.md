@@ -224,33 +224,18 @@ apps/kas-test-driver 可执行的端到端测试 Driver
 
 ## 分支与目录职责
 
-`core` 是 KAS 核心分支，只维护通用平台能力和可复用实现。本 README 中列出的
-根目录、`crates/` 和 `apps/` 均由 `core` 维护，不包含任何预置业务 Manifest、
-业务 Driver 或完整产品功能。
+`master` 是 KAS Core 的唯一维护分支，只包含通用控制面和可复用实现。根目录、
+`crates/`、`apps/`、`builtins/`、测试、benchmark 和核心文档均由 `master`
+维护，不包含任何完整产品目录。
 
-`master` 是 batteries-included 的完整平台分支。它以 `core` 为基础，但所有
-仅属于完整平台的内容必须放在独立的 `platform/` 目录：
+`studio` 分支在 `master` 之上只增加 `studio/`，用于维护人与 Agent 协作的
+KAS Studio。`forge` 分支在 `master` 之上只增加 `forge/`，用于维护
+Agent-native 工程控制面 KAS Forge。产品目录使用独立 workspace，并通过
+path dependency 引用根目录的 Core crate。
 
-```text
-platform/
-├── Cargo.toml
-├── Cargo.lock
-├── manifests/
-├── drivers/
-├── apps/
-├── deploy/
-└── README.md
-```
-
-`platform/` 使用独立 Rust workspace，并通过 path dependency 引用
-`../crates/...` 中的核心 crate；不得把平台专属 package 加入根
-`Cargo.toml` workspace。平台专属文档、配置、部署文件和测试也应保留在
-`platform/` 内。
-
-核心改动只在 `core` 上完成，再由 `core` 合并到 `master`。`master` 不直接
-修改或复制核心实现；如果完整平台发现核心缺陷或需要通用能力，应先在
-`core` 修复或实现。`core` 不得依赖 `platform/`。通过这一单向依赖和目录
-所有权约定，持续降低 `core → master` 合并时的冲突。
+核心改动只在 `master` 上完成，再分别合并到 `studio` 和 `forge`。产品分支
+不得直接修改或复制 Core；发现通用缺陷时必须先在 `master` 修复。两个产品
+分支不互相合并，从而保持 `master → studio` 与 `master → forge` 两条单向依赖。
 
 安装仓库自带的 pre-push 检查：
 
@@ -258,12 +243,10 @@ platform/
 scripts/install-git-hooks.sh
 ```
 
-pre-commit 检查禁止 `core` 提交 `platform/**`，也禁止 `master` 直接提交
-`platform/**` 之外的路径；正式 merge `core` 到 `master` 时允许核心文件随
-merge 进入。pre-push 进一步要求 `master` 已合并最新 `core` 历史、两个分支
-在 `platform/**` 之外的文件树完全相同，并检查策略启用后的 master-only
-提交只能修改 `platform/**`。因此核心改动需要先提交到 `core`，在本地合并进
-`master` 后再一起 push。
+pre-commit 检查禁止 `master` 提交 `studio/**`、`forge/**` 或旧的
+`platform/**`，也禁止产品分支直接提交其产品目录之外的路径。正式 merge
+`master` 时允许 Core 文件随 merge 进入。pre-push 进一步要求每个产品分支
+已经包含最新 `master`，并且产品目录以外的文件树与 `master` 完全相同。
 
 启动顺序：
 
