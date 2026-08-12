@@ -52,12 +52,13 @@ Package。Package Request 服务会在进入审批队列前校验归档，通过
 
 ## 与 KAS Core 的关系
 
-`master` 分支只包含 KAS Core；`forge` 分支在其上增加本目录，并持续从
-`master` 合并 Core 更新。Forge 不直接修改 Core，也不与 `studio` 产品分支
+`core` 分支只包含 KAS Core；`forge` 分支在其上增加本目录，并持续从
+`core` 合并 Core 更新。Forge 不直接修改 Core，也不与 `studio` 产品分支
 互相合并。
 
-Forge 需要的通用能力必须先在 `master` 实现，再合并到本分支；工程产品专属
-的集成和业务行为则始终留在 `forge/`。
+Forge 需要的通用能力必须先在 `core` 实现，再合并到本分支；工程产品专属
+的集成和业务行为则始终留在 `forge/`。`master` 集成分支会将 Forge 与 Core、
+Studio 聚合成完整仓库。
 
 ## 下一阶段范围
 
