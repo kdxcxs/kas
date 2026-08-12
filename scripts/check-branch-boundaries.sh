@@ -67,10 +67,24 @@ check_product() {
     return 1
   fi
 
+  # Product ownership predates this policy. Studio in particular was migrated
+  # from the retired platform/** tree, so audit product-only commits from the
+  # first owned-path commit forward and allow that historical path during the
+  # migration. The final-tree checks above still reject platform/** today.
+  local policy_start
+  policy_start="$(git rev-list --reverse "$product_ref" -- "$owned_root/" | head -n 1)"
+  if [[ -z "$policy_start" ]]; then
+    echo "$product_name does not contain its owned $owned_root/** directory" >&2
+    return 1
+  fi
+
   local invalid_commits=0
   local commit
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
+    if ! git merge-base --is-ancestor "$policy_start" "$commit"; then
+      continue
+    fi
     read -r -a commit_and_parents <<<"$(git rev-list --parents -n 1 "$commit")"
     local parent_count=$((${#commit_and_parents[@]} - 1))
 
@@ -101,6 +115,7 @@ check_product() {
       [[ -n "$path" ]] || continue
       case "$path" in
         "$owned_root"/*) ;;
+        platform/*) [[ "$owned_root" == studio ]] || invalid_paths+="${path}"$'\n' ;;
         *) invalid_paths+="${path}"$'\n' ;;
       esac
     done <<<"$changed_paths"
