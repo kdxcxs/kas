@@ -407,15 +407,20 @@ the database is not ready.
 
 ## Repository boundaries
 
-The `master` branch owns KAS Core: the generic files in the repository root,
+The `core` branch owns KAS Core: the generic files in the repository root,
 including `crates/`, `apps/`, `builtins/`, tests, benchmarks, and these
 documents. It never contains product directories.
 
 The `studio` branch adds KAS Studio exclusively under `studio/`. The `forge`
 branch adds KAS Forge exclusively under `forge/`. Both products depend on Core;
-Core never depends on either product. Core changes are committed on `master`
-and then merged independently into both product branches. Product branches do
-not merge into each other.
+Core never depends on either product. Core changes are committed on `core` and
+then merged independently into both product branches. Product branches do not
+merge into each other.
+
+The `master` branch is the complete integration branch. It receives merges
+from `core`, `studio`, and `forge`, but no changes originate there. Therefore a
+normal checkout contains Core and both products without making the product
+directories part of Core.
 
 Install the repository hooks with:
 
@@ -423,9 +428,11 @@ Install the repository hooks with:
 scripts/install-git-hooks.sh
 ```
 
-The hooks reject product files on `master`, reject direct product-branch edits
+The hooks reject product files on `core`, reject direct product-branch edits
 outside that product's directory, and verify that each product branch contains
-the latest `master` history with an identical non-product tree.
+the latest `core` history with an identical non-product tree. They also reject
+direct commits on `master` and verify that it is an exact aggregate of the
+latest `core`, `studio`, and `forge` branches.
 
 ## Validation
 

@@ -13,9 +13,9 @@ and sends each relevant change to the Driver responsible for handling it.
 
 It is a foundation for Agent products, automation control planes, integration
 hubs, and other systems where multiple background capabilities collaborate
-around shared objects. The `master` branch contains only this generic kernel.
-Product distributions are maintained independently on the `studio` and
-`forge` branches.
+around shared objects. The `core` branch contains only this generic kernel.
+KAS Studio and KAS Forge are developed on the `studio` and `forge` branches;
+`master` aggregates all three into the complete repository.
 
 ![KAS control plane coordinating Resources and Drivers](docs/assets/core-control-plane.png)
 
@@ -182,10 +182,12 @@ interfaces on top as independent Packages.
 | **KAS Studio** | A people-and-Agent collaboration workspace maintained on the `studio` branch |
 | **KAS Forge** | An Agent-native engineering control plane maintained on the `forge` branch |
 
-Core lives in the root `crates/`, `apps/`, and `builtins/` directories on
-`master`. Studio-specific code stays under `studio/`; Forge-specific code stays
-under `forge/`. Both product branches merge from `master`, while product code
-never flows back into Core or sideways into the other product.
+Core lives in the root `crates/`, `apps/`, and `builtins/` directories and is
+developed on `core`. Studio-specific code stays under `studio/`; Forge-specific
+code stays under `forge/`. Both product branches merge from `core`, while
+product code never flows back into Core or sideways into the other product.
+The `master` branch is the integration branch: it merges `core`, `studio`, and
+`forge` so a normal checkout contains the complete distribution.
 
 ## Learn more
 
