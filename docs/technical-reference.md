@@ -137,7 +137,11 @@ Installation resolves those patterns to
 `/packages/acme/agent/resources/groups/*`. Non-platform Packages cannot declare
 an absolute Manifest path pattern or escape their Package Root. Trusted
 `/packages/kas/**` Packages are the only exception because their platform
-Manifests define cross-Package types such as Action, Link, Role, and Run.
+Manifests define cross-Package types such as Action, Link, Role, and Run. Run
+instances are a narrower exception: KAS alone creates them below
+`/packages/kas/run/runs/{subject-key}/{action-key}/{request-id}` through
+`POST /runs`. The opaque keys are deterministic partitions, never identities
+used to authorize or reconstruct the Subject and Action.
 
 Creation must satisfy the Package boundary, the Manifest path patterns, and
 the caller's RBAC path rules. A Package Root must already exist before generic
@@ -148,6 +152,48 @@ Path hierarchy establishes identity, ownership, and authorization scope; it
 is not an implicit Link. Prefix nesting does not synthesize relationships or
 make ordinary deletion cascade. Package-only `./...` notation is resolved and
 validated before installation and is never persisted or exposed by the API.
+
+## Actions and Runs
+
+An Action is a Package-owned definition at
+`/packages/{publisher}/{package}/actions/{name}`. Its input and output JSON
+Schemas define one operation. A caller invokes it with:
+
+```http
+POST /runs
+Authorization: Bearer <credential>
+Content-Type: application/json
+
+{
+  "request_id": "df237cbd-d13d-48ae-8743-b59588d76f1e",
+  "resource": "/packages/forge/agent/agents/preview",
+  "action": "/packages/forge/agent/actions/run",
+  "input": {"prompt": "Inspect the repository"}
+}
+```
+
+The API derives the Subject exclusively from the credential and creates:
+
+```text
+/packages/kas/run/runs/{subject-key}/{action-key}/{request-id}
+```
+
+`subject-key` and `action-key` are lowercase UUIDv5 values derived by KAS. They
+keep the hierarchy compact and deterministic but carry no authorization
+meaning: KAS never parses them back into paths. The Run `spec.subject`,
+`spec.resource`, `spec.action`, and protected `Run → Subject`, `Run → Resource`,
+`Run → Action`, and `Run → Driver` Links are authoritative.
+
+Creating a Run requires `invoke` on the target Resource and `use` on the Action.
+The client cannot choose the Run path or Subject, and neither clients nor
+Drivers may create a Run through generic Resource mutations. Run Resources are
+protected after creation; only the assigned Driver generation can complete
+them through the Driver protocol.
+
+Schema migration 20 removes pre-v2 Run records because they did not persist the
+authenticated Subject; retaining or guessing their ownership would create
+false audit data. It also replaces global `request_id` uniqueness with the
+Subject/Action/Request identity encoded by the server-derived path.
 
 ## Packages
 

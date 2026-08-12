@@ -605,31 +605,38 @@ echo "$INVALID_LINK" | jq -e '
 }
 
 REQUEST_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-RUN_PATH="$RESOURCE_PATH/runs/$REQUEST_ID"
 RUN_PAYLOAD="$(
   jq -n \
-    --arg run "$RUN_PATH" \
     --arg request_id "$REQUEST_ID" \
     --arg resource "$RESOURCE_PATH" '{
-      path: $run,
-      metadata: {
-        manifest: "/packages/kas/run/manifest",
-        name: $request_id
-      },
-      spec: {
-        request_id: $request_id,
-        resource: $resource,
-        action: "/packages/test/echo/actions/echo",
-        input: {message: "hello from e2e"}
-      }
+      request_id: $request_id,
+      resource: $resource,
+      action: "/packages/test/echo/actions/echo",
+      input: {message: "hello from e2e"}
     }'
 )"
-curl --fail --silent \
+RUN_CREATED="$(curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$RUN_PAYLOAD" \
-  "$API/resources" |
-  jq -e '.status.metadata.state == "queued"' >/dev/null
+  "$API/runs")"
+RUN_PATH="$(jq -r '.path' <<<"$RUN_CREATED")"
+jq -e --arg request "$REQUEST_ID" '
+  .path | startswith("/packages/kas/run/runs/")
+' <<<"$RUN_CREATED" >/dev/null
+jq -e --arg request "$REQUEST_ID" '
+  .metadata["[kas]"].protected == true
+  and .spec.request_id == $request
+  and .spec.subject == "/packages/kas/user/users/e2e-admin"
+  and .status.metadata.state == "queued"
+' <<<"$RUN_CREATED" >/dev/null
+
+FORGED_RUN_STATUS="$(curl --silent --output "$E2E_DIR/forged-run.json" --write-out '%{http_code}' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg path "$RESOURCE_PATH/runs/$REQUEST_ID" --arg request "$REQUEST_ID" --arg resource "$RESOURCE_PATH" '{path:$path,metadata:{manifest:"/packages/kas/run/manifest",name:$request},spec:{request_id:$request,subject:"/packages/kas/user/users/e2e-admin",resource:$resource,action:"/packages/test/echo/actions/echo",input:{message:"forged"}}}')" \
+  "$API/resources")"
+[[ "$FORGED_RUN_STATUS" == "400" ]]
 
 RUN=""
 for _ in $(seq 1 "$POLL_ATTEMPTS"); do
@@ -770,30 +777,21 @@ curl --fail --silent --get \
   ' >/dev/null
 
 UPDATED_REQUEST_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-UPDATED_RUN_PATH="$RESOURCE_PATH/runs/$UPDATED_REQUEST_ID"
-curl --fail --silent \
+UPDATED_RUN="$(curl --fail --silent \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$(
     jq -n \
-      --arg run "$UPDATED_RUN_PATH" \
       --arg request_id "$UPDATED_REQUEST_ID" \
       --arg resource "$RESOURCE_PATH" '{
-        path: $run,
-        metadata: {
-          manifest: "/packages/kas/run/manifest",
-          name: $request_id
-        },
-        spec: {
-          request_id: $request_id,
-          resource: $resource,
-          action: "/packages/test/echo/actions/echo",
-          input: {message: "hello after package update"}
-        }
+        request_id: $request_id,
+        resource: $resource,
+        action: "/packages/test/echo/actions/echo",
+        input: {message: "hello after package update"}
       }'
   )" \
-  "$API/resources" >/dev/null
-UPDATED_RUN=""
+  "$API/runs")"
+UPDATED_RUN_PATH="$(jq -r '.path' <<<"$UPDATED_RUN")"
 for _ in $(seq 1 "$POLL_ATTEMPTS"); do
   UPDATED_RUN="$(
     curl --fail --silent --get \
@@ -819,7 +817,7 @@ curl --fail --silent --get \
   --data-urlencode "manifest=/packages/kas/link/manifest" \
   "$API/resources" |
   jq -e --arg run "$RUN_PATH" '
-    [.[] | select(.spec.source == $run)] | length == 3
+    [.[] | select(.spec.source == $run)] | length == 4
   ' >/dev/null
 
 RESOURCE_REVISION="$(
@@ -919,14 +917,33 @@ curl --fail --silent \
       path: "/packages/kas/user/users/e2e-viewer",
       manifest: "/packages/kas/user/manifest"
     }
-    and .rules == [{
+    and (.rules | length) == 2
+    and (.rules | any(. == {
       manifests: ["/packages/test/echo/manifest"],
       verbs: ["get", "download"],
       paths: ["/packages/test/echo/resources/**"]
-    }]
+    }))
+    and (.rules | any(
+      .manifests == ["/packages/kas/run/manifest"]
+      and .verbs == ["get", "list"]
+      and (.paths[0] | test("^/packages/kas/run/runs/[0-9a-f]{32}/\\*\\*$"))
+    ))
     and .driver_path == null
     and .driver_generation == null
   ' >/dev/null
+
+VIEWER_RUN_STATUS="$(curl --silent --output "$E2E_DIR/viewer-run-denied.json" --write-out '%{http_code}' \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg request_id "$(uuidgen | tr '[:upper:]' '[:lower:]')" --arg resource "$RESOURCE_PATH" '{request_id:$request_id,resource:$resource,action:"/packages/test/echo/actions/echo",input:{message:"denied"}}')" \
+  "$API/runs")"
+[[ "$VIEWER_RUN_STATUS" == "403" ]]
+
+curl --fail --silent --get \
+  -H "Authorization: Bearer $VIEWER_TOKEN" \
+  --data-urlencode "manifest=/packages/kas/run/manifest" \
+  "$API/resources" |
+  jq -e 'length == 0' >/dev/null
 
 curl --fail --silent \
   -H "Authorization: Bearer $VIEWER_TOKEN" \

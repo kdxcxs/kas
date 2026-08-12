@@ -189,7 +189,7 @@ Driver、Link、Event 或 RBAC 暴露对象 UUID。例如：
 /packages/acme/computer
 /packages/acme/computer/manifest
 /packages/acme/computer/resources/computer-01
-/packages/acme/computer/resources/computer-01/runs/{request-id}
+/packages/kas/run/runs/{subject-key}/{action-key}/{request-id}
 /packages/acme/computer/service-accounts/driver
 /packages/acme/computer/roles/reader
 ```
@@ -219,6 +219,25 @@ percent-encoded 别名、空段、`.`、`..`、重复 `/` 和尾部 `/`。
 创建 Resource 时必须同时满足 Package 边界、Manifest `paths` 和调用者的
 RBAC path rule；执行通用 CRUD 前，对应 Package Root 必须已经安装。包含
 `credentials` 段的子树只能通过 Credential API 写入。
+
+Run 是更严格的平台例外：客户端只能通过 `POST /runs` 提交 `request_id`、
+目标 Resource、Action 和 input，不能传入 Run Path 或 Subject。KAS 从当前
+Credential 得到 Subject，并创建：
+
+```text
+/packages/kas/run/runs/{subject-key}/{action-key}/{request-id}
+```
+
+`subject-key` 和 `action-key` 是 KAS 生成的小写 UUIDv5 分区键，只用于得到
+紧凑、稳定的层级；鉴权不会反向解析这些 key。权威关系保存在 Run 的
+`spec.subject`、`spec.resource`、`spec.action`，以及受保护的 Run → Subject、
+Resource、Action、Driver Link 中。创建 Run 需要对目标拥有 `invoke`，并对
+Action 拥有 `use` 权限；通用 Resource API 和 Driver mutation 均不能伪造 Run。
+
+Schema migration 20 会清除 v2 之前没有记录 authenticated Subject 的 Run；
+这些历史记录无法可靠判断归属，猜测所有者反而会制造错误审计数据。migration
+同时取消全局 `request_id` 唯一，改用服务器派生 Path 所表达的
+Subject/Action/Request 组合身份。
 
 Path 层级表示身份、归属和权限边界，不会隐式创建 Link，也不会让普通删除
 自动级联。Package 中的 `./...` 仅是安装前的相对记法，解析并校验后才会
@@ -695,8 +714,8 @@ tests/e2e.sh
   → 验证新 Driver 回扫并消费注册前已有的 User Resource
   → 注册新 Manifest，验证已有通配符 watch 消费其初始化 Resource
   → 使用通用 API 创建 Link，并由内置 Relationship Driver 校验为 available
-  → 使用通用 API 创建 Run Resource
-  → 验证 Run 到 Resource/Action/Driver 的系统 Link
+  → 使用 POST /runs 创建由 KAS 派生 Path 与 Subject 的受保护 Run Resource
+  → 验证 Run 到 Subject/Resource/Action/Driver 的系统 Link
   → Driver 执行 echo 并完成 Run
   → 更新同一 Package Resource 的 digest 与 revision，验证业务 Resource 保留并 reconcile
   → 验证 running Driver generation 递增并由新进程再次完成 Run

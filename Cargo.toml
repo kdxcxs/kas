@@ -42,4 +42,4 @@ tokio-tungstenite = "0.29"
 tar = "0.4"
 url = "2"
 futures-util = "0.3"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
