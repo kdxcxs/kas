@@ -1,0 +1,41 @@
+{
+  "path": "./actions/message",
+  "metadata": {
+    "manifest": "/packages/kas/action/manifest",
+    "name": "message"
+  },
+  "spec": {
+    "description": "Send a stored user Message to this Agent and verify the assistant reply it publishes through KAS.",
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "message_path",
+        "thread_path"
+      ],
+      "properties": {
+        "message_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "thread_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "reply_message_path"
+      ],
+      "properties": {
+        "reply_message_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "telegram-driver"
+  },
+  "spec": {
+    "description": "Synchronize Telegram forum topics and messages with KAS.",
+    "rules": [
+      {
+        "manifests": [
+          "/packages/studio/telegram/manifest",
+          "/packages/studio/thread/manifest",
+          "/packages/studio/message/manifest",
+          "/packages/studio/agent/manifest",
+          "/packages/studio/approval/manifest",
+          "/packages/kas/user/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update"
+        ],
+        "paths": [
+          "/packages/studio/telegram/integrations/**",
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**",
+          "/packages/studio/agent/agents/**",
+          "/packages/kas/user/users/**",
+          "/packages/studio/telegram/users/**",
+          "/packages/studio/approval/approvals/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/file/manifest"
+        ],
+        "verbs": [
+          "get",
+          "download"
+        ],
+        "paths": [
+          "/packages/studio/file/files/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/telegram/integrations/**",
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**",
+          "/packages/kas/user/users/**",
+          "/packages/studio/telegram/users/**",
+          "/packages/studio/approval/approvals/**"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "message-driver"
+  },
+  "spec": {
+    "description": "Reconcile Messages and fan out mentions into Agent Runs.",
+    "rules": [
+      {
+        "manifests": [
+          "/packages/studio/message/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/packages/studio/message/messages/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/thread/manifest",
+          "/packages/studio/agent/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/agent/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/message/messages/**",
+          "/packages/studio/thread/threads/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/agent/manifest"
+        ],
+        "verbs": [
+          "invoke"
+        ],
+        "paths": [
+          "/packages/studio/agent/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/action/manifest"
+        ],
+        "verbs": [
+          "use"
+        ],
+        "paths": [
+          "/packages/studio/agent/actions/message"
+        ]
+      }
+    ]
+  }
+}

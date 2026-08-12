@@ -1,0 +1,72 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "skill-driver"
+  },
+  "spec": {
+    "description": "Validate Skill bundles and manage their stable Resource, File, and Link lifecycle.",
+    "rules": [
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/skill/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/file/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "upload",
+          "download",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/file/files/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/skill/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest",
+          "/packages/studio/agent/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/kas/user/users/**",
+          "/packages/studio/agent/agents/**"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "path": "./relations/participants",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "participants"
+  },
+  "spec": {
+    "inverse_name": "participates-in",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/thread/threads/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

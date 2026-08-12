@@ -1,0 +1,25 @@
+{
+  "path": "/packages/studio/thread/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
+  "name": "thread",
+  "version": 1,
+  "description": "A conversation containing Messages and participants.",
+  "paths": ["./threads/*"],
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "title"
+    ],
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  }
+}

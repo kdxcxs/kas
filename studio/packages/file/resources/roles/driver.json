@@ -1,0 +1,41 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "file-driver"
+  },
+  "spec": {
+    "description": "Store File descriptors, ownership Links, and reconcile content lifecycle.",
+    "rules": [
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/file/files/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/file/files/**"
+        ]
+      }
+    ]
+  }
+}

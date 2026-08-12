@@ -1,0 +1,31 @@
+{
+  "path": "./relations/authored-by",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "authored-by"
+  },
+  "spec": {
+    "inverse_name": "authored",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/message/messages/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

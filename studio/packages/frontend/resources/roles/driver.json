@@ -1,0 +1,63 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "frontend-driver"
+  },
+  "spec": {
+    "description": "Maintain installed FrontendPlugin bundles and serve the KAS web gateway.",
+    "rules": [
+      {
+        "manifests": [
+          "/packages/studio/proxy/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/packages/studio/proxy/proxies/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/frontend/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/packages/studio/frontend/plugins/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/file/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "download"
+        ],
+        "paths": [
+          "/packages/studio/file/files/packages/studio/frontend/plugins/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/frontend/plugins/**"
+        ]
+      }
+    ]
+  }
+}

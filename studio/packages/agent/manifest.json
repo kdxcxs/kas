@@ -1,0 +1,25 @@
+{
+  "path": "/packages/studio/agent/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
+  "name": "agent",
+  "version": 1,
+  "description": "A Codex CLI agent running in the current Driver environment.",
+  "paths": ["./agents/*"],
+  "states": [],
+  "default_state": "available",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "working_directory"
+    ],
+    "properties": {
+      "working_directory": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  }
+}

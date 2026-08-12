@@ -1,0 +1,167 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "agent-driver"
+  },
+  "spec": {
+    "description": "Reconcile Agent identities, run Codex Sessions, and verify Agent-published replies.",
+    "rules": [
+      {
+        "manifests": [
+          "/packages/studio/agent/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "/packages/studio/agent/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/thread/manifest",
+          "/packages/studio/message/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/session/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update"
+        ],
+        "paths": [
+          "/packages/studio/session/sessions/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/file/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "download"
+        ],
+        "paths": [
+          "/packages/studio/file/files/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/skill/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/skill/skills/**",
+          "/packages/kas/user/users/**/skills/**",
+          "/packages/studio/agent/agents/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/agent/agents/**",
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**",
+          "/packages/studio/session/sessions/**",
+          "/packages/studio/skill/skills/**",
+          "/packages/kas/user/users/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/approval/manifest",
+          "/packages/studio/approval-result/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/approval/approvals/packages/studio/agent/agents/**",
+          "/packages/studio/approval-result/results/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/approval/approvals/packages/studio/agent/agents/**",
+          "/packages/studio/approval-result/results/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/service-account/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/agent/service-accounts/*"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/role/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/agent/roles/*"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/role/manifest"
+        ],
+        "verbs": [
+          "bind"
+        ],
+        "paths": [
+          "/packages/studio/agent/roles/runtime",
+          "/packages/studio/agent/roles/*"
+        ]
+      }
+    ]
+  }
+}

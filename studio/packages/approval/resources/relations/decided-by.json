@@ -1,0 +1,25 @@
+{
+  "path": "./relations/decided-by",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "decided-by"
+  },
+  "spec": {
+    "inverse_name": "decisions",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/packages/kas/user/manifest"
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

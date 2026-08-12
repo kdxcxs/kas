@@ -1,0 +1,32 @@
+{
+  "path": "./driver",
+  "metadata": {
+    "manifest": "/packages/kas/driver/manifest",
+    "name": "skill-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-skill-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      "."
+    ],
+    "args": [],
+    "watches": [
+      {
+        "manifest": "/packages/kas/link/manifest",
+        "paths": [
+          "/packages/studio/skill/skills/**/links/bundle"
+        ]
+      }
+    ],
+    "restart": "on_failure"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}

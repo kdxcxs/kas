@@ -1,0 +1,56 @@
+{
+  "path": "./driver",
+  "metadata": {
+    "manifest": "/packages/kas/driver/manifest",
+    "name": "telegram-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-telegram-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      "."
+    ],
+    "args": [],
+    "watches": [
+      {
+        "manifest": "/packages/studio/message/manifest",
+        "paths": [
+          "/packages/studio/message/messages/**"
+        ]
+      },
+      {
+        "manifest": "/packages/studio/thread/manifest",
+        "paths": [
+          "/packages/studio/thread/threads/**"
+        ]
+      },
+      {
+        "manifest": "/packages/kas/link/manifest",
+        "paths": [
+          "/packages/studio/thread/threads/**/links/telegram/**",
+          "/packages/studio/message/messages/**/links/telegram/**",
+          "/packages/studio/message/messages/**/links/message-thread",
+          "/packages/studio/message/messages/**/links/attachments/*",
+          "/packages/kas/user/users/**/links/telegram/**",
+          "/packages/kas/user/users/**/links/telegram-bindings/**",
+          "/packages/studio/approval/approvals/**/links/telegram/**"
+        ]
+      },
+      {
+        "manifest": "/packages/studio/approval/manifest",
+        "paths": [
+          "/packages/studio/approval/approvals/**"
+        ]
+      }
+    ],
+    "restart": "on_failure"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}

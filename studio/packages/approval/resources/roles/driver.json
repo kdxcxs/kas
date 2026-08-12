@@ -1,0 +1,84 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "approval-driver"
+  },
+  "spec": {
+    "description": "Maintain immutable Approval requests, decisions, and audit Links.",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "get"
+        ],
+        "paths": [
+          "/**"
+        ]
+      },
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/approval/approvals/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/approval-result/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/approval-result/results/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "/packages/studio/approval/approvals/**",
+          "/packages/studio/approval-result/results/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest",
+          "/packages/studio/agent/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/kas/user/users/**",
+          "/packages/studio/agent/agents/**"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "path": "./relations/thread-topic",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "telegram-topic"
+  },
+  "spec": {
+    "inverse_name": "kas-thread",
+    "sources": [
+      {
+        "manifest": "/packages/studio/thread/manifest",
+        "paths": [
+          "/packages/studio/thread/threads/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/telegram/integrations/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "required": [
+        "managed",
+        "topic_name"
+      ],
+      "properties": {
+        "managed": {
+          "const": true
+        },
+        "topic_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "topic_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

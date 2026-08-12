@@ -1,0 +1,91 @@
+{
+  "path": "./roles/runtime",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "agent-runtime"
+  },
+  "spec": {
+    "description": "Allow an Agent to inspect Agents and exchange Messages through KAS.",
+    "rules": [
+      {
+        "manifests": [
+          "/packages/studio/agent/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/agent/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/thread/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/thread/threads/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/message/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create"
+        ],
+        "paths": [
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/file/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "download",
+          "upload"
+        ],
+        "paths": [
+          "/packages/studio/file/files/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/studio/skill/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/studio/skill/skills/**",
+          "/packages/kas/user/users/**/skills/**",
+          "/packages/studio/agent/agents/**/skills/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create"
+        ],
+        "paths": [
+          "/packages/studio/message/messages/**"
+        ]
+      }
+    ]
+  }
+}

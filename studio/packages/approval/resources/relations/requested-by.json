@@ -1,0 +1,28 @@
+{
+  "path": "./relations/requested-by",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "requested-by"
+  },
+  "spec": {
+    "inverse_name": "approval-requests",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
+        ]
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

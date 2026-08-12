@@ -1,0 +1,25 @@
+{
+  "path": "./driver",
+  "metadata": {
+    "manifest": "/packages/kas/driver/manifest",
+    "name": "file-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-file-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      "."
+    ],
+    "args": [],
+    "watches": [],
+    "restart": "on_failure"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "path": "./driver",
+  "metadata": {
+    "manifest": "/packages/kas/driver/manifest",
+    "name": "message-driver",
+    "state": "running"
+  },
+  "spec": {
+    "runtime": "process",
+    "entrypoint": "./driver/bin/kas-message-driver",
+    "service_account": "./service-accounts/driver",
+    "manages": [
+      "."
+    ],
+    "args": [],
+    "watches": [
+      {
+        "manifest": "/packages/kas/link/manifest",
+        "paths": [
+          "/packages/studio/message/messages/**/links/message-thread",
+          "/packages/studio/message/messages/**/links/mentioned/*",
+          "/packages/studio/message/messages/**/links/attachments/*",
+          "/packages/studio/thread/threads/**/links/participants/*"
+        ]
+      }
+    ],
+    "restart": "on_failure"
+  },
+  "status": {
+    "metadata": {
+      "state": "stopped"
+    },
+    "spec": {}
+  }
+}

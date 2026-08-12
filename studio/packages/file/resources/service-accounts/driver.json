@@ -1,0 +1,8 @@
+{
+  "path": "./service-accounts/driver",
+  "metadata": {
+    "manifest": "/packages/kas/service-account/manifest",
+    "name": "file-driver"
+  },
+  "spec": {}
+}

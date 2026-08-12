@@ -1,0 +1,28 @@
+{
+  "path": "./relations/attached-to",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "attached-to"
+  },
+  "spec": {
+    "inverse_name": "attachments",
+    "sources": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/file/files/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "*"
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

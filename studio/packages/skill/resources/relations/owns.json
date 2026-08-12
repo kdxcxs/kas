@@ -1,0 +1,28 @@
+{
+  "path": "./relations/owns",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "owns"
+  },
+  "spec": {
+    "inverse_name": "owner",
+    "sources": [
+      {
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

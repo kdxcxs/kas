@@ -1,0 +1,31 @@
+{
+  "path": "./relations/agent-session",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "agent-session"
+  },
+  "spec": {
+    "inverse_name": "agent",
+    "sources": [
+      {
+        "manifest": "/packages/studio/agent/manifest",
+        "paths": [
+          "/packages/studio/agent/agents/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/session/sessions/**"
+        ]
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

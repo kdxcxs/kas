@@ -1,0 +1,31 @@
+{
+  "path": "./relations/thread-session",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "thread-session"
+  },
+  "spec": {
+    "inverse_name": "thread",
+    "sources": [
+      {
+        "manifest": "/packages/studio/thread/manifest",
+        "paths": [
+          "/packages/studio/thread/threads/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/session/sessions/**"
+        ]
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

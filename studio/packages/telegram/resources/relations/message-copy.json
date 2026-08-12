@@ -1,0 +1,64 @@
+{
+  "path": "./relations/message-copy",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "telegram-copy"
+  },
+  "spec": {
+    "inverse_name": "kas-message",
+    "sources": [
+      {
+        "manifest": "/packages/studio/message/manifest",
+        "paths": [
+          "/packages/studio/message/messages/**"
+        ]
+      }
+    ],
+    "targets": [
+      {
+        "manifest": ".",
+        "paths": [
+          "/packages/studio/telegram/integrations/**"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object",
+      "required": [
+        "direction",
+        "message_ids"
+      ],
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": [
+            "telegram-to-kas",
+            "kas-to-telegram"
+          ]
+        },
+        "message_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "attachment_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/packages/studio/file/files/"
+          },
+          "uniqueItems": true
+        },
+        "update_id": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

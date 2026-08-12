@@ -1,0 +1,25 @@
+{
+  "path": "./relations/result-of",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "result-of"
+  },
+  "spec": {
+    "inverse_name": "results",
+    "sources": [
+      {
+        "manifest": "/packages/studio/approval-result/manifest"
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "."
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

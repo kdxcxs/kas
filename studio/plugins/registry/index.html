@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KAS Registry</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        color: #eef4e8;
+        background: #0c100c;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; background: #0c100c; }
+      button, input { font: inherit; }
+      .shell {
+        display: grid;
+        grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+        width: 100%;
+        max-width: 100%;
+        min-height: 100vh;
+      }
+      .index {
+        border-right: 1px solid #263024;
+        background: #111610;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .index header, .detail header {
+        padding: 22px;
+        border-bottom: 1px solid #263024;
+      }
+      .eyebrow {
+        margin: 0 0 6px;
+        color: #a9e95c;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+      h1, h2 { margin: 0; font-family: Georgia, serif; }
+      h1 { font-size: 28px; }
+      h2 { font-size: 30px; overflow-wrap: anywhere; }
+      .filters { padding: 14px; display: grid; gap: 10px; }
+      input, select {
+        width: 100%;
+        border: 1px solid #303a2e;
+        border-radius: 9px;
+        padding: 10px 12px;
+        color: #eef4e8;
+        background: #171d16;
+      }
+      .list { min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 0 10px 18px; }
+      .resource {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 11px 12px;
+        color: inherit;
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+      }
+      .resource:hover, .resource.active {
+        border-color: #34432e;
+        background: #1a2218;
+      }
+      .resource strong, .resource code { display: block; }
+      .resource code, code {
+        color: #a8b2a2;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .resource span {
+        display: inline-block;
+        margin-top: 7px;
+        color: #b7d995;
+        font-size: 11px;
+      }
+      .detail { min-width: 0; overflow: auto; }
+      .detail header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+      .detail header > div, .content { min-width: 0; }
+      .refresh {
+        border: 1px solid #354330;
+        border-radius: 9px;
+        padding: 8px 12px;
+        color: #dce8d5;
+        background: #171d16;
+        cursor: pointer;
+      }
+      .content { padding: 22px; display: grid; gap: 18px; }
+      .overview {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .card, .section {
+        border: 1px solid #283226;
+        border-radius: 12px;
+        background: #121711;
+      }
+      .card { padding: 14px; }
+      .card small, .field small { display: block; color: #7f8c79; margin-bottom: 5px; }
+      .card strong { overflow-wrap: anywhere; }
+      .section { padding: 18px; }
+      .section h3 { margin: 0 0 14px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+      .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .field { padding: 12px; border-radius: 9px; background: #181e17; min-width: 0; }
+      .field pre {
+        margin: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        color: #dce7d7;
+        font-size: 12px;
+      }
+      .links { display: grid; gap: 8px; }
+      .link {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        padding: 11px;
+        border-radius: 9px;
+        background: #181e17;
+      }
+      .link span { color: #a9e95c; font-size: 11px; }
+      .empty { padding: 40px; color: #899383; text-align: center; }
+      .error { margin: 16px; padding: 12px; border: 1px solid #713c38; border-radius: 9px; color: #ffb9ad; }
+      @media (max-width: 800px) {
+        .shell { grid-template-columns: minmax(0, 1fr); }
+        .index { max-height: 45vh; border-right: 0; border-bottom: 1px solid #263024; }
+        .overview, .fields { grid-template-columns: 1fr 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="empty">Connecting to KAS Host…</div>
+    <script>
+      const HOST = "kas-frontend-host";
+      const PLUGIN = "kas-frontend-plugin";
+      const pending = new Map();
+      let sequence = 0;
+      let resources = [];
+      let selectedPath = "";
+      let query = "";
+      let manifest = "";
+
+      function request(method, params = {}) {
+        const id = `registry-${++sequence}`;
+        parent.postMessage({ source: PLUGIN, type: "request", id, method, params }, "*");
+        return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      }
+
+      addEventListener("message", (event) => {
+        if (event.data?.source !== HOST) return;
+        if (event.data.type === "response") {
+          const operation = pending.get(event.data.id);
+          if (!operation) return;
+          pending.delete(event.data.id);
+          event.data.error ? operation.reject(new Error(event.data.error)) : operation.resolve(event.data.result);
+        }
+        if (event.data.type === "context") load();
+      });
+
+      parent.postMessage({ source: PLUGIN, type: "ready" }, "*");
+
+      async function load() {
+        try {
+          resources = await request("resources.list");
+          if (!resources.some((resource) => resource.path === selectedPath)) {
+            selectedPath = resources[0]?.path || "";
+          }
+          render();
+        } catch (error) {
+          document.querySelector("#app").innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
+        }
+      }
+
+      function filtered() {
+        const needle = query.trim().toLowerCase();
+        return resources.filter((resource) =>
+          (!manifest || resource.manifest === manifest) &&
+          (!needle || resource.path.toLowerCase().includes(needle) || resource.name.toLowerCase().includes(needle))
+        );
+      }
+
+      function render() {
+        const manifests = [...new Set(resources.map((resource) => resource.manifest))].sort();
+        const selected = resources.find((resource) => resource.path === selectedPath);
+        document.querySelector("#app").className = "shell";
+        document.querySelector("#app").innerHTML = `
+          <aside class="index">
+            <header><p class="eyebrow">Frontend Plugin</p><h1>Object Registry</h1></header>
+            <div class="filters">
+              <input id="search" value="${escapeHtml(query)}" placeholder="Filter paths…" />
+              <select id="manifest">
+                <option value="">All manifests</option>
+                ${manifests.map((value) => `<option ${value === manifest ? "selected" : ""} value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}
+              </select>
+            </div>
+            <div class="list">
+              ${filtered().map((resource) => `
+                <button class="resource ${resource.path === selectedPath ? "active" : ""}" data-path="${escapeHtml(resource.path)}">
+                  <strong>${escapeHtml(resource.name || resource.path.split("/").at(-1))}</strong>
+                  <code>${escapeHtml(resource.path)}</code>
+                  <span>${escapeHtml(resource.status_state || resource.state)}</span>
+                </button>`).join("") || '<div class="empty">No matching Resources</div>'}
+            </div>
+          </aside>
+          <main class="detail">${selected ? detail(selected) : '<div class="empty">Select a Resource</div>'}</main>
+        `;
+        document.querySelector("#search").oninput = (event) => { query = event.target.value; render(); };
+        document.querySelector("#manifest").onchange = (event) => { manifest = event.target.value; render(); };
+        document.querySelectorAll("[data-path]").forEach((button) => {
+          button.onclick = () => { selectedPath = button.dataset.path; render(); };
+        });
+        const refresh = document.querySelector("#refresh");
+        if (refresh) refresh.onclick = load;
+      }
+
+      function detail(resource) {
+        const fields = Object.entries(resource.spec || {});
+        const links = resource.links || [];
+        return `
+          <header>
+            <div><p class="eyebrow">${escapeHtml(resource.manifest)}</p><h2>${escapeHtml(resource.name)}</h2><code>${escapeHtml(resource.path)}</code></div>
+            <button id="refresh" class="refresh">Refresh</button>
+          </header>
+          <div class="content">
+            <section class="overview">
+              ${card("Current state", resource.status_state)}
+              ${card("Desired state", resource.state)}
+              ${card("Revision", resource.revision)}
+              ${card("Links", links.length)}
+            </section>
+            <section class="section">
+              <h3>Configuration</h3>
+              <div class="fields">${fields.map(([key, value]) => field(key, value)).join("") || '<div class="empty">No configuration fields</div>'}</div>
+            </section>
+            <section class="section">
+              <h3>Relationships</h3>
+              <div class="links">${links.map((link) => `
+                <div class="link"><code>${escapeHtml(link.source.path)}</code><span>${escapeHtml(link.relation_path.split("/").at(-1))}</span><code>${escapeHtml(link.target.path)}</code></div>
+              `).join("") || '<div class="empty">No related Links</div>'}</div>
+            </section>
+          </div>`;
+      }
+
+      function card(label, value) {
+        return `<article class="card"><small>${escapeHtml(label)}</small><strong>${escapeHtml(String(value ?? "—"))}</strong></article>`;
+      }
+      function field(label, value) {
+        const display = typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
+        return `<article class="field"><small>${escapeHtml(label.replaceAll("_", " "))}</small><pre>${escapeHtml(display)}</pre></article>`;
+      }
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+        })[character]);
+      }
+    </script>
+  </body>
+</html>

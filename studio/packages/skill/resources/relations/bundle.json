@@ -1,0 +1,25 @@
+{
+  "path": "./relations/bundle",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "bundle"
+  },
+  "spec": {
+    "inverse_name": "skill",
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": "/packages/studio/file/manifest"
+      }
+    ],
+    "on_source_delete": "cascade",
+    "metadata_schema": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}
