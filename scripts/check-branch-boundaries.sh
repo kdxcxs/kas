@@ -15,57 +15,55 @@ resolve_ref() {
 }
 
 CURRENT_NAME="${1:-$(git branch --show-current)}"
-BASE_NAME="${2:-master}"
-STUDIO_NAME="${3:-studio}"
-FORGE_NAME="${4:-forge}"
-BASE_REF="$(resolve_ref "$BASE_NAME")"
+CORE_NAME="${2:-core}"
+MASTER_NAME="${3:-master}"
+STUDIO_NAME="${4:-studio}"
+FORGE_NAME="${5:-forge}"
 
-for product_root in studio forge platform; do
-  PRODUCT_FILES="$(git ls-tree -r --name-only "$BASE_REF" -- "$product_root/")"
-  if [[ -n "$PRODUCT_FILES" ]]; then
-    echo "$BASE_NAME must not contain $product_root/** files:" >&2
-    echo "$PRODUCT_FILES" >&2
-    exit 1
-  fi
-done
+CORE_REF="$(resolve_ref "$CORE_NAME")"
+MASTER_REF="$(resolve_ref "$MASTER_NAME")"
+STUDIO_REF="$(resolve_ref "$STUDIO_NAME")"
+FORGE_REF="$(resolve_ref "$FORGE_NAME")"
+
+check_core() {
+  local product_root
+  for product_root in studio forge platform; do
+    local files
+    files="$(git ls-tree -r --name-only "$CORE_REF" -- "$product_root/")"
+    if [[ -n "$files" ]]; then
+      echo "$CORE_NAME must not contain $product_root/** files:" >&2
+      echo "$files" >&2
+      return 1
+    fi
+  done
+}
 
 check_product() {
   local product_name="$1"
-  local owned_root="$2"
-  local legacy_root="${3:-}"
-  local product_ref
-  product_ref="$(resolve_ref "$product_name")"
+  local product_ref="$2"
+  local owned_root="$3"
+  local sibling_root="$4"
 
-  if ! git merge-base --is-ancestor "$BASE_REF" "$product_ref"; then
-    echo "$product_name does not contain the latest $BASE_NAME history" >&2
-    echo "merge $BASE_NAME into $product_name before pushing either branch" >&2
+  if ! git merge-base --is-ancestor "$CORE_REF" "$product_ref"; then
+    echo "$product_name does not contain the latest $CORE_NAME history" >&2
+    echo "merge $CORE_NAME into $product_name before pushing $product_name" >&2
     return 1
   fi
 
-  local excludes=(":(exclude)$owned_root/**")
-  if [[ -n "$legacy_root" ]]; then
-    excludes+=(":(exclude)$legacy_root/**")
-  fi
-  if ! git diff --quiet "$BASE_REF" "$product_ref" -- . "${excludes[@]}"; then
-    echo "$product_name contains changes outside $owned_root/** that are absent from $BASE_NAME:" >&2
-    git diff --name-status "$BASE_REF" "$product_ref" -- . "${excludes[@]}" >&2
-    return 1
-  fi
-
-  if [[ -n "$legacy_root" ]]; then
-    local legacy_files
-    legacy_files="$(git ls-tree -r --name-only "$product_ref" -- "$legacy_root/")"
-    if [[ -n "$legacy_files" ]]; then
-      echo "$product_name still contains retired $legacy_root/** files:" >&2
-      echo "$legacy_files" >&2
+  local forbidden_root
+  for forbidden_root in "$sibling_root" platform; do
+    local forbidden_files
+    forbidden_files="$(git ls-tree -r --name-only "$product_ref" -- "$forbidden_root/")"
+    if [[ -n "$forbidden_files" ]]; then
+      echo "$product_name must not contain $forbidden_root/** files:" >&2
+      echo "$forbidden_files" >&2
       return 1
     fi
-  fi
+  done
 
-  local policy_start
-  policy_start="$(git rev-list --reverse "$product_ref" -- "$owned_root/" | head -n 1)"
-  if [[ -z "$policy_start" ]]; then
-    echo "$product_name does not contain its owned $owned_root/** directory" >&2
+  if ! git diff --quiet "$CORE_REF" "$product_ref" -- . ":(exclude)$owned_root/**"; then
+    echo "$product_name contains changes outside $owned_root/** that are absent from $CORE_NAME:" >&2
+    git diff --name-status "$CORE_REF" "$product_ref" -- . ":(exclude)$owned_root/**" >&2
     return 1
   fi
 
@@ -73,24 +71,25 @@ check_product() {
   local commit
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
-    if ! git merge-base --is-ancestor "$policy_start" "$commit"; then
-      continue
-    fi
     read -r -a commit_and_parents <<<"$(git rev-list --parents -n 1 "$commit")"
     local parent_count=$((${#commit_and_parents[@]} - 1))
-    local changed_paths
+
     if ((parent_count > 1)); then
-      local base_merge=0
+      local core_merge=0
       local parent
       for parent in "${commit_and_parents[@]:2}"; do
-        if git merge-base --is-ancestor "$parent" "$BASE_REF"; then
-          base_merge=1
+        if git merge-base --is-ancestor "$parent" "$CORE_REF"; then
+          core_merge=1
           break
         fi
       done
-      if ((base_merge)); then
+      if ((core_merge)); then
         continue
       fi
+    fi
+
+    local changed_paths
+    if ((parent_count > 0)); then
       changed_paths="$(git diff --name-only "${commit_and_parents[1]}" "$commit")"
     else
       changed_paths="$(git diff-tree --root --no-commit-id --name-only -r "$commit")"
@@ -102,7 +101,6 @@ check_product() {
       [[ -n "$path" ]] || continue
       case "$path" in
         "$owned_root"/*) ;;
-        "$legacy_root"/*) [[ -n "$legacy_root" ]] || invalid_paths+="${path}"$'\n' ;;
         *) invalid_paths+="${path}"$'\n' ;;
       esac
     done <<<"$changed_paths"
@@ -111,25 +109,76 @@ check_product() {
       echo "$invalid_paths" >&2
       invalid_commits=1
     fi
-  done < <(git rev-list "$product_ref" --not "$BASE_REF")
+  done < <(git rev-list "$product_ref" --not "$CORE_REF")
 
   if ((invalid_commits)); then
-    echo "make Core changes on $BASE_NAME, then merge $BASE_NAME into $product_name" >&2
+    echo "make Core changes on $CORE_NAME, then merge $CORE_NAME into $product_name" >&2
     return 1
   fi
 }
 
+check_master() {
+  local branch_name
+  local branch_ref
+  for branch_name in "$CORE_NAME" "$STUDIO_NAME" "$FORGE_NAME"; do
+    branch_ref="$(resolve_ref "$branch_name")"
+    if ! git merge-base --is-ancestor "$branch_ref" "$MASTER_REF"; then
+      echo "$MASTER_NAME does not contain the latest $branch_name history" >&2
+      echo "merge $branch_name into $MASTER_NAME before pushing $MASTER_NAME" >&2
+      return 1
+    fi
+  done
+
+  if ! git diff --quiet "$CORE_REF" "$MASTER_REF" -- . \
+    ':(exclude)studio/**' ':(exclude)forge/**'; then
+    echo "$MASTER_NAME has Core changes that are absent from $CORE_NAME:" >&2
+    git diff --name-status "$CORE_REF" "$MASTER_REF" -- . \
+      ':(exclude)studio/**' ':(exclude)forge/**' >&2
+    return 1
+  fi
+  if ! git diff --quiet "$STUDIO_REF" "$MASTER_REF" -- studio/; then
+    echo "$MASTER_NAME studio/** does not match $STUDIO_NAME" >&2
+    git diff --name-status "$STUDIO_REF" "$MASTER_REF" -- studio/ >&2
+    return 1
+  fi
+  if ! git diff --quiet "$FORGE_REF" "$MASTER_REF" -- forge/; then
+    echo "$MASTER_NAME forge/** does not match $FORGE_NAME" >&2
+    git diff --name-status "$FORGE_REF" "$MASTER_REF" -- forge/ >&2
+    return 1
+  fi
+
+  local invalid_commits=0
+  local commit
+  while IFS= read -r commit; do
+    [[ -n "$commit" ]] || continue
+    local parent_count
+    parent_count=$(($(git rev-list --parents -n 1 "$commit" | wc -w) - 1))
+    if ((parent_count < 2)); then
+      echo "$MASTER_NAME-only commit $commit is not an integration merge" >&2
+      invalid_commits=1
+    fi
+  done < <(git rev-list "$MASTER_REF" --not "$CORE_REF" "$STUDIO_REF" "$FORGE_REF")
+  if ((invalid_commits)); then
+    echo "commit changes on their owning branch and merge that branch into $MASTER_NAME" >&2
+    return 1
+  fi
+}
+
+check_core
 case "$CURRENT_NAME" in
+  core) ;;
+  studio) check_product "$STUDIO_NAME" "$STUDIO_REF" studio forge ;;
+  forge) check_product "$FORGE_NAME" "$FORGE_REF" forge studio ;;
   master)
-    check_product "$STUDIO_NAME" studio platform
-    check_product "$FORGE_NAME" forge
+    check_product "$STUDIO_NAME" "$STUDIO_REF" studio forge
+    check_product "$FORGE_NAME" "$FORGE_REF" forge studio
+    check_master
     ;;
-  studio) check_product "$STUDIO_NAME" studio platform ;;
-  forge) check_product "$FORGE_NAME" forge ;;
   *)
-    check_product "$STUDIO_NAME" studio platform
-    check_product "$FORGE_NAME" forge
+    check_product "$STUDIO_NAME" "$STUDIO_REF" studio forge
+    check_product "$FORGE_NAME" "$FORGE_REF" forge studio
+    check_master
     ;;
 esac
 
-echo "$BASE_NAME/$STUDIO_NAME/$FORGE_NAME boundary check passed"
+echo "$CORE_NAME/$STUDIO_NAME/$FORGE_NAME -> $MASTER_NAME boundary check passed"

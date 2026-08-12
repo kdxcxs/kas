@@ -274,18 +274,22 @@ apps/kas-test-driver 可执行的端到端测试 Driver
 
 ## 分支与目录职责
 
-`master` 是 KAS Core 的唯一维护分支，只包含通用控制面和可复用实现。根目录、
-`crates/`、`apps/`、`builtins/`、测试、benchmark 和核心文档均由 `master`
+`core` 是 KAS Core 的唯一维护分支，只包含通用控制面和可复用实现。根目录、
+`crates/`、`apps/`、`builtins/`、测试、benchmark 和核心文档均由 `core`
 维护，不包含任何完整产品目录。
 
-`studio` 分支在 `master` 之上只增加 `studio/`，用于维护人与 Agent 协作的
-KAS Studio。`forge` 分支在 `master` 之上只增加 `forge/`，用于维护
+`studio` 分支在 `core` 之上只增加 `studio/`，用于维护人与 Agent 协作的
+KAS Studio。`forge` 分支在 `core` 之上只增加 `forge/`，用于维护
 Agent-native 工程控制面 KAS Forge。产品目录使用独立 workspace，并通过
 path dependency 引用根目录的 Core crate。
 
-核心改动只在 `master` 上完成，再分别合并到 `studio` 和 `forge`。产品分支
-不得直接修改或复制 Core；发现通用缺陷时必须先在 `master` 修复。两个产品
-分支不互相合并，从而保持 `master → studio` 与 `master → forge` 两条单向依赖。
+核心改动只在 `core` 上完成，再分别合并到 `studio` 和 `forge`。产品分支
+不得直接修改或复制 Core；发现通用缺陷时必须先在 `core` 修复。两个产品
+分支不互相合并，从而保持 `core → studio` 与 `core → forge` 两条单向依赖。
+
+`master` 是完整的集成分支，只接收 `core`、`studio` 和 `forge` 的 merge，
+不直接产生修改。因此普通 checkout 可以同时获得 Core 和两个产品，但产品
+代码不会成为 Core 的一部分。
 
 安装仓库自带的 pre-push 检查：
 
@@ -293,10 +297,11 @@ path dependency 引用根目录的 Core crate。
 scripts/install-git-hooks.sh
 ```
 
-pre-commit 检查禁止 `master` 提交 `studio/**`、`forge/**` 或旧的
+pre-commit 检查禁止 `core` 提交 `studio/**`、`forge/**` 或旧的
 `platform/**`，也禁止产品分支直接提交其产品目录之外的路径。正式 merge
-`master` 时允许 Core 文件随 merge 进入。pre-push 进一步要求每个产品分支
-已经包含最新 `master`，并且产品目录以外的文件树与 `master` 完全相同。
+`core` 时允许 Core 文件随 merge 进入；`master` 只允许来自三个维护分支的
+集成 merge。pre-push 进一步要求每个产品分支已经包含最新 `core`，并且产品
+目录以外的文件树与 `core` 完全相同，同时验证 `master` 精确聚合三个分支。
 
 启动顺序：
 
