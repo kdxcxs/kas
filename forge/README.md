@@ -58,13 +58,14 @@ Run the complete boundary test with:
 
 ## Relationship to KAS Core
 
-The `master` branch contains only KAS Core. The `forge` branch adds this
-directory and merges Core changes from `master`. Forge does not modify Core
+The `core` branch contains only KAS Core. The `forge` branch adds this
+directory and merges Core changes from `core`. Forge does not modify Core
 directly and does not merge from or into the `studio` product branch.
 
-Generic capabilities required by Forge must first be implemented on `master`,
+Generic capabilities required by Forge must first be implemented on `core`,
 then merged into this branch. Product-specific integrations and behavior stay
-under `forge/`.
+under `forge/`. The `master` integration branch merges Forge together with
+Core and Studio for a complete checkout.
 
 ## Next engineering scope
 
