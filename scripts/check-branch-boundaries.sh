@@ -14,9 +14,10 @@ resolve_ref() {
   exit 2
 }
 
-BASE_NAME="${1:-master}"
-STUDIO_NAME="${2:-studio}"
-FORGE_NAME="${3:-forge}"
+CURRENT_NAME="${1:-$(git branch --show-current)}"
+BASE_NAME="${2:-master}"
+STUDIO_NAME="${3:-studio}"
+FORGE_NAME="${4:-forge}"
 BASE_REF="$(resolve_ref "$BASE_NAME")"
 
 for product_root in studio forge platform; do
@@ -118,7 +119,17 @@ check_product() {
   fi
 }
 
-check_product "$STUDIO_NAME" studio platform
-check_product "$FORGE_NAME" forge
+case "$CURRENT_NAME" in
+  master)
+    check_product "$STUDIO_NAME" studio platform
+    check_product "$FORGE_NAME" forge
+    ;;
+  studio) check_product "$STUDIO_NAME" studio platform ;;
+  forge) check_product "$FORGE_NAME" forge ;;
+  *)
+    check_product "$STUDIO_NAME" studio platform
+    check_product "$FORGE_NAME" forge
+    ;;
+esac
 
 echo "$BASE_NAME/$STUDIO_NAME/$FORGE_NAME boundary check passed"

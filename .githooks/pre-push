@@ -2,4 +2,4 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-exec "$ROOT/scripts/check-branch-boundaries.sh" master studio forge
+exec "$ROOT/scripts/check-branch-boundaries.sh" "$(git branch --show-current)" master studio forge
