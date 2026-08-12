@@ -85,9 +85,10 @@ Web 界面由一个很小的 Workspace 宿主和可安装的 iframe 插件组成
 
 ## 与 KAS Core 的关系
 
-仓库的 `master` 分支只维护通用控制面；`studio` 分支在此基础上增加本目录。
-Studio 只依赖 Core，Studio 专属 Package、Driver、UI、部署和测试均留在这里，
-确保 Core 可以持续无冲突地合并进 Studio。
+仓库的 `core` 分支只维护通用控制面；`studio` 分支在此基础上增加本目录，并从
+`core` 接收 Core 更新。Studio 专属 Package、Driver、UI、部署和测试均留在
+这里。`master` 集成分支会将 Studio 与 Core、Forge 聚合成完整仓库，但 Studio
+本身不依赖 Forge。
 
 ## 继续阅读
 

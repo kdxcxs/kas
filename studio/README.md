@@ -93,10 +93,11 @@ frontend plugins.
 
 ## Relationship to KAS Core
 
-The `master` branch contains only the generic control plane. The `studio`
-branch adds this directory on top. Studio-specific Packages, Drivers, UI,
-deployment, and tests remain here, preserving a one-way dependency that lets
-Core merge into Studio without conflicts.
+The `core` branch contains only the generic control plane. The `studio` branch
+adds this directory on top and receives Core changes from `core`.
+Studio-specific Packages, Drivers, UI, deployment, and tests remain here. The
+`master` integration branch merges Studio together with Core and Forge for a
+complete checkout; Studio never depends on Forge.
 
 ## Learn more
 
