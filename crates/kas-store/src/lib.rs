@@ -15,8 +15,8 @@ use database::{
     Connection, Error as DatabaseError, IntoParam, OptionalExtension, Param, Row, Transaction,
 };
 use events::{
-    append_deleted_event, append_event, current_event_sequence_in, event_from_row,
-    event_paths_since,
+    append_deleted_event, append_event, append_status_event, current_event_sequence_in,
+    event_from_row, event_paths_since,
 };
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
@@ -1036,7 +1036,7 @@ impl Store {
         save_resource_in(&tx, &current)?;
         let resource = resource_in(&tx, path)?;
         refresh_projection(&tx, &resource, now)?;
-        append_event(&tx, EventType::Updated, &resource, now)?;
+        append_status_event(&tx, EventType::Updated, &resource, now)?;
         maybe_finish_deleted_resource(&tx, path, now)?;
         let touched_paths = event_paths_since(&tx, event_cursor)?;
         tx.commit()?;
@@ -1341,7 +1341,7 @@ impl Store {
         let now = Utc::now();
         update_status_document(&tx, path, DriverState::Running, &driver.spec, now)?;
         driver = resource_in(&tx, path)?;
-        append_event(&tx, EventType::Updated, &driver, now)?;
+        append_status_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
         Ok(driver)
     }
@@ -1404,7 +1404,7 @@ impl Store {
         update_status_document(&tx, path, DriverState::Failed, &driver.status.spec, now)?;
         eprintln!("Driver {path} failed: {error}");
         driver = resource_in(&tx, path)?;
-        append_event(&tx, EventType::Updated, &driver, now)?;
+        append_status_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
         Ok(driver)
     }
@@ -1418,7 +1418,7 @@ impl Store {
         let now = Utc::now();
         update_status_document(&tx, path, DriverState::Stopped, &driver.spec, now)?;
         driver = resource_in(&tx, path)?;
-        append_event(&tx, EventType::Updated, &driver, now)?;
+        append_status_event(&tx, EventType::Updated, &driver, now)?;
         tx.commit()?;
         Ok(driver)
     }
@@ -3704,7 +3704,7 @@ fn apply_mutation(
             save_resource_in(tx, &current)?;
             let updated = resource_in(tx, &resource_path)?;
             refresh_projection(tx, &updated, now)?;
-            append_event(tx, EventType::Updated, &updated, now)?;
+            append_status_event(tx, EventType::Updated, &updated, now)?;
             maybe_finish_deleted_resource(tx, &resource_path, now)?;
             Ok(serde_json::to_value(updated)?)
         }
@@ -4620,6 +4620,16 @@ mod tests {
                 .get("/packages/kas/link/driver")
                 .map(|observation| observation.resource_revision),
             Some(touched.revision)
+        );
+
+        let tx = store.connection.transaction().unwrap();
+        let source = resource_in(&tx, &source.path).unwrap();
+        append_status_event(&tx, EventType::Updated, &source, Utc::now()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            store.get_resource(&link.path).unwrap().revision,
+            touched.revision,
+            "status-only events must not invalidate dependent Links"
         );
     }
 
