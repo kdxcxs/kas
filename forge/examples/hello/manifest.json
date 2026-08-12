@@ -1,0 +1,26 @@
+{
+  "path": "/packages/demo/hello/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
+  "name": "hello-capability",
+  "version": 1,
+  "description": "A small example capability submitted through Forge approval.",
+  "paths": [
+    "./resources/*"
+  ],
+  "states": [],
+  "default_state": "available",
+  "initial_state": "available",
+  "resource_schema": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "message"
+    ],
+    "additionalProperties": false
+  }
+}
+

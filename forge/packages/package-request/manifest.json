@@ -1,0 +1,111 @@
+{
+  "path": "/packages/forge/package-request/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
+  "name": "package-request",
+  "version": 1,
+  "description": "An Agent- or User-submitted KAS Package awaiting an authorized human decision.",
+  "paths": [
+    "./requests/*"
+  ],
+  "states": [
+    "installing",
+    "installed",
+    "rejected",
+    "failed"
+  ],
+  "default_state": "pending",
+  "initial_state": "pending",
+  "resource_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+      "digest",
+      "size_bytes",
+      "package_path",
+      "manifest_path",
+      "name",
+      "version",
+      "description",
+      "resource_count",
+      "has_driver",
+      "reason",
+      "submitted_at"
+    ],
+    "properties": {
+      "digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "size_bytes": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "package_path": {
+        "type": "string"
+      },
+      "manifest_path": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "version": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "description": {
+        "type": "string"
+      },
+      "resource_count": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "has_driver": {
+        "type": "boolean"
+      },
+      "reason": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "submitted_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "decision": {
+        "type": "object",
+        "required": [
+          "outcome",
+          "approver",
+          "decided_at"
+        ],
+        "properties": {
+          "outcome": {
+            "enum": [
+              "installing",
+              "installed",
+              "rejected",
+              "failed"
+            ]
+          },
+          "approver": {
+            "type": "string"
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}
+

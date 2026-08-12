@@ -1,0 +1,27 @@
+{
+  "path": "./relations/requested-by",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "package-requested-by"
+  },
+  "spec": {
+    "sources": [
+      {
+        "manifest": "."
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object"
+    }
+  }
+}
+

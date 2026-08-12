@@ -1,0 +1,25 @@
+{
+  "path": "./roles/runtime",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "forge-agent-runtime"
+  },
+  "spec": {
+    "description": "Read the KAS graph and submit Package Requests without standing Package installation permission.",
+    "rules": [
+      {
+        "manifests": [
+          "*"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/**"
+        ]
+      }
+    ]
+  }
+}
+

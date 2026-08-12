@@ -1,0 +1,66 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "forge-agent-driver"
+  },
+  "spec": {
+    "description": "Reconcile Agent identities and execute Codex tasks.",
+    "rules": [
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "update"
+        ],
+        "paths": [
+          "./agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/service-account/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "./service-accounts/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "./links/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/role/manifest"
+        ],
+        "verbs": [
+          "bind"
+        ],
+        "paths": [
+          "./roles/runtime"
+        ]
+      }
+    ]
+  }
+}
+
