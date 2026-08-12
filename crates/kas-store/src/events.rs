@@ -34,6 +34,19 @@ pub(super) fn append_event(
     touch_dependent_links(tx, &resource.path, now)
 }
 
+/// Record a Driver's observation without invalidating Links that reference the
+/// Resource. Link validity is derived from desired metadata and spec; status is
+/// an observation of that desired document and must not feed back into relation
+/// reconciliation.
+pub(super) fn append_status_event(
+    tx: &Transaction,
+    event_type: EventType,
+    resource: &Resource,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    append_event_row(tx, event_type, resource, now)
+}
+
 fn append_event_row(
     tx: &Transaction,
     event_type: EventType,
