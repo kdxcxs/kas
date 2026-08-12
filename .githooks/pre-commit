@@ -15,6 +15,7 @@ reject_product_paths() {
   if [[ -n "$invalid" ]]; then
     echo "branch ownership violation on $BRANCH:" >&2
     printf '%s' "$invalid" >&2
+    echo "product code must be committed on its product branch" >&2
     return 1
   fi
 }
@@ -33,32 +34,62 @@ reject_outside() {
   if [[ -n "$invalid" ]]; then
     echo "branch ownership violation on $BRANCH:" >&2
     printf '%s' "$invalid" >&2
-    echo "make Core changes on master, then merge master into $BRANCH" >&2
+    echo "make Core changes on core, then merge core into $BRANCH" >&2
     return 1
   fi
 }
 
-is_master_merge() {
+merge_head_is() {
+  local expected="$1"
   local merge_head_path
   merge_head_path="$(git rev-parse --git-path MERGE_HEAD)"
-  [[ -f "$merge_head_path" ]] &&
-    git merge-base --is-ancestor master "$(cat "$merge_head_path")"
+  [[ -f "$merge_head_path" ]] || return 1
+  [[ "$(cat "$merge_head_path")" == "$(git rev-parse "$expected^{commit}")" ]]
+}
+
+allow_master_integration_merge() {
+  local merge_head_path
+  merge_head_path="$(git rev-parse --git-path MERGE_HEAD)"
+  if [[ ! -f "$merge_head_path" ]]; then
+    echo "direct commits are not allowed on master" >&2
+    echo "commit Core on core, Studio on studio, or Forge on forge, then merge into master" >&2
+    return 1
+  fi
+
+  local merge_head
+  while IFS= read -r merge_head; do
+    local allowed=0
+    local branch
+    for branch in core studio forge; do
+      if [[ "$merge_head" == "$(git rev-parse "$branch^{commit}")" ]]; then
+        allowed=1
+        break
+      fi
+    done
+    if ((allowed == 0)); then
+      echo "master may only merge the current core, studio, or forge branch head" >&2
+      return 1
+    fi
+  done < "$merge_head_path"
 }
 
 case "$BRANCH" in
-  master)
+  core)
     reject_product_paths
     ;;
   studio)
-    if is_master_merge; then
+    if merge_head_is core; then
       exit 0
     fi
     reject_outside studio
     ;;
   forge)
-    if is_master_merge; then
+    if merge_head_is core; then
       exit 0
     fi
     reject_outside forge
+    ;;
+  master)
+    allow_master_integration_merge
     ;;
 esac

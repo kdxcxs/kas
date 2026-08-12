@@ -11,8 +11,9 @@ KAS 负责保存这些对象、检查权限、记录关系，并把需要处理�
 Driver。
 
 它适合构建 Agent 产品、自动化控制面、集成中心，以及任何需要让多个后台能力
-围绕共享对象持续协作的系统。仓库中的 `master` 分支只维护通用内核；完整产品
-分别维护在 `studio` 和 `forge` 分支中。
+围绕共享对象持续协作的系统。仓库中的 `core` 分支只维护通用内核；KAS Studio
+和 KAS Forge 分别在 `studio`、`forge` 分支开发，`master` 聚合三者并提供完整
+仓库。
 
 ![KAS 控制面协调 Resource 与 Driver](docs/assets/core-control-plane.png)
 
@@ -160,9 +161,10 @@ KAS Core 关注的是这条通用闭环，不内置具体业务。具体产品�
 | **KAS Studio** | 在 `studio` 分支维护的人与 Agent 协作工作空间 |
 | **KAS Forge** | 在 `forge` 分支维护的 Agent-native 工程控制面 |
 
-Core 位于 `master` 分支根目录的 `crates/`、`apps/` 和 `builtins/`。Studio
-专属代码位于 `studio/`，Forge 专属代码位于 `forge/`。两个产品分支只从
-`master` 合并 Core，不向 Core 回流产品代码，也不互相合并。
+Core 位于根目录的 `crates/`、`apps/` 和 `builtins/`，只在 `core` 分支开发。
+Studio 专属代码位于 `studio/`，Forge 专属代码位于 `forge/`。两个产品分支只从
+`core` 合并，不向 Core 回流产品代码，也不互相合并。`master` 是集成分支，
+通过合并 `core`、`studio` 和 `forge` 提供完整发行仓库。
 
 ## 继续阅读
 
