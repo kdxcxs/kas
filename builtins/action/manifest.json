@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/action",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/action/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "action",
   "version": 1,
   "description": "Defines executable Action Resources",
+  "paths": [
+    "/packages/*/*/actions/*"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [

@@ -1,7 +1,7 @@
 {
-  "path": "/builtin/roles/viewer",
+  "path": "./roles/viewer",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "system:viewer"
   },
   "spec": {

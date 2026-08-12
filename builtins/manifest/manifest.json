@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/manifest",
+  "path": "/packages/kas/manifest/manifest",
   "manifest": ".",
   "name": "manifest",
   "version": 1,
   "description": "Defines KAS Manifest Resources",
+  "paths": [
+    "/packages/*/*/manifest"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [

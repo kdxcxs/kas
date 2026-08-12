@@ -217,13 +217,9 @@ impl BenchmarkRunner {
 
         metrics_task.abort();
         let metrics_snapshot = driver_metrics.lock().unwrap().clone();
-        let database_bytes = if is_postgres(&database) {
-            0
-        } else {
-            fs::metadata(&database)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0)
-        };
+        let database_bytes = fs::metadata(&database)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         let mut extra = std::collections::BTreeMap::new();
         extra.insert("actual_resource_bytes".into(), actual_resource_bytes.into());
         extra.insert(
@@ -334,7 +330,7 @@ async fn create_resources(
                 bytes += serde_json::to_vec(&payload)
                     .map(|body| body.len())
                     .unwrap_or(0);
-                let path = resource_path(index);
+                let path = resource_path(index, scenario.manifests);
                 let request_started = Instant::now();
                 let response = client
                     .post(format!("{api}/resources"))
@@ -401,7 +397,12 @@ async fn wait_for_convergence(
     let expected: HashSet<(String, String)> = (0..scenario.resources)
         .filter_map(|index| {
             let manifest = index % scenario.manifests;
-            (manifest < scenario.drivers).then(|| (driver_path(manifest), resource_path(index)))
+            (manifest < scenario.drivers).then(|| {
+                (
+                    driver_path(manifest),
+                    resource_path(index, scenario.manifests),
+                )
+            })
         })
         .collect();
     let deadline = Instant::now() + timeout;
@@ -467,7 +468,7 @@ async fn steady_workload(
                 let bucket = (operation % 100) as u32;
                 if bucket < scenario.get_ratio {
                     let index = operation % scenario.resources;
-                    let path = resource_path(index);
+                    let path = resource_path(index, scenario.manifests);
                     samples.push(measured_get(&client, &api, &token, "get", path, None).await);
                 } else if bucket < scenario.get_ratio + scenario.list_ratio {
                     let manifest = manifest_path(operation % scenario.manifests);
@@ -493,8 +494,15 @@ async fn steady_workload(
                 } else {
                     let index = (operation + worker) % scenario.resources;
                     samples.push(
-                        measured_get(&client, &api, &token, "get", resource_path(index), None)
-                            .await,
+                        measured_get(
+                            &client,
+                            &api,
+                            &token,
+                            "get",
+                            resource_path(index, scenario.manifests),
+                            None,
+                        )
+                        .await,
                     );
                 }
             }
@@ -574,7 +582,7 @@ async fn measured_update(
     scenario: &Scenario,
     marker: u64,
 ) -> RequestSample {
-    let path = resource_path(index);
+    let path = resource_path(index, scenario.manifests);
     let started = Instant::now();
     let current = client
         .get(with_query(api, "/resources/by-path", "path", &path))
@@ -658,7 +666,12 @@ async fn wait_for_drivers(
     let deadline = Instant::now() + timeout;
     loop {
         let response = client
-            .get(with_query(api, "/resources", "manifest", "/builtin/driver"))
+            .get(with_query(
+                api,
+                "/resources",
+                "manifest",
+                "/packages/kas/driver/manifest",
+            ))
             .bearer_auth(token)
             .send()
             .await?;
@@ -669,7 +682,7 @@ async fn wait_for_drivers(
                 .filter(|resource| {
                     resource["path"]
                         .as_str()
-                        .is_some_and(|path| path.starts_with("/benchmark/manifests/"))
+                        .is_some_and(|path| path.starts_with("/packages/benchmark/"))
                         && resource["status"]["metadata"]["state"] == "running"
                 })
                 .count();
@@ -790,10 +803,6 @@ fn run_command(
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn is_postgres(database: &str) -> bool {
-    database.starts_with("postgres://") || database.starts_with("postgresql://")
 }
 
 fn reserve_tcp_port() -> anyhow::Result<u16> {

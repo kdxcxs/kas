@@ -335,7 +335,7 @@ mod tests {
         Resource {
             path: "/drivers/example".into(),
             metadata: ResourceMetadata {
-                manifest: "/builtin/driver".into(),
+                manifest: "/packages/kas/driver/manifest".into(),
                 name: "example".into(),
                 state: state.into(),
                 kas: KasMetadata {
@@ -430,7 +430,7 @@ mod tests {
         let registry = vec![
             "/manifests/agent".to_owned(),
             "/manifests/message".to_owned(),
-            "/builtin/link".to_owned(),
+            "/packages/kas/link/manifest".to_owned(),
         ];
 
         assert_eq!(

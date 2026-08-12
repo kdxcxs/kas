@@ -1,11 +1,11 @@
 {
-  "path": "./relations/run-driver",
+  "path": "./relations/run-subject",
   "metadata": {
     "manifest": "/packages/kas/relation/manifest",
-    "name": "run-driver"
+    "name": "run-subject"
   },
   "spec": {
-    "role": "run_driver",
+    "role": "run_subject",
     "sources": [
       {
         "manifest": "/packages/kas/run/manifest"
@@ -13,7 +13,10 @@
     ],
     "targets": [
       {
-        "manifest": "/packages/kas/driver/manifest"
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest"
+        ]
       }
     ],
     "on_source_delete": "unlink",

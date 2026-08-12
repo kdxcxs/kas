@@ -1,9 +1,12 @@
 {
-  "path": "/builtin/role",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/role/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "role",
   "version": 1,
   "description": "Defines Role Resources",
+  "paths": [
+    "/packages/*/*/roles/*"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [

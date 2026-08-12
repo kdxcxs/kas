@@ -6,10 +6,18 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use uuid::Uuid;
 
+mod path;
+
+pub use path::{
+    package_manifest_path, package_root_for_manifest_path, package_root_for_path, path_matches,
+    validate_path, validate_path_pattern, validate_relative_path, validate_relative_path_pattern,
+    PathError, MAX_PATH_BYTES, MAX_PATH_SEGMENT_BYTES, PACKAGE_ROOT_PREFIX,
+};
+
 pub const STATE_PENDING: &str = "pending";
 pub const STATE_AVAILABLE: &str = "available";
 pub const STATE_DELETED: &str = "deleted";
-pub const MANIFEST_MANIFEST_PATH: &str = "/builtin/manifest";
+pub const MANIFEST_MANIFEST_PATH: &str = "/packages/kas/manifest/manifest";
 pub const MANIFEST_PACKAGE_MEDIA_TYPE: &str = "application/vnd.kas.manifest+tar";
 pub const BUILTIN_PACKAGE_MEDIA_TYPE: &str = "application/vnd.kas.builtin+json";
 
@@ -60,6 +68,11 @@ pub struct KasMetadata {
     /// retains the Package used by the last successful owner reconciliation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub package: String,
+    /// Revision of the stable Package Resource whose artifact defines this
+    /// Resource's Manifest. Package updates change this value without changing
+    /// Package identity.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub package_revision: u64,
     #[serde(default)]
     pub created_at: DateTime<Utc>,
     #[serde(default)]
@@ -251,6 +264,9 @@ pub struct ManifestSpec {
     pub version: u32,
     #[serde(default)]
     pub description: String,
+    /// Canonical path patterns accepted for instances of this Manifest.
+    #[serde(default)]
+    pub paths: Vec<String>,
     pub resource_schema: Value,
     /// Manifest-specific states. Platform states (`pending`, `available`, and
     /// `deleted`) are always available and must not be repeated here.
@@ -269,12 +285,6 @@ pub struct PackageSpec {
     pub manifest: String,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub manifest_version: u32,
-}
-
-pub fn package_path_for_digest(digest: &str) -> Option<String> {
-    let hex = digest.strip_prefix("sha256:")?;
-    (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| format!("/packages/sha256/{}", hex.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -303,6 +313,7 @@ pub enum RelationRole {
     PackageManifest,
     ResourceManifest,
     RunResource,
+    RunSubject,
     RunAction,
     RunDriver,
     DriverServiceAccount,
@@ -409,6 +420,7 @@ pub enum DriverControlState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunSpec {
     pub request_id: Uuid,
+    pub subject: String,
     pub resource: String,
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,6 +553,9 @@ pub struct ManifestDefinition {
     pub version: u32,
     #[serde(default)]
     pub description: String,
+    /// Canonical path patterns accepted for instances of this Manifest.
+    #[serde(default = "default_manifest_definition_paths")]
+    pub paths: Vec<String>,
     pub resource_schema: Value,
     /// Manifest-specific states only; platform states are implicit.
     #[serde(default)]
@@ -553,6 +568,10 @@ pub struct ManifestDefinition {
 
 fn default_resource_state() -> String {
     STATE_AVAILABLE.into()
+}
+
+fn default_manifest_definition_paths() -> Vec<String> {
+    vec!["./resources/**".into()]
 }
 
 /// Parsed contents of one KAS package.
@@ -568,6 +587,8 @@ pub struct PackageExpansion {
     /// Digest of the uploaded artifact. Store installation turns this
     /// transport metadata into a Package Resource.
     pub artifact_digest: String,
+    /// Stable Package Resource and sandbox root.
+    pub package_path: String,
     pub resources: Vec<PlannedResource>,
     /// Owning Manifest path for each expanded Resource. A Manifest Resource
     /// owns itself; packaged Resources point to the root Manifest that declared
@@ -590,7 +611,8 @@ pub enum ManifestDefinitionError {
 impl fmt::Display for ManifestDefinitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidManifestPath => formatter.write_str("manifest path must be absolute"),
+            Self::InvalidManifestPath => formatter
+                .write_str("manifest path must be /packages/{publisher}/{package}/manifest"),
             Self::InvalidResourcePath(path) => {
                 write!(formatter, "invalid package Resource path {path:?}")
             }
@@ -623,14 +645,24 @@ impl PackageDefinition {
         self,
         artifact_digest: impl Into<String>,
     ) -> Result<PackageExpansion, ManifestDefinitionError> {
-        if !is_absolute_object_path(&self.manifest.path) {
-            return Err(ManifestDefinitionError::InvalidManifestPath);
+        let package_path = package_root_for_manifest_path(&self.manifest.path)
+            .ok_or(ManifestDefinitionError::InvalidManifestPath)?;
+        let manifest_path = self.manifest.path.clone();
+        let mut manifest_paths = self.manifest.paths;
+        for path in &mut manifest_paths {
+            if path.starts_with("./") {
+                resolve_package_pattern(&package_path, path)?;
+            } else if !package_path.starts_with("/packages/kas/") {
+                return Err(ManifestDefinitionError::InvalidResourcePath(path.clone()));
+            }
+            validate_path_pattern(path)
+                .map_err(|_| ManifestDefinitionError::InvalidResourcePath(path.clone()))?;
         }
         let digest = artifact_digest.into();
         let manifest_type = if self.manifest.manifest == "." {
-            self.manifest.path.clone()
+            manifest_path.clone()
         } else {
-            resolve_reference_path(&self.manifest.path, &self.manifest.manifest)?
+            resolve_reference_path(&package_path, &manifest_path, &self.manifest.manifest)?
         };
         // This is the state of the Manifest Resource itself. The
         // default/initial states declared inside its spec apply to instances
@@ -639,6 +671,7 @@ impl PackageDefinition {
         let manifest_spec = serde_json::to_value(ManifestSpec {
             version: self.manifest.version,
             description: self.manifest.description,
+            paths: manifest_paths,
             resource_schema: self.manifest.resource_schema,
             states: self.manifest.states,
             default_state: self.manifest.default_state,
@@ -646,7 +679,7 @@ impl PackageDefinition {
         })
         .expect("ManifestSpec serialization cannot fail");
 
-        let root_path = self.manifest.path;
+        let root_path = manifest_path;
         let mut resources = Vec::with_capacity(self.resources.len() + 1);
         let mut resource_owners = BTreeMap::new();
         let mut resource_paths = std::collections::BTreeSet::from([root_path.clone()]);
@@ -663,8 +696,12 @@ impl PackageDefinition {
             status: manifest_status,
         });
         for mut resource in self.resources {
-            resource.path = resolve_reference_path(&root_path, &resource.path)?;
-            resource.manifest = resolve_reference_path(&root_path, &resource.manifest)?;
+            if !resource.path.starts_with("./") {
+                return Err(ManifestDefinitionError::InvalidResourcePath(resource.path));
+            }
+            resource.path = resolve_package_resource_path(&package_path, &resource.path)?;
+            resource.manifest =
+                resolve_reference_path(&package_path, &root_path, &resource.manifest)?;
             if resource.manifest == MANIFEST_MANIFEST_PATH {
                 return Err(ManifestDefinitionError::NestedManifest(resource.path));
             }
@@ -673,7 +710,7 @@ impl PackageDefinition {
                     resource.path,
                 ));
             }
-            if resource.manifest == "/builtin/driver" {
+            if resource.manifest == "/packages/kas/driver/manifest" {
                 driver_count += 1;
                 if driver_count > 1 {
                     return Err(ManifestDefinitionError::MultipleDrivers);
@@ -681,6 +718,7 @@ impl PackageDefinition {
             }
             let resource_manifest = resource.metadata.manifest.clone();
             resolve_embedded_resource_references(
+                &package_path,
                 &root_path,
                 &resource_manifest,
                 &mut resource.spec,
@@ -695,6 +733,7 @@ impl PackageDefinition {
         }
         Ok(PackageExpansion {
             artifact_digest: digest,
+            package_path,
             resources,
             resource_owners,
         })
@@ -702,6 +741,7 @@ impl PackageDefinition {
 }
 
 fn resolve_embedded_resource_references(
+    package_path: &str,
     manifest_path: &str,
     resource_manifest: &str,
     spec: &mut Value,
@@ -711,63 +751,65 @@ fn resolve_embedded_resource_references(
     }
 
     match resource_manifest {
-        "/builtin/driver" => {
+        "/packages/kas/driver/manifest" => {
             let mut value: DriverSpec = decode_resource_spec(spec)?;
-            value.service_account = resolve_reference_path(manifest_path, &value.service_account)?;
+            value.service_account =
+                resolve_reference_path(package_path, manifest_path, &value.service_account)?;
             if value.manages.is_empty() {
                 value.manages.push(manifest_path.to_owned());
             } else {
                 for managed_manifest in &mut value.manages {
-                    *managed_manifest = resolve_reference_path(manifest_path, managed_manifest)?;
+                    *managed_manifest =
+                        resolve_reference_path(package_path, manifest_path, managed_manifest)?;
                 }
             }
             for watch in &mut value.watches {
-                resolve_manifest_selector(manifest_path, &mut watch.manifest)?;
+                resolve_manifest_selector(package_path, manifest_path, &mut watch.manifest)?;
                 for path in &mut watch.paths {
-                    resolve_relative_reference(manifest_path, path)?;
+                    resolve_relative_reference(package_path, manifest_path, path)?;
                 }
             }
             *spec = serde_json::to_value(value).expect("DriverSpec serialization cannot fail");
         }
-        "/builtin/relation" => {
+        "/packages/kas/relation/manifest" => {
             let mut value: RelationSpec = decode_resource_spec(spec)?;
             for selector in value.sources.iter_mut().chain(&mut value.targets) {
-                resolve_manifest_selector(manifest_path, &mut selector.manifest)?;
+                resolve_manifest_selector(package_path, manifest_path, &mut selector.manifest)?;
                 for path in &mut selector.paths {
-                    resolve_relative_reference(manifest_path, path)?;
+                    resolve_relative_reference(package_path, manifest_path, path)?;
                 }
             }
             *spec = serde_json::to_value(value).expect("RelationSpec serialization cannot fail");
         }
-        "/builtin/link" => {
+        "/packages/kas/link/manifest" => {
             let mut value: LinkSpec = decode_resource_spec(spec)?;
-            value.relation = resolve_reference_path(manifest_path, &value.relation)?;
-            value.source = resolve_reference_path(manifest_path, &value.source)?;
-            value.target = resolve_reference_path(manifest_path, &value.target)?;
+            value.relation = resolve_reference_path(package_path, manifest_path, &value.relation)?;
+            value.source = resolve_reference_path(package_path, manifest_path, &value.source)?;
+            value.target = resolve_reference_path(package_path, manifest_path, &value.target)?;
             *spec = serde_json::to_value(value).expect("LinkSpec serialization cannot fail");
         }
-        "/builtin/run" => {
+        "/packages/kas/run/manifest" => {
             let mut value: RunSpec = decode_resource_spec(spec)?;
-            value.resource = resolve_reference_path(manifest_path, &value.resource)?;
-            value.action = resolve_reference_path(manifest_path, &value.action)?;
-            resolve_optional_reference(manifest_path, &mut value.driver)?;
+            value.resource = resolve_reference_path(package_path, manifest_path, &value.resource)?;
+            value.action = resolve_reference_path(package_path, manifest_path, &value.action)?;
+            resolve_optional_reference(package_path, manifest_path, &mut value.driver)?;
             *spec = serde_json::to_value(value).expect("RunSpec serialization cannot fail");
         }
-        "/builtin/role" => {
+        "/packages/kas/role/manifest" => {
             let mut value: RoleSpec = decode_resource_spec(spec)?;
             for rule in &mut value.rules {
                 for selected_manifest in &mut rule.manifests {
-                    resolve_relative_reference(manifest_path, selected_manifest)?;
+                    resolve_relative_reference(package_path, manifest_path, selected_manifest)?;
                 }
                 for path in &mut rule.paths {
-                    resolve_relative_reference(manifest_path, path)?;
+                    resolve_relative_reference(package_path, manifest_path, path)?;
                 }
             }
             *spec = serde_json::to_value(value).expect("RoleSpec serialization cannot fail");
         }
-        "/builtin/credential" => {
+        "/packages/kas/credential/manifest" => {
             let mut value: CredentialSpec = decode_resource_spec(spec)?;
-            value.subject = resolve_reference_path(manifest_path, &value.subject)?;
+            value.subject = resolve_reference_path(package_path, manifest_path, &value.subject)?;
             *spec = serde_json::to_value(value).expect("CredentialSpec serialization cannot fail");
         }
         _ => {}
@@ -783,14 +825,17 @@ fn decode_resource_spec<T: for<'de> Deserialize<'de>>(
 }
 
 fn resolve_manifest_selector(
+    package_path: &str,
     manifest_path: &str,
     selector: &mut ManifestSelector,
 ) -> Result<(), ManifestDefinitionError> {
     match selector {
-        ManifestSelector::One(value) => resolve_relative_reference(manifest_path, value),
+        ManifestSelector::One(value) => {
+            resolve_relative_reference(package_path, manifest_path, value)
+        }
         ManifestSelector::Many(values) => {
             for value in values {
-                resolve_relative_reference(manifest_path, value)?;
+                resolve_relative_reference(package_path, manifest_path, value)?;
             }
             Ok(())
         }
@@ -798,26 +843,45 @@ fn resolve_manifest_selector(
 }
 
 fn resolve_optional_reference(
+    package_path: &str,
     manifest_path: &str,
     reference: &mut Option<String>,
 ) -> Result<(), ManifestDefinitionError> {
     if let Some(value) = reference {
-        *value = resolve_reference_path(manifest_path, value)?;
+        *value = resolve_reference_path(package_path, manifest_path, value)?;
     }
     Ok(())
 }
 
 fn resolve_relative_reference(
+    package_path: &str,
     manifest_path: &str,
     reference: &mut String,
 ) -> Result<(), ManifestDefinitionError> {
-    if reference == "." || reference.starts_with("./") {
-        *reference = resolve_reference_path(manifest_path, reference)?;
+    resolve_pattern_reference(package_path, manifest_path, reference)
+}
+
+fn resolve_pattern_reference(
+    package_path: &str,
+    manifest_path: &str,
+    reference: &mut String,
+) -> Result<(), ManifestDefinitionError> {
+    if reference == "*" {
+        return Ok(());
     }
-    Ok(())
+    if reference == "." {
+        *reference = manifest_path.to_owned();
+        return Ok(());
+    }
+    if reference.starts_with("./") {
+        resolve_package_pattern(package_path, reference)?;
+    }
+    validate_path_pattern(reference)
+        .map_err(|_| ManifestDefinitionError::InvalidResourcePath(reference.clone()))
 }
 
 fn resolve_reference_path(
+    package_path: &str,
     manifest_path: &str,
     path: &str,
 ) -> Result<String, ManifestDefinitionError> {
@@ -825,9 +889,9 @@ fn resolve_reference_path(
         return Ok(manifest_path.to_owned());
     }
     if path.starts_with("./") {
-        return resolve_package_resource_path(manifest_path, path);
+        return resolve_package_resource_path(package_path, path);
     }
-    if is_absolute_object_path(path) {
+    if validate_path(path).is_ok() {
         return Ok(path.to_owned());
     }
     Err(ManifestDefinitionError::InvalidResourcePath(
@@ -836,26 +900,26 @@ fn resolve_reference_path(
 }
 
 fn resolve_package_resource_path(
-    manifest_path: &str,
+    package_path: &str,
     resource_path: &str,
 ) -> Result<String, ManifestDefinitionError> {
-    let Some(relative) = resource_path.strip_prefix("./") else {
-        return Err(ManifestDefinitionError::InvalidResourcePath(
-            resource_path.to_owned(),
-        ));
-    };
-    if relative.is_empty()
-        || relative.starts_with('/')
-        || relative.ends_with('/')
-        || relative
-            .split('/')
-            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err(ManifestDefinitionError::InvalidResourcePath(
-            resource_path.to_owned(),
-        ));
-    }
-    Ok(format!("{manifest_path}/{relative}"))
+    validate_relative_path(resource_path)
+        .map_err(|_| ManifestDefinitionError::InvalidResourcePath(resource_path.to_owned()))?;
+    let resolved = format!("{package_path}/{}", &resource_path[2..]);
+    validate_path(&resolved)
+        .map(|()| resolved)
+        .map_err(|_| ManifestDefinitionError::InvalidResourcePath(resource_path.to_owned()))
+}
+
+fn resolve_package_pattern(
+    package_path: &str,
+    pattern: &mut String,
+) -> Result<(), ManifestDefinitionError> {
+    validate_relative_path_pattern(pattern)
+        .map_err(|_| ManifestDefinitionError::InvalidResourcePath(pattern.clone()))?;
+    *pattern = format!("{package_path}/{}", &pattern[2..]);
+    validate_path_pattern(pattern)
+        .map_err(|_| ManifestDefinitionError::InvalidResourcePath(pattern.clone()))
 }
 
 fn validate_package_entrypoint(entrypoint: &str) -> Result<(), ManifestDefinitionError> {
@@ -878,68 +942,8 @@ fn validate_package_entrypoint(entrypoint: &str) -> Result<(), ManifestDefinitio
     Ok(())
 }
 
-fn is_absolute_object_path(path: &str) -> bool {
-    path.starts_with('/')
-        && path != "/"
-        && !path.ends_with('/')
-        && !path
-            .trim_start_matches('/')
-            .split('/')
-            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-}
-
 pub fn resource_path_matches(pattern: &str, path: &str) -> bool {
-    if pattern == "*" || pattern == path {
-        return true;
-    }
-    let pattern = pattern.trim_matches('/').split('/').collect::<Vec<_>>();
-    let path = path.trim_matches('/').split('/').collect::<Vec<_>>();
-    glob_segments_match(&pattern, &path)
-}
-
-fn glob_segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    match pattern.split_first() {
-        None => path.is_empty(),
-        Some((segment, rest)) if *segment == "**" => {
-            glob_segments_match(rest, path)
-                || (!path.is_empty() && glob_segments_match(pattern, &path[1..]))
-        }
-        Some((segment, rest)) => {
-            !path.is_empty()
-                && glob_segment_matches(segment, path[0])
-                && glob_segments_match(rest, &path[1..])
-        }
-    }
-}
-
-fn glob_segment_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" || pattern == value {
-        return true;
-    }
-    let parts = pattern.split('*').collect::<Vec<_>>();
-    if parts.len() == 1 {
-        return false;
-    }
-    let mut remainder = value;
-    for (index, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        if index == 0 {
-            let Some(next) = remainder.strip_prefix(part) else {
-                return false;
-            };
-            remainder = next;
-        } else if index + 1 == parts.len() {
-            return remainder.ends_with(part);
-        } else {
-            let Some(offset) = remainder.find(part) else {
-                return false;
-            };
-            remainder = &remainder[offset + part.len()..];
-        }
-    }
-    parts.last().is_some_and(|part| part.is_empty()) || remainder.is_empty()
+    pattern == "*" || path_matches(pattern, path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -988,11 +992,36 @@ impl From<Value> for DriverExecution {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateRun {
-    pub path: String,
     pub request_id: Uuid,
     pub resource: String,
     pub action: String,
     pub input: Value,
+}
+
+fn run_partition_key(kind: &str, path: &str) -> Result<Uuid, PathError> {
+    validate_path(path)?;
+    Ok(Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("kas:run-{kind}:{path}").as_bytes(),
+    ))
+}
+
+pub fn run_subject_path_pattern(subject: &str) -> Result<String, PathError> {
+    Ok(format!(
+        "/packages/kas/run/runs/{}/**",
+        run_partition_key("subject", subject)?.simple()
+    ))
+}
+
+pub fn run_path(subject: &str, action: &str, request_id: Uuid) -> Result<String, PathError> {
+    let subject_key = run_partition_key("subject", subject)?;
+    let action_key = run_partition_key("action", action)?;
+    Ok(format!(
+        "/packages/kas/run/runs/{}/{}/{}",
+        subject_key.simple(),
+        action_key.simple(),
+        request_id.simple()
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1061,7 +1090,7 @@ mod tests {
     fn resource_is_the_single_persistent_shape() {
         let now = Utc::now();
         let metadata = ResourceMetadata {
-            manifest: "/manifests/agent".into(),
+            manifest: "/packages/kas/agent/manifest".into(),
             name: "main".into(),
             state: STATE_AVAILABLE.into(),
             kas: KasMetadata {
@@ -1070,13 +1099,14 @@ mod tests {
                 observed: BTreeMap::new(),
                 protected: false,
                 managed_by: "user".into(),
-                package: "/packages/sha256/example".into(),
+                package: "/packages/kas/agent".into(),
+                package_revision: 3,
                 created_at: now,
                 updated_at: now,
             },
         };
         let resource = Resource {
-            path: "/agents/main".into(),
+            path: "/packages/kas/agent/resources/main".into(),
             metadata: metadata.clone(),
             spec: json!({"working_directory": "/workspace"}),
             status: ResourceStatus {
@@ -1084,41 +1114,35 @@ mod tests {
                 spec: json!({"working_directory": "/workspace"}),
             },
         };
-        assert_eq!(resource.manifest, "/manifests/agent");
+        assert_eq!(resource.manifest, "/packages/kas/agent/manifest");
         assert_eq!(resource.metadata.kas.observed.len(), 0);
     }
 
     #[test]
     fn manifest_selector_supports_single_many_and_any() {
-        let single: ManifestSelector = serde_json::from_value(json!("/manifests/agent")).unwrap();
-        let many: ManifestSelector =
-            serde_json::from_value(json!(["/manifests/user", "/manifests/agent"])).unwrap();
+        let single: ManifestSelector =
+            serde_json::from_value(json!("/packages/kas/agent/manifest")).unwrap();
+        let many: ManifestSelector = serde_json::from_value(json!([
+            "/packages/kas/user/manifest",
+            "/packages/kas/agent/manifest"
+        ]))
+        .unwrap();
         let any: ManifestSelector = serde_json::from_value(json!("*")).unwrap();
-        assert!(single.matches("/manifests/agent"));
-        assert!(many.matches("/manifests/agent"));
-        assert!(any.matches("/manifests/anything"));
-    }
-
-    #[test]
-    fn artifact_digest_maps_to_a_stable_package_path() {
-        let digest = format!("sha256:{}", "A0".repeat(32));
-        assert_eq!(
-            package_path_for_digest(&digest),
-            Some(format!("/packages/sha256/{}", "a0".repeat(32)))
-        );
-        assert_eq!(package_path_for_digest("sha512:a0b1"), None);
-        assert_eq!(package_path_for_digest("sha256:not-hex"), None);
+        assert!(single.matches("/packages/kas/agent/manifest"));
+        assert!(many.matches("/packages/kas/agent/manifest"));
+        assert!(any.matches("/packages/acme/anything/manifest"));
     }
 
     #[test]
     fn expands_manifest_and_resource_files() {
         let definition = PackageDefinition {
             manifest: ManifestDefinition {
-                path: "/manifests/example".into(),
+                path: "/packages/acme/example/manifest".into(),
                 manifest: MANIFEST_MANIFEST_PATH.into(),
                 name: "example".into(),
                 version: 1,
                 description: "Example".into(),
+                paths: vec!["./resources/*".into()],
                 resource_schema: json!({"type": "object"}),
                 states: vec![],
                 default_state: STATE_AVAILABLE.into(),
@@ -1127,7 +1151,7 @@ mod tests {
             resources: vec![ResourceDefinition {
                 path: "./actions/example".into(),
                 metadata: PlannedResourceMetadata {
-                    manifest: "/builtin/action".into(),
+                    manifest: "/packages/kas/action/manifest".into(),
                     name: "example".into(),
                     state: String::new(),
                 },
@@ -1137,10 +1161,15 @@ mod tests {
         };
         let expansion = definition.expand("digest").unwrap();
         assert_eq!(expansion.resources.len(), 2);
+        assert_eq!(expansion.package_path, "/packages/acme/example");
         assert_eq!(expansion.resources[0].manifest, MANIFEST_MANIFEST_PATH);
         assert_eq!(
+            expansion.resources[0].spec["paths"],
+            json!(["/packages/acme/example/resources/*"])
+        );
+        assert_eq!(
             expansion.resources[1].path,
-            "/manifests/example/actions/example"
+            "/packages/acme/example/actions/example"
         );
     }
 
@@ -1148,11 +1177,12 @@ mod tests {
     fn rejects_manifest_definitions_in_resources() {
         let definition = PackageDefinition {
             manifest: ManifestDefinition {
-                path: "/manifests/container".into(),
+                path: "/packages/acme/container/manifest".into(),
                 manifest: MANIFEST_MANIFEST_PATH.into(),
                 name: "container".into(),
                 version: 1,
                 description: String::new(),
+                paths: default_manifest_definition_paths(),
                 resource_schema: json!({}),
                 states: vec![],
                 default_state: STATE_AVAILABLE.into(),
@@ -1172,7 +1202,7 @@ mod tests {
         assert!(matches!(
             definition.expand("digest"),
             Err(ManifestDefinitionError::NestedManifest(path))
-                if path == "/manifests/container/nested"
+                if path == "/packages/acme/container/nested"
         ));
     }
 
@@ -1180,11 +1210,12 @@ mod tests {
     fn rejects_entrypoint_outside_package() {
         let definition = PackageDefinition {
             manifest: ManifestDefinition {
-                path: "/manifests/agent".into(),
-                manifest: "/builtin/manifest".into(),
+                path: "/packages/acme/agent/manifest".into(),
+                manifest: "/packages/kas/manifest/manifest".into(),
                 name: "agent".into(),
                 version: 1,
                 description: String::new(),
+                paths: default_manifest_definition_paths(),
                 resource_schema: json!({}),
                 states: vec![],
                 default_state: STATE_AVAILABLE.into(),
@@ -1193,7 +1224,7 @@ mod tests {
             resources: vec![ResourceDefinition {
                 path: "./driver".into(),
                 metadata: PlannedResourceMetadata {
-                    manifest: "/builtin/driver".into(),
+                    manifest: "/packages/kas/driver/manifest".into(),
                     name: "driver".into(),
                     state: String::new(),
                 },
@@ -1208,6 +1239,68 @@ mod tests {
         assert!(matches!(
             definition.expand("digest"),
             Err(ManifestDefinitionError::InvalidEntrypoint(_))
+        ));
+    }
+
+    #[test]
+    fn manifest_paths_default_to_package_resources_and_reject_escaping_patterns() {
+        let definition: ManifestDefinition = serde_json::from_value(json!({
+            "path": "/packages/acme/example/manifest",
+            "manifest": "/packages/kas/manifest/manifest",
+            "name": "example",
+            "version": 1,
+            "resource_schema": {},
+            "default_state": "available",
+            "initial_state": "available"
+        }))
+        .unwrap();
+        assert_eq!(definition.paths, vec!["./resources/**"]);
+
+        let mut invalid = definition;
+        invalid.paths = vec!["/resources/*".into()];
+        assert!(matches!(
+            PackageDefinition {
+                manifest: invalid,
+                resources: vec![]
+            }
+            .expand("digest"),
+            Err(ManifestDefinitionError::InvalidResourcePath(_))
+        ));
+
+        let mut invalid_wildcard: ManifestDefinition = serde_json::from_value(json!({
+            "path": "/packages/acme/example/manifest",
+            "manifest": MANIFEST_MANIFEST_PATH,
+            "name": "example",
+            "version": 1,
+            "paths": ["./resources/example-*"],
+            "resource_schema": {}
+        }))
+        .unwrap();
+        assert!(matches!(
+            PackageDefinition {
+                manifest: invalid_wildcard.clone(),
+                resources: vec![]
+            }
+            .expand("digest"),
+            Err(ManifestDefinitionError::InvalidResourcePath(_))
+        ));
+        invalid_wildcard.paths = vec!["./resources/**".into()];
+        assert!(matches!(
+            PackageDefinition {
+                manifest: invalid_wildcard,
+                resources: vec![ResourceDefinition {
+                    path: "/packages/acme/example/actions/forged".into(),
+                    metadata: PlannedResourceMetadata {
+                        manifest: "/packages/kas/action/manifest".into(),
+                        name: "forged".into(),
+                        state: String::new(),
+                    },
+                    spec: json!({}),
+                    status: ResourceStatus::default(),
+                }]
+            }
+            .expand("digest"),
+            Err(ManifestDefinitionError::InvalidResourcePath(_))
         ));
     }
 
@@ -1237,15 +1330,56 @@ mod tests {
         }
 
         assert_eq!(paths.len(), 11);
-        assert!(paths.contains(&"/builtin/manifest".into()));
-        assert!(paths.contains(&"/builtin/package".into()));
+        assert!(paths.contains(&"/packages/kas/manifest/manifest".into()));
+        assert!(paths.contains(&"/packages/kas/package/manifest".into()));
+    }
+
+    #[test]
+    fn run_paths_use_server_derived_subject_and_action_partitions() {
+        let request_id = Uuid::parse_str("df237cbd-d13d-48ae-8743-b59588d76f1e").unwrap();
+        let path = run_path(
+            "/packages/kas/user/users/alice",
+            "/packages/forge/agent/actions/run",
+            request_id,
+        )
+        .unwrap();
+        let segments = path.split('/').collect::<Vec<_>>();
+        assert_eq!(&segments[..5], &["", "packages", "kas", "run", "runs"]);
+        assert_eq!(segments.len(), 8);
+        assert_eq!(segments[5].len(), 32);
+        assert_eq!(segments[6].len(), 32);
+        assert_eq!(segments[7], "df237cbdd13d48ae8743b59588d76f1e");
+        assert!(!path.contains("alice"));
+        assert!(path_matches(
+            &run_subject_path_pattern("/packages/kas/user/users/alice").unwrap(),
+            &path
+        ));
+        assert_eq!(
+            path,
+            run_path(
+                "/packages/kas/user/users/alice",
+                "/packages/forge/agent/actions/run",
+                request_id,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            path,
+            run_path(
+                "/packages/kas/user/users/bob",
+                "/packages/forge/agent/actions/run",
+                request_id,
+            )
+            .unwrap()
+        );
+        assert!(validate_path(&path).is_ok());
     }
 
     #[test]
     fn old_members_field_is_rejected() {
         let value = json!({
             "path": "/manifests/old",
-            "manifest": "/builtin/manifest",
+            "manifest": "/packages/kas/manifest/manifest",
             "name": "old",
             "version": 1,
             "resource_schema": {},

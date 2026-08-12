@@ -1,9 +1,12 @@
 {
-  "path": "/manifests/echo",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/test/echo/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "echo",
   "version": 1,
   "description": "Real-process end-to-end test Manifest",
+  "paths": [
+    "./resources/*"
+  ],
   "states": [],
   "default_state": "available",
   "initial_state": "pending",

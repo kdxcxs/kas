@@ -43,7 +43,7 @@ curl http://127.0.0.1:3000/health
 ```
 
 See the [Core technical reference](docs/technical-reference.md) for
-PostgreSQL, configuration, package installation, and Driver development.
+storage, configuration, package installation, and Driver development.
 For complete products and Web UIs, see
 [KAS Studio](https://github.com/kdxcxs/kas/tree/studio/studio) and
 [KAS Forge](https://github.com/kdxcxs/kas/tree/forge/forge).
@@ -99,9 +99,9 @@ desired data, and current status:
 
 ```json
 {
-  "path": "/agents/planner",
+  "path": "/packages/acme/agent/resources/planner",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "state": "available"
   },
   "spec": {
@@ -123,6 +123,10 @@ desired data, and current status:
 A Manifest defines the schema, states, and available capabilities of a class of
 Resources. It is itself a Resource, so new domain types can be installed
 dynamically without changing the KAS kernel.
+
+Every Package owns a stable `/packages/{publisher}/{package}` sandbox. Its
+Manifest, Driver, permissions, relationships, and business Resources remain
+under that root; cross-Package access requires explicit RBAC permission.
 
 ### Driver
 
@@ -146,7 +150,10 @@ relationship and may connect any two Resources:
 
 An Action describes an operation available for a Resource. A Run records one
 execution of that Action. Both are Resources, so execution history uses the
-same querying, authorization, and relationship model.
+same querying, authorization, and relationship model. Clients create Runs
+through `POST /runs` without supplying a Resource path. KAS derives a stable,
+opaque path from the authenticated Subject, Action, and request ID, then records
+protected Links to the Subject, target Resource, Action, and Driver.
 
 ### Package
 
@@ -171,7 +178,7 @@ interfaces on top as independent Packages.
 
 | Project | Responsibility |
 | --- | --- |
-| **KAS Core** | Resource API, Manifests, Packages, RBAC, Links, Driver runtime, and SQLite/PostgreSQL storage |
+| **KAS Core** | Resource API, Manifests, Packages, RBAC, Links, Driver runtime, and SQLite storage |
 | **KAS Studio** | A people-and-Agent collaboration workspace maintained on the `studio` branch |
 | **KAS Forge** | An Agent-native engineering control plane maintained on the `forge` branch |
 

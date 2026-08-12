@@ -20,8 +20,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use kas_auth::{AuthContext, AuthorizationCheck, AuthorizationDecision, IssuedCredential};
 use kas_core::{
-    package_path_for_digest, DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork,
-    LinkSpec, Mutation, PackageSpec, PlannedResource, Resource, RestartPolicy, UpdateResource,
+    CreateRun, DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork, LinkSpec,
+    Mutation, PackageSpec, PlannedResource, Resource, RestartPolicy, UpdateResource,
     BUILTIN_PACKAGE_MEDIA_TYPE, MANIFEST_PACKAGE_MEDIA_TYPE,
 };
 use kas_driver::{ClientMessage, CompletionStatus, MutationError, MutationStatus, ServerMessage};
@@ -36,11 +36,11 @@ mod supervisor;
 
 use supervisor::{DriverLaunch, Supervisor};
 
-const DRIVER_MANIFEST: &str = "/builtin/driver";
-const PACKAGE_MANIFEST: &str = "/builtin/package";
-const LINK_MANIFEST: &str = "/builtin/link";
-const ROLE_MANIFEST: &str = "/builtin/role";
-const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
+const DRIVER_MANIFEST: &str = "/packages/kas/driver/manifest";
+const PACKAGE_MANIFEST: &str = "/packages/kas/package/manifest";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+const ROLE_MANIFEST: &str = "/packages/kas/role/manifest";
+const ROLE_BINDING_RELATION: &str = "/packages/kas/link/relations/role-binding";
 const MAX_IN_FLIGHT_DELIVERIES: usize = 16;
 
 #[derive(Clone)]
@@ -91,6 +91,7 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
     recover_drivers(&state);
     let protected = Router::new()
         .route("/resources", get(list_resources).post(create_resource))
+        .route("/runs", post(create_run))
         .route(
             "/resources/by-path",
             get(get_resource)
@@ -280,6 +281,27 @@ async fn create_resource(
     Ok((StatusCode::CREATED, Json(resource)))
 }
 
+async fn create_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRun>,
+) -> ApiResult<(StatusCode, Json<Resource>)> {
+    let auth = authenticate(&state, &headers)?;
+    let target = lock(&state)?.get_resource(&input.resource)?;
+    if !kas_auth::allows(&auth.rules, &target.manifest, "invoke", Some(&target.path)) {
+        return Err(forbidden());
+    }
+    let action = lock(&state)?.get_resource(&input.action)?;
+    if action.manifest != "/packages/kas/action/manifest"
+        || !kas_auth::allows(&auth.rules, &action.manifest, "use", Some(&action.path))
+    {
+        return Err(forbidden());
+    }
+    let run = lock(&state)?.enqueue_run(&auth.subject.path, input)?;
+    notify_reconcile(&state);
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
 #[derive(Debug, Deserialize)]
 struct ObjectPathQuery {
     path: String,
@@ -364,11 +386,7 @@ async fn install_package(
         .first()
         .map(|resource| resource.path.clone())
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Manifest package is empty".into()))?;
-    let package_path = package_path_for_digest(&expansion.artifact_digest)
-        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Invalid Package digest".into()))?;
-    if !kas_auth::allows(&auth.rules, PACKAGE_MANIFEST, "create", Some(&package_path)) {
-        return Err(forbidden());
-    }
+    let package_path = expansion.package_path.clone();
     let (previous_package, previous_members, existing_resources) = {
         let store = lock(&state)?;
         let previous_package = match optional_resource(store, &manifest_path)? {
@@ -391,11 +409,19 @@ async fn install_package(
             .collect::<Result<BTreeMap<_, _>, StoreError>>()?;
         (previous_package, previous_members, existing_resources)
     };
-    let is_update = previous_package
+    let previous_digest = previous_package
         .as_ref()
-        .is_some_and(|package| package.path != package_path);
-    if let Some(previous_package) = previous_package.as_ref().filter(|_| is_update) {
-        authorize_existing_resource(&auth, previous_package, "delete")?;
+        .map(|package| serde_json::from_value::<PackageSpec>(package.spec.clone()))
+        .transpose()
+        .map_err(internal_error)?
+        .map(|spec| spec.digest);
+    let is_update = previous_digest
+        .as_deref()
+        .is_some_and(|digest| digest != expansion.artifact_digest);
+    if let Some(previous_package) = previous_package.as_ref() {
+        authorize_existing_resource(&auth, previous_package, "update")?;
+    } else if !kas_auth::allows(&auth.rules, PACKAGE_MANIFEST, "create", Some(&package_path)) {
+        return Err(forbidden());
     }
     for resource in &expansion.resources {
         let verb = if existing_resources.contains_key(&resource.path) {
@@ -462,7 +488,7 @@ async fn install_package(
         }
     }
     Ok((
-        if is_update {
+        if previous_package.is_some() {
             StatusCode::OK
         } else {
             StatusCode::CREATED
@@ -1166,6 +1192,17 @@ fn authorize_planned_resource(
     resource: &PlannedResource,
     verb: &str,
 ) -> ApiResult<()> {
+    for (kind, path) in [
+        ("Resource", resource.path.as_str()),
+        ("Manifest", resource.manifest.as_str()),
+    ] {
+        kas_core::validate_path(path).map_err(|error| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("invalid {kind} path: {error}"),
+            )
+        })?;
+    }
     if !kas_auth::allows(&auth.rules, &resource.manifest, verb, Some(&resource.path)) {
         return Err(forbidden());
     }
@@ -1190,6 +1227,18 @@ fn authorize_role_binding(auth: &AuthContext, manifest: &str, spec: &Value) -> A
     let Ok(link) = serde_json::from_value::<LinkSpec>(spec.clone()) else {
         return Ok(());
     };
+    for (kind, path) in [
+        ("Relation", link.relation.as_str()),
+        ("source", link.source.as_str()),
+        ("target", link.target.as_str()),
+    ] {
+        kas_core::validate_path(path).map_err(|error| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("invalid Link {kind} path: {error}"),
+            )
+        })?;
+    }
     if link.relation == ROLE_BINDING_RELATION
         && !kas_auth::allows(&auth.rules, ROLE_MANIFEST, "bind", Some(&link.target))
     {

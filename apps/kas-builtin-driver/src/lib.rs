@@ -1,7 +1,5 @@
 //! Built-in controllers that keep ordinary Relation and Link Resources valid.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use async_trait::async_trait;
 use kas_core::{
     DriverExecution, LinkSpec, Mutation, OnSourceDelete, RelationSpec, Resource, ResourceStatus,
@@ -9,8 +7,8 @@ use kas_core::{
 };
 use kas_driver::{Driver, DriverError, DriverRuntime};
 
-const RELATION_MANIFEST: &str = "/builtin/relation";
-const LINK_MANIFEST: &str = "/builtin/link";
+const RELATION_MANIFEST: &str = "/packages/kas/relation/manifest";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
 const INVALID_STATE: &str = "invalid";
 
 pub async fn run_builtin_driver() -> anyhow::Result<()> {
@@ -39,28 +37,43 @@ impl RelationshipDriver {
         }
     }
 
-    async fn resources(&self) -> Result<Vec<Resource>, DriverError> {
-        self.client
-            .get(format!("{}/resources", self.api))
+    async fn resource(&self, path: &str) -> Result<Option<Resource>, DriverError> {
+        let mut url =
+            reqwest::Url::parse(&format!("{}/resources/by-path", self.api)).map_err(execution)?;
+        url.query_pairs_mut().append_pair("path", path);
+        let response = self
+            .client
+            .get(url)
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(execution)?
-            .error_for_status()
-            .map_err(execution)?
-            .json()
-            .await
-            .map_err(execution)
+            .map_err(execution)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            response
+                .error_for_status()
+                .map_err(execution)?
+                .json()
+                .await
+                .map_err(execution)?,
+        ))
     }
 
-    fn status_for(link: &Resource, resources: &BTreeMap<String, Resource>) -> ResourceStatus {
+    fn status_for(
+        link: &Resource,
+        relation: Option<&Resource>,
+        source: Option<&Resource>,
+        target: Option<&Resource>,
+    ) -> ResourceStatus {
         if link.metadata.state == STATE_DELETED {
             return ResourceStatus {
                 metadata: link.status_metadata(STATE_DELETED),
                 spec: link.spec.clone(),
             };
         }
-        match validate_link(link, resources) {
+        match validate_link(link, relation, source, target) {
             Ok(()) => ResourceStatus {
                 metadata: link.status_metadata(STATE_AVAILABLE),
                 spec: link.spec.clone(),
@@ -80,93 +93,97 @@ impl Driver for RelationshipDriver {
     }
 
     async fn reconcile(&self, delivered: &Resource) -> Result<Vec<Mutation>, DriverError> {
-        let resources = self.resources().await?;
-        let by_path = resources
-            .into_iter()
-            .map(|resource| (resource.path.clone(), resource))
-            .collect::<BTreeMap<_, _>>();
-        let mut operations = Vec::new();
-        let mut scheduled_deletions = BTreeSet::new();
         if delivered.manifest == RELATION_MANIFEST {
             let status = relation_status(delivered);
             if delivered.status != status {
-                operations.push(Mutation::UpdateResourceStatus {
+                return Ok(vec![Mutation::UpdateResourceStatus {
                     resource_path: delivered.path.clone(),
                     expected_revision: delivered.revision,
                     status,
-                });
+                }]);
             }
+            return Ok(Vec::new());
         }
-        for link in by_path
-            .values()
-            .filter(|resource| resource.manifest == LINK_MANIFEST)
-        {
-            let decoded = serde_json::from_value::<LinkSpec>(link.spec.clone());
-            let affected = link.path == delivered.path
-                || decoded.as_ref().is_ok_and(|spec| {
-                    spec.relation == delivered.path
-                        || spec.source == delivered.path
-                        || spec.target == delivered.path
-                });
-            if !affected {
-                continue;
-            }
+        if delivered.manifest != LINK_MANIFEST {
+            return Ok(Vec::new());
+        }
 
-            if delivered.metadata.state == STATE_DELETED
-                && link.metadata.state != STATE_DELETED
-                && decoded.as_ref().is_ok_and(|spec| {
-                    spec.relation == delivered.path
-                        || spec.source == delivered.path
-                        || spec.target == delivered.path
+        if delivered.metadata.state == STATE_DELETED {
+            let status = ResourceStatus {
+                metadata: delivered.status_metadata(STATE_DELETED),
+                spec: delivered.spec.clone(),
+            };
+            return Ok((delivered.status != status)
+                .then_some(Mutation::UpdateResourceStatus {
+                    resource_path: delivered.path.clone(),
+                    expected_revision: delivered.revision,
+                    status,
+                })
+                .into_iter()
+                .collect());
+        }
+
+        let Ok(spec) = serde_json::from_value::<LinkSpec>(delivered.spec.clone()) else {
+            return Ok(status_mutation(delivered, INVALID_STATE)
+                .into_iter()
+                .collect());
+        };
+        let relation = self.resource(&spec.relation).await?;
+        let source = self.resource(&spec.source).await?;
+        let target = self.resource(&spec.target).await?;
+        let dependency_deleted = [&relation, &source, &target].into_iter().any(|resource| {
+            resource
+                .as_ref()
+                .is_none_or(|resource| resource.metadata.state == STATE_DELETED)
+        });
+        if dependency_deleted {
+            let mut operations = vec![
+                Mutation::DeleteResource {
+                    resource_path: delivered.path.clone(),
+                    expected_revision: delivered.revision,
+                },
+                Mutation::UpdateResourceStatus {
+                    resource_path: delivered.path.clone(),
+                    expected_revision: delivered.revision + 1,
+                    status: ResourceStatus {
+                        metadata: delivered.status_metadata(STATE_DELETED),
+                        spec: delivered.spec.clone(),
+                    },
+                },
+            ];
+            if source
+                .as_ref()
+                .is_some_and(|source| source.metadata.state == STATE_DELETED)
+                && relation.as_ref().is_some_and(|relation| {
+                    serde_json::from_value::<RelationSpec>(relation.spec.clone())
+                        .is_ok_and(|relation| relation.on_source_delete == OnSourceDelete::Cascade)
                 })
             {
-                if scheduled_deletions.insert(link.path.clone()) {
+                if let Some(target) = target.filter(|target| target.metadata.state != STATE_DELETED)
+                {
+                    let expected_revision = target.revision;
                     operations.push(Mutation::DeleteResource {
-                        resource_path: link.path.clone(),
-                        expected_revision: link.revision,
-                    });
-                    operations.push(Mutation::UpdateResourceStatus {
-                        resource_path: link.path.clone(),
-                        expected_revision: link.revision + 1,
-                        status: ResourceStatus {
-                            metadata: link.status_metadata(STATE_DELETED),
-                            spec: link.spec.clone(),
-                        },
+                        resource_path: target.path,
+                        expected_revision,
                     });
                 }
-                if let Ok(spec) = decoded {
-                    if spec.source == delivered.path {
-                        if let Some(relation) = by_path.get(&spec.relation) {
-                            if serde_json::from_value::<RelationSpec>(relation.spec.clone())
-                                .is_ok_and(|relation| {
-                                    relation.on_source_delete == OnSourceDelete::Cascade
-                                })
-                            {
-                                if let Some(target) = by_path.get(&spec.target) {
-                                    if target.metadata.state != STATE_DELETED
-                                        && scheduled_deletions.insert(target.path.clone())
-                                    {
-                                        operations.push(Mutation::DeleteResource {
-                                            resource_path: target.path.clone(),
-                                            expected_revision: target.revision,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                continue;
             }
+            return Ok(operations);
+        }
 
-            let status = Self::status_for(link, &by_path);
-            if link.status != status {
-                operations.push(Mutation::UpdateResourceStatus {
-                    resource_path: link.path.clone(),
-                    expected_revision: link.revision,
-                    status,
-                });
-            }
+        let status = Self::status_for(
+            delivered,
+            relation.as_ref(),
+            source.as_ref(),
+            target.as_ref(),
+        );
+        let mut operations = Vec::new();
+        if delivered.status != status {
+            operations.push(Mutation::UpdateResourceStatus {
+                resource_path: delivered.path.clone(),
+                expected_revision: delivered.revision,
+                status,
+            });
         }
         Ok(operations)
     }
@@ -211,23 +228,22 @@ fn relation_status(resource: &Resource) -> ResourceStatus {
     }
 }
 
-fn validate_link(link: &Resource, resources: &BTreeMap<String, Resource>) -> Result<(), String> {
+fn validate_link(
+    link: &Resource,
+    relation: Option<&Resource>,
+    source: Option<&Resource>,
+    target: Option<&Resource>,
+) -> Result<(), String> {
     let spec: LinkSpec =
         serde_json::from_value(link.spec.clone()).map_err(|error| error.to_string())?;
-    let relation = resources
-        .get(&spec.relation)
-        .ok_or_else(|| format!("Relation {} does not exist", spec.relation))?;
+    let relation = relation.ok_or_else(|| format!("Relation {} does not exist", spec.relation))?;
     if relation.manifest != RELATION_MANIFEST {
         return Err(format!("{} is not a Relation", relation.path));
     }
     let relation_spec: RelationSpec =
         serde_json::from_value(relation.spec.clone()).map_err(|error| error.to_string())?;
-    let source = resources
-        .get(&spec.source)
-        .ok_or_else(|| format!("Source {} does not exist", spec.source))?;
-    let target = resources
-        .get(&spec.target)
-        .ok_or_else(|| format!("Target {} does not exist", spec.target))?;
+    let source = source.ok_or_else(|| format!("Source {} does not exist", spec.source))?;
+    let target = target.ok_or_else(|| format!("Target {} does not exist", spec.target))?;
     if !relation_spec
         .sources
         .iter()
@@ -253,6 +269,18 @@ fn validate_link(link: &Resource, resources: &BTreeMap<String, Resource>) -> Res
     validator
         .validate(&spec.metadata)
         .map_err(|error| format!("Link metadata is invalid: {error}"))
+}
+
+fn status_mutation(link: &Resource, state: &str) -> Option<Mutation> {
+    let status = ResourceStatus {
+        metadata: link.status_metadata(state),
+        spec: link.spec.clone(),
+    };
+    (link.status != status).then_some(Mutation::UpdateResourceStatus {
+        resource_path: link.path.clone(),
+        expected_revision: link.revision,
+        status,
+    })
 }
 
 fn execution(error: impl std::fmt::Display) -> DriverError {

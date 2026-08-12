@@ -12,15 +12,16 @@ KAS exposes one persistent primitive:
 
 ```json
 {
-  "path": "/agents/reviewer",
+  "path": "/packages/acme/agent/resources/reviewer",
   "metadata": {
-    "manifest": "/manifests/agent",
+    "manifest": "/packages/acme/agent/manifest",
     "state": "available",
     "[kas]": {
       "revision": 4,
-      "package": "/packages/sha256/...",
+      "package": "/packages/acme/agent",
+      "package_revision": 3,
       "observed": {
-        "/manifests/agent/driver": {
+        "/packages/acme/agent/driver": {
           "driver_revision": 2,
           "resource_revision": 4
         }
@@ -32,13 +33,14 @@ KAS exposes one persistent primitive:
   },
   "status": {
     "metadata": {
-      "manifest": "/manifests/agent",
+      "manifest": "/packages/acme/agent/manifest",
       "state": "available",
       "[kas]": {
         "revision": 4,
-        "package": "/packages/sha256/...",
+        "package": "/packages/acme/agent",
+        "package_revision": 3,
         "observed": {
-          "/manifests/agent/driver": {
+          "/packages/acme/agent/driver": {
             "driver_revision": 2,
             "resource_revision": 4
           }
@@ -61,34 +63,35 @@ KAS-owned metadata is isolated under the reserved `"[kas]"` key. Manifest
 schemas may not define field names containing `[` or `]`.
 
 The `resources` table contains only `path`, `metadata`, `spec`, and `status`.
-SQLite stores the three documents as JSON text. PostgreSQL uses native `jsonb`.
-Backend-specific JSON expression indexes accelerate Manifest, Link, Run, and
-other platform queries without duplicating those values into parallel columns.
+SQLite stores the three documents as JSON text. JSON expression indexes
+accelerate Manifest, Link, Run, and other platform queries without duplicating
+those values into parallel columns.
 
 ## Manifests and built-ins
 
-A Manifest is a Resource defined by `/builtin/manifest`; it is not a second
+A Manifest is a Resource defined by `/packages/kas/manifest/manifest`; it is not a second
 persistent primitive. The self-describing root Manifest is the only seed the
-kernel must trust directly. KAS then installs the standard library under
-`/builtin`:
+kernel must trust directly. KAS then installs the standard library as isolated
+Packages under `/packages/kas`:
 
 ```text
-/builtin/manifest
-/builtin/action
-/builtin/relation
-/builtin/link
-/builtin/driver
-/builtin/run
-/builtin/user
-/builtin/service-account
-/builtin/role
-/builtin/credential
-/builtin/package
+/packages/kas/manifest/manifest
+/packages/kas/action/manifest
+/packages/kas/relation/manifest
+/packages/kas/link/manifest
+/packages/kas/driver/manifest
+/packages/kas/run/manifest
+/packages/kas/user/manifest
+/packages/kas/service-account/manifest
+/packages/kas/role/manifest
+/packages/kas/credential/manifest
+/packages/kas/package/manifest
 ```
 
 Action, Relation, Link, Driver, Run, User, ServiceAccount, Role, Credential,
 and Package objects are ordinary Resources whose Manifest gives them platform
-semantics. Business Manifests normally live below `/manifests/{name}`.
+semantics. Every installable Package has one Manifest at its stable
+`/packages/{publisher}/{package}/manifest` location.
 
 The built-in definitions are shipped as independent packages in
 [`builtins/`](../builtins/). Store initialization installs them automatically;
@@ -102,15 +105,95 @@ Every public persistent object uses an absolute path for identity and
 references:
 
 ```text
-/manifests/computer
-/computers/team-a/computer-01
-/manifests/agent/service-accounts/driver
-/roles/team-a/computer-reader
+/packages/acme/computer
+/packages/acme/computer/manifest
+/packages/acme/computer/resources/computer-01
+/packages/acme/computer/service-accounts/driver
+/packages/acme/computer/roles/reader
 ```
 
-Paths cannot be renamed. Empty segments, `.`, `..`, repeated slashes, and a
-trailing slash are invalid. Protocol correlation values such as
-`delivery_id` remain UUIDs; they are not object identities.
+Paths cannot be renamed. A persisted path is canonical: every segment is 1 to
+128 bytes, starts and ends with a lowercase ASCII letter or digit, and contains
+only lowercase ASCII letters, digits, and internal `-` characters. The complete
+path is at most 1024 bytes. Empty segments, uppercase and Unicode characters,
+spaces, percent-encoded aliases, `.`, `..`, repeated slashes, and a trailing
+slash are invalid. Protocol correlation values such as `delivery_id` remain
+UUIDs; they are not object identities.
+
+`*` and `**` are complete wildcard segments and are legal only in patterns;
+partial forms such as `/packages/acme/integration-*/manifest` are invalid. A
+Manifest's `paths` field defines where its instances may be created inside its
+Package sandbox:
+
+```json
+{
+  "path": "/packages/acme/agent/manifest",
+  "paths": ["./resources/*", "./resources/groups/*"]
+}
+```
+
+Installation resolves those patterns to
+`/packages/acme/agent/resources/*` and
+`/packages/acme/agent/resources/groups/*`. Non-platform Packages cannot declare
+an absolute Manifest path pattern or escape their Package Root. Trusted
+`/packages/kas/**` Packages are the only exception because their platform
+Manifests define cross-Package types such as Action, Link, Role, and Run. Run
+instances are a narrower exception: KAS alone creates them below
+`/packages/kas/run/runs/{subject-key}/{action-key}/{request-id}` through
+`POST /runs`. The opaque keys are deterministic partitions, never identities
+used to authorize or reconstruct the Subject and Action.
+
+Creation must satisfy the Package boundary, the Manifest path patterns, and
+the caller's RBAC path rules. A Package Root must already exist before generic
+CRUD may create descendants. A path containing a `credentials` segment can
+only be populated through Credential APIs.
+
+Path hierarchy establishes identity, ownership, and authorization scope; it
+is not an implicit Link. Prefix nesting does not synthesize relationships or
+make ordinary deletion cascade. Package-only `./...` notation is resolved and
+validated before installation and is never persisted or exposed by the API.
+
+## Actions and Runs
+
+An Action is a Package-owned definition at
+`/packages/{publisher}/{package}/actions/{name}`. Its input and output JSON
+Schemas define one operation. A caller invokes it with:
+
+```http
+POST /runs
+Authorization: Bearer <credential>
+Content-Type: application/json
+
+{
+  "request_id": "df237cbd-d13d-48ae-8743-b59588d76f1e",
+  "resource": "/packages/forge/agent/agents/preview",
+  "action": "/packages/forge/agent/actions/run",
+  "input": {"prompt": "Inspect the repository"}
+}
+```
+
+The API derives the Subject exclusively from the credential and creates:
+
+```text
+/packages/kas/run/runs/{subject-key}/{action-key}/{request-id}
+```
+
+`subject-key` and `action-key` are lowercase UUIDv5 values derived by KAS. They
+keep the hierarchy compact and deterministic but carry no authorization
+meaning: KAS never parses them back into paths. The Run `spec.subject`,
+`spec.resource`, `spec.action`, and protected `Run → Subject`, `Run → Resource`,
+`Run → Action`, and `Run → Driver` Links are authoritative.
+
+Creating a Run requires `invoke` on the target Resource and `use` on the Action.
+The client cannot choose the Run path or Subject, and neither clients nor
+Drivers may create a Run through generic Resource mutations. Run Resources are
+protected after creation; only the assigned Driver generation can complete
+them through the Driver protocol.
+
+Schema migration 20 removes pre-v2 Run records because they did not persist the
+authenticated Subject; retaining or guessing their ownership would create
+false audit data. It also replaces global `request_id` uniqueness with the
+Subject/Action/Request identity encoded by the server-derived path.
 
 ## Packages
 
@@ -131,9 +214,26 @@ agent.kas
         └── kas-agent-driver
 ```
 
-`manifest.json` defines only the Manifest. Each JSON file below `resources/`
-contains one normal Resource envelope. Relative paths beginning with `./` are
-resolved below the installed Manifest path.
+`manifest.json` defines only the Manifest. Its path must be exactly
+`/packages/{publisher}/{package}/manifest`; KAS derives the stable Package Root
+by removing `/manifest`. Each JSON file below `resources/` contains one normal
+Resource envelope and its top-level `path` must use `./...`. Package-relative
+paths and patterns resolve from the Package Root, while `.` in a Manifest
+selector means the Package's own Manifest. Absolute paths remain valid only as
+cross-Package references.
+
+For `/packages/acme/agent`, examples resolve as follows:
+
+```text
+./resources/reviewer       -> /packages/acme/agent/resources/reviewer
+./actions/run              -> /packages/acme/agent/actions/run
+./roles/driver             -> /packages/acme/agent/roles/driver
+./driver                   -> /packages/acme/agent/driver
+. in a Manifest selector   -> /packages/acme/agent/manifest
+```
+
+Driver `entrypoint` is different: `./driver/bin/kas-agent-driver` is a file
+inside the tar artifact, not a Resource path.
 
 KAS validates and hashes the archive, stages it, then atomically moves it to:
 
@@ -141,21 +241,26 @@ KAS validates and hashes the archive, stages it, then atomically moves it to:
 ${KAS_DATA_DIR}/packages/sha256/<digest>/
 ```
 
-Installation creates a protected `/builtin/package` Resource and a
-Package-to-Manifest Link. Reinstalling the same Manifest and digest is
-idempotent. Installing a new digest atomically updates the Manifest and
-package-managed initial Resources, while ordinary business Resources remain
-in place and reconcile against the new Package revision.
+Installation creates the protected Package Resource at the Package Root and a
+Package-to-Manifest Link. The Package Path is stable; its `spec.digest` points
+to the content-addressed artifact directory. Reinstalling the same digest is
+idempotent. Installing a new digest increments the Package Resource revision,
+atomically updates the Manifest and package-managed initial Resources, and
+keeps ordinary business Resources in place.
+
+For business Resources, `metadata["[kas]"].package` stores the stable Package
+Path and `package_revision` stores the desired Package revision. The owning
+Driver completes migration by advancing the corresponding fields in
+`status.metadata["[kas]"]`.
 
 For a running Driver, the Supervisor stops the old process and starts the new
-entrypoint with an incremented generation and the new package root. An old
-Package remains available until all status references converge, then KAS
-reclaims it.
+entrypoint with an incremented generation and the new content-addressed
+artifact directory.
 
 ## Relations and Links
 
 A Relation defines valid endpoint Manifest selectors, metadata, and deletion
-behavior. A Link is a `/builtin/link` Resource containing the Relation path,
+behavior. A Link is a `/packages/kas/link/manifest` Resource containing the Relation path,
 source path, and target path.
 
 Clients create and query Links through the generic Resource API. The built-in
@@ -163,6 +268,11 @@ Relationship Driver manages both Relation and Link Manifests, validates
 endpoints asynchronously, advances valid Links to `available`, and applies
 `unlink` or `cascade` deletion behavior. Cardinality and domain-specific
 relationship balance remain the responsibility of business Drivers.
+
+The Relationship Driver does not watch or list the complete Resource registry.
+Source, target, and Relation indexes let the Store advance only affected Link
+revisions; those unreconciled Links are then delivered through the normal
+observation queue. Each delivery reads only its three referenced Resources.
 
 Role bindings, Driver credentials, Run targets, Actions, Packages, and other
 platform mappings are represented by named Links instead of private object
@@ -177,9 +287,9 @@ A Rule constrains Manifest, verb, and optional instance path:
 
 ```json
 {
-  "manifests": ["/manifests/computer"],
+  "manifests": ["/packages/acme/computer/manifest"],
   "verbs": ["get", "update"],
-  "paths": ["/computers/team-a/**"]
+  "paths": ["/packages/acme/computer/resources/team-a/**"]
 }
 ```
 
@@ -191,6 +301,11 @@ their initial Resources. A Driver explicitly references its ServiceAccount;
 KAS does not infer business permissions. Driver Credentials are bound to the
 Driver generation and protected Driver-to-Credential Link. They become invalid
 when the Driver stops, restarts, or loses that Link.
+
+Because RoleBinding Links are themselves part of the authorization boundary,
+the Store validates and activates them transactionally. Authorization ignores
+bindings whose desired state is `deleted` or whose status is not `available`;
+`pending` and `invalid` bindings never grant permissions.
 
 `GET /auth` returns the caller's Credential, Subject, and effective Rules.
 `POST /auth/check` answers whether that same Credential may perform one
@@ -284,9 +399,8 @@ cargo run -p kas-admin -- bootstrap admin
 cargo run -p kas-api
 ```
 
-SQLite uses `${KAS_DATA_DIR}/kas.db` by default. Set the same
-`KAS_DATABASE=postgresql://...` value for all three commands to use PostgreSQL.
-`KAS_DATABASE_POOL_SIZE` controls the connection pool and defaults to 16.
+SQLite uses `${KAS_DATA_DIR}/kas.db` by default. `KAS_DATABASE` can override
+that file path, and `KAS_DATABASE_POOL_SIZE` controls the connection pool.
 
 The API never performs schema migration implicitly; it refuses to start when
 the database is not ready.
@@ -320,12 +434,6 @@ Run the Core tests:
 ```bash
 cargo test --workspace
 tests/e2e.sh
-```
-
-With Docker available, the same black-box flow can validate native PostgreSQL:
-
-```bash
-tests/e2e-postgres.sh
 ```
 
 The independent end-to-end benchmark starts a real API and Driver processes,

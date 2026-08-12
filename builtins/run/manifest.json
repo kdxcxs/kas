@@ -1,13 +1,17 @@
 {
-  "path": "/builtin/run",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/kas/run/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "run",
-  "version": 1,
+  "version": 2,
   "description": "Defines Action Run Resources",
+  "paths": [
+    "/packages/kas/run/runs/*/*/*"
+  ],
   "resource_schema": {
     "type": "object",
     "required": [
       "request_id",
+      "subject",
       "resource",
       "action",
       "input"

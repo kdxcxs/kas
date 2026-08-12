@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "relationship-driver"
   },
   "spec": {
@@ -22,8 +22,8 @@
       },
       {
         "manifests": [
-          "/builtin/relation",
-          "/builtin/link"
+          "/packages/kas/relation/manifest",
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "update"
