@@ -1,0 +1,9 @@
+{
+  "path": "./service-accounts/driver",
+  "metadata": {
+    "manifest": "/packages/kas/service-account/manifest",
+    "name": "forge-package-request-driver"
+  },
+  "spec": {}
+}
+

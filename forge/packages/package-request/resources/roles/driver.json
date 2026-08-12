@@ -1,0 +1,55 @@
+{
+  "path": "./roles/driver",
+  "metadata": {
+    "manifest": "/packages/kas/role/manifest",
+    "name": "forge-package-request-driver"
+  },
+  "spec": {
+    "description": "Validate Package artifacts and maintain Package Request audit Resources.",
+    "rules": [
+      {
+        "manifests": [
+          "."
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "update",
+          "delete"
+        ],
+        "paths": [
+          "./requests/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/link/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list",
+          "create",
+          "delete"
+        ],
+        "paths": [
+          "./requests/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest"
+        ],
+        "verbs": [
+          "get",
+          "list"
+        ],
+        "paths": [
+          "/packages/**"
+        ]
+      }
+    ]
+  }
+}
+

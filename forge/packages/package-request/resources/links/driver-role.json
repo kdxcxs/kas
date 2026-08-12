@@ -1,0 +1,14 @@
+{
+  "path": "./links/driver-role",
+  "metadata": {
+    "manifest": "/packages/kas/link/manifest",
+    "name": "forge-package-request-driver-role"
+  },
+  "spec": {
+    "relation": "/packages/kas/link/relations/role-binding",
+    "source": "./service-accounts/driver",
+    "target": "./roles/driver",
+    "metadata": {}
+  }
+}
+
