@@ -313,6 +313,7 @@ pub enum RelationRole {
     PackageManifest,
     ResourceManifest,
     RunResource,
+    RunSubject,
     RunAction,
     RunDriver,
     DriverServiceAccount,
@@ -419,6 +420,7 @@ pub enum DriverControlState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunSpec {
     pub request_id: Uuid,
+    pub subject: String,
     pub resource: String,
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -990,11 +992,36 @@ impl From<Value> for DriverExecution {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateRun {
-    pub path: String,
     pub request_id: Uuid,
     pub resource: String,
     pub action: String,
     pub input: Value,
+}
+
+fn run_partition_key(kind: &str, path: &str) -> Result<Uuid, PathError> {
+    validate_path(path)?;
+    Ok(Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("kas:run-{kind}:{path}").as_bytes(),
+    ))
+}
+
+pub fn run_subject_path_pattern(subject: &str) -> Result<String, PathError> {
+    Ok(format!(
+        "/packages/kas/run/runs/{}/**",
+        run_partition_key("subject", subject)?.simple()
+    ))
+}
+
+pub fn run_path(subject: &str, action: &str, request_id: Uuid) -> Result<String, PathError> {
+    let subject_key = run_partition_key("subject", subject)?;
+    let action_key = run_partition_key("action", action)?;
+    Ok(format!(
+        "/packages/kas/run/runs/{}/{}/{}",
+        subject_key.simple(),
+        action_key.simple(),
+        request_id.simple()
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1305,6 +1332,47 @@ mod tests {
         assert_eq!(paths.len(), 11);
         assert!(paths.contains(&"/packages/kas/manifest/manifest".into()));
         assert!(paths.contains(&"/packages/kas/package/manifest".into()));
+    }
+
+    #[test]
+    fn run_paths_use_server_derived_subject_and_action_partitions() {
+        let request_id = Uuid::parse_str("df237cbd-d13d-48ae-8743-b59588d76f1e").unwrap();
+        let path = run_path(
+            "/packages/kas/user/users/alice",
+            "/packages/forge/agent/actions/run",
+            request_id,
+        )
+        .unwrap();
+        let segments = path.split('/').collect::<Vec<_>>();
+        assert_eq!(&segments[..5], &["", "packages", "kas", "run", "runs"]);
+        assert_eq!(segments.len(), 8);
+        assert_eq!(segments[5].len(), 32);
+        assert_eq!(segments[6].len(), 32);
+        assert_eq!(segments[7], "df237cbdd13d48ae8743b59588d76f1e");
+        assert!(!path.contains("alice"));
+        assert!(path_matches(
+            &run_subject_path_pattern("/packages/kas/user/users/alice").unwrap(),
+            &path
+        ));
+        assert_eq!(
+            path,
+            run_path(
+                "/packages/kas/user/users/alice",
+                "/packages/forge/agent/actions/run",
+                request_id,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            path,
+            run_path(
+                "/packages/kas/user/users/bob",
+                "/packages/forge/agent/actions/run",
+                request_id,
+            )
+            .unwrap()
+        );
+        assert!(validate_path(&path).is_ok());
     }
 
     #[test]

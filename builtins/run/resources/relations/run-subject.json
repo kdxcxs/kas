@@ -1,0 +1,27 @@
+{
+  "path": "./relations/run-subject",
+  "metadata": {
+    "manifest": "/packages/kas/relation/manifest",
+    "name": "run-subject"
+  },
+  "spec": {
+    "role": "run_subject",
+    "sources": [
+      {
+        "manifest": "/packages/kas/run/manifest"
+      }
+    ],
+    "targets": [
+      {
+        "manifest": [
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest"
+        ]
+      }
+    ],
+    "on_source_delete": "unlink",
+    "metadata_schema": {
+      "type": "object"
+    }
+  }
+}

@@ -20,8 +20,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use kas_auth::{AuthContext, AuthorizationCheck, AuthorizationDecision, IssuedCredential};
 use kas_core::{
-    DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork, LinkSpec, Mutation,
-    PackageSpec, PlannedResource, Resource, RestartPolicy, UpdateResource,
+    CreateRun, DriverControlState, DriverReady, DriverSpec, DriverState, DriverWork, LinkSpec,
+    Mutation, PackageSpec, PlannedResource, Resource, RestartPolicy, UpdateResource,
     BUILTIN_PACKAGE_MEDIA_TYPE, MANIFEST_PACKAGE_MEDIA_TYPE,
 };
 use kas_driver::{ClientMessage, CompletionStatus, MutationError, MutationStatus, ServerMessage};
@@ -91,6 +91,7 @@ pub fn app_with_config(store: Store, config: AppConfig) -> Router {
     recover_drivers(&state);
     let protected = Router::new()
         .route("/resources", get(list_resources).post(create_resource))
+        .route("/runs", post(create_run))
         .route(
             "/resources/by-path",
             get(get_resource)
@@ -278,6 +279,27 @@ async fn create_resource(
     let resource = lock(&state)?.create_resource(input)?;
     notify_reconcile(&state);
     Ok((StatusCode::CREATED, Json(resource)))
+}
+
+async fn create_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRun>,
+) -> ApiResult<(StatusCode, Json<Resource>)> {
+    let auth = authenticate(&state, &headers)?;
+    let target = lock(&state)?.get_resource(&input.resource)?;
+    if !kas_auth::allows(&auth.rules, &target.manifest, "invoke", Some(&target.path)) {
+        return Err(forbidden());
+    }
+    let action = lock(&state)?.get_resource(&input.action)?;
+    if action.manifest != "/packages/kas/action/manifest"
+        || !kas_auth::allows(&auth.rules, &action.manifest, "use", Some(&action.path))
+    {
+        return Err(forbidden());
+    }
+    let run = lock(&state)?.enqueue_run(&auth.subject.path, input)?;
+    notify_reconcile(&state);
+    Ok((StatusCode::CREATED, Json(run)))
 }
 
 #[derive(Debug, Deserialize)]

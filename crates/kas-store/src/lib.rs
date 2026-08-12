@@ -20,14 +20,14 @@ use events::{
 };
 use kas_auth::{issue_token, token_hash, AuthContext, IssuedCredential, Rule, Subject};
 use kas_core::{
-    package_root_for_path, ActionSpec, CreateResource, CreateRun, CredentialSpec, DeliveryStatus,
-    DriverDelivery, DriverObservation, DriverReady, DriverSpec, DriverState, DriverWork, Event,
-    EventFilter, EventType, FinishRun, KasMetadata, LinkSpec, ManifestDefinition, ManifestSpec,
-    Mutation, PackageDefinition, PackageExpansion, PackageSpec, PlannedResource, RelationRole,
-    RelationSpec, Resource, ResourceDefinition, ResourceMetadata, ResourceStatus,
-    ResourceStatusMetadata, RestartPolicy, RoleSpec, RunResult, RunSpec, RunState, SystemRole,
-    UpdateResource, UpdateResourceStatus, UserSpec, BUILTIN_PACKAGE_MEDIA_TYPE, STATE_AVAILABLE,
-    STATE_DELETED,
+    package_root_for_path, run_path, run_subject_path_pattern, ActionSpec, CreateResource,
+    CreateRun, CredentialSpec, DeliveryStatus, DriverDelivery, DriverObservation, DriverReady,
+    DriverSpec, DriverState, DriverWork, Event, EventFilter, EventType, FinishRun, KasMetadata,
+    LinkSpec, ManifestDefinition, ManifestSpec, Mutation, PackageDefinition, PackageExpansion,
+    PackageSpec, PlannedResource, RelationRole, RelationSpec, Resource, ResourceDefinition,
+    ResourceMetadata, ResourceStatus, ResourceStatusMetadata, RestartPolicy, RoleSpec, RunResult,
+    RunSpec, RunState, SystemRole, UpdateResource, UpdateResourceStatus, UserSpec,
+    BUILTIN_PACKAGE_MEDIA_TYPE, STATE_AVAILABLE, STATE_DELETED,
 };
 use reconcile::{affected_manifest_paths, driver_matches_resource, ReconcileQueue};
 use serde::de::DeserializeOwned;
@@ -37,7 +37,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 19;
+pub const LATEST_SCHEMA_VERSION: u32 = 20;
 
 pub const MANIFEST_MANIFEST: &str = "/packages/kas/manifest/manifest";
 pub const ACTION_MANIFEST: &str = "/packages/kas/action/manifest";
@@ -113,6 +113,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         19,
         include_str!("../migrations/0019_package_sandbox_paths.sql"),
+    ),
+    (
+        20,
+        include_str!("../migrations/0020_subject_owned_runs.sql"),
     ),
 ];
 
@@ -876,6 +880,11 @@ impl Store {
                 "Credential Resources can only be created by POST /credentials".into(),
             ));
         }
+        if input.manifest == RUN_MANIFEST {
+            return Err(StoreError::Invalid(
+                "Run Resources can only be created by POST /runs".into(),
+            ));
+        }
         let tx = self.connection.transaction()?;
         validate_external_create_path(&tx, &input.path)?;
         let now = Utc::now();
@@ -1418,17 +1427,32 @@ impl Store {
         Ok(self.get_driver(path)?.metadata.kas.generation)
     }
 
-    pub fn enqueue_run(&self, input: CreateRun) -> Result<Resource, StoreError> {
-        let target = self.get_resource(&input.resource)?;
-        let action = self.get_resource(&input.action)?;
+    pub fn enqueue_run(
+        &self,
+        subject_path: &str,
+        input: CreateRun,
+    ) -> Result<Resource, StoreError> {
+        let tx = self.connection.transaction()?;
+        let subject = resource_in(&tx, subject_path)?;
+        if subject.manifest != USER_MANIFEST && subject.manifest != SERVICE_ACCOUNT_MANIFEST {
+            return Err(StoreError::Invalid(
+                "Run subject must be a User or ServiceAccount".into(),
+            ));
+        }
+        let target = resource_in(&tx, &input.resource)?;
+        let action = resource_in(&tx, &input.action)?;
         require_manifest(&action, ACTION_MANIFEST)?;
         let action_spec: ActionSpec = decode(&action.spec, "Action spec")?;
         validate_json_schema("Run input", &action_spec.input_schema, &input.input)?;
-        let driver = self
-            .driver_for_manifest(&target.manifest)?
+        let driver = driver_path_for_manifest(&tx, &target.manifest)?
+            .map(|path| resource_in(&tx, &path))
+            .transpose()?
             .ok_or_else(|| StoreError::Invalid("Resource Manifest has no Driver".into()))?;
+        let path = run_path(subject_path, &input.action, input.request_id)
+            .map_err(|error| StoreError::Invalid(format!("invalid Run identity: {error}")))?;
         let spec = serde_json::to_value(RunSpec {
             request_id: input.request_id,
+            subject: subject_path.into(),
             resource: input.resource,
             action: input.action,
             driver: Some(driver.path.clone()),
@@ -1446,8 +1470,8 @@ impl Store {
             },
             spec: spec.clone(),
         };
-        self.create_resource(PlannedResource {
-            path: input.path,
+        let planned = PlannedResource {
+            path: path.clone(),
             metadata: kas_core::PlannedResourceMetadata {
                 manifest: RUN_MANIFEST.into(),
                 name: input.request_id.to_string(),
@@ -1455,7 +1479,23 @@ impl Store {
             },
             spec,
             status,
-        })
+        };
+        validate_against_manifest(
+            &tx,
+            &planned.manifest,
+            &planned.metadata.state,
+            &planned.spec,
+            &planned.status,
+        )?;
+        let now = Utc::now();
+        insert_resource_row(&tx, &planned, true, "system", now)?;
+        project_resource(&tx, &planned, "", now)?;
+        let resource = resource_in(&tx, &path)?;
+        project_declared_relationships(&tx, &planned_from_resource(resource.clone()), now)?;
+        append_event(&tx, EventType::Created, &resource, now)?;
+        tx.commit()?;
+        self.schedule_reconcile_path(&path)?;
+        Ok(resource)
     }
 
     pub fn get_run(&self, path: &str) -> Result<Resource, StoreError> {
@@ -2221,6 +2261,15 @@ impl Store {
                 paths: rule.paths,
             }));
         }
+        rules.push(Rule {
+            manifests: vec![RUN_MANIFEST.into()],
+            verbs: vec!["get".into(), "list".into()],
+            paths: vec![
+                run_subject_path_pattern(&subject_resource.path).map_err(|error| {
+                    StoreError::Invalid(format!("invalid Run subject path: {error}"))
+                })?,
+            ],
+        });
         let driver_path = if let Some(generation) = spec.driver_generation {
             let relation = self
                 .relation_path(RelationRole::DriverCredential)?
@@ -2329,6 +2378,7 @@ fn builtin_documents() -> [BuiltinDocuments; 11] {
             manifest: include_str!("../../../builtins/run/manifest.json"),
             resources: &[
                 include_str!("../../../builtins/run/resources/relations/run-resource.json"),
+                include_str!("../../../builtins/run/resources/relations/run-subject.json"),
                 include_str!("../../../builtins/run/resources/relations/run-action.json"),
                 include_str!("../../../builtins/run/resources/relations/run-driver.json"),
             ],
@@ -3066,6 +3116,19 @@ fn is_builtin_state(state: &str) -> bool {
 
 fn project_run(tx: &Transaction, planned: &PlannedResource) -> Result<(), StoreError> {
     let mut spec: RunSpec = decode(&planned.spec, "Run spec")?;
+    let expected_path = run_path(&spec.subject, &spec.action, spec.request_id)
+        .map_err(|error| StoreError::Invalid(format!("invalid Run identity: {error}")))?;
+    if planned.path != expected_path {
+        return Err(StoreError::Invalid(format!(
+            "Run path must be derived by KAS as {expected_path}"
+        )));
+    }
+    let subject = resource_in(tx, &spec.subject)?;
+    if subject.manifest != USER_MANIFEST && subject.manifest != SERVICE_ACCOUNT_MANIFEST {
+        return Err(StoreError::Invalid(
+            "Run subject must be a User or ServiceAccount".into(),
+        ));
+    }
     let target = resource_in(tx, &spec.resource)?;
     let action = resource_in(tx, &spec.action)?;
     require_manifest(&action, ACTION_MANIFEST)?;
@@ -3118,6 +3181,7 @@ fn project_declared_relationships(
         RUN_MANIFEST => {
             let spec: RunSpec = decode(&resource.spec, "Run spec")?;
             for (role, target, suffix) in [
+                (RelationRole::RunSubject, spec.subject.as_str(), "subject"),
                 (
                     RelationRole::RunResource,
                     spec.resource.as_str(),
@@ -3535,6 +3599,11 @@ fn apply_mutation(
             if resource.manifest == CREDENTIAL_MANIFEST {
                 return Err(StoreError::Invalid(
                     "Credential Resources can only be created by POST /credentials".into(),
+                ));
+            }
+            if resource.manifest == RUN_MANIFEST {
+                return Err(StoreError::Invalid(
+                    "Run Resources can only be created by POST /runs".into(),
                 ));
             }
             let resource = normalized_initial_documents(tx, &resource)?;
@@ -4647,7 +4716,10 @@ mod tests {
             binding.status.metadata.state = state.into();
             save_resource_in(&tx, &binding).unwrap();
             tx.commit().unwrap();
-            assert!(store.authenticate(&issued.token).unwrap().rules.is_empty());
+            let rules = store.authenticate(&issued.token).unwrap().rules;
+            assert_eq!(rules.len(), 1);
+            assert_eq!(rules[0].manifests, vec![RUN_MANIFEST]);
+            assert_eq!(rules[0].verbs, vec!["get", "list"]);
         }
     }
 
@@ -4858,5 +4930,56 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(columns, vec!["path", "metadata", "spec", "status"]);
+    }
+
+    #[test]
+    fn subject_owned_run_migration_drops_unattributable_legacy_runs() {
+        let connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrate_connection(&connection).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX runs_by_subject_action_request;
+                 CREATE UNIQUE INDEX runs_by_request_id
+                 ON resources(json_extract(spec,'$.request_id'))
+                 WHERE json_extract(metadata,'$.manifest')='/packages/kas/run/manifest';
+                 PRAGMA user_version=19;
+
+                 INSERT INTO resources(path,metadata,spec,status) VALUES
+                 ('/packages/test/echo/resources/source/runs/legacy',
+                  '{\"manifest\":\"/packages/kas/run/manifest\",\"name\":\"legacy\",\"state\":\"succeeded\",\"[kas]\":{\"revision\":0,\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}}',
+                  '{\"request_id\":\"10000000-0000-0000-0000-000000000001\",\"resource\":\"/packages/test/echo/resources/source\",\"action\":\"/packages/test/echo/actions/echo\",\"input\":{}}',
+                  '{\"metadata\":{\"state\":\"succeeded\"},\"spec\":{}}'),
+                 ('/packages/test/echo/resources/source/runs/legacy/links/action',
+                  '{\"manifest\":\"/packages/kas/link/manifest\",\"name\":\"action\",\"state\":\"available\",\"[kas]\":{\"revision\":0,\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}}',
+                  '{\"relation\":\"/packages/kas/run/relations/run-action\",\"source\":\"/packages/test/echo/resources/source/runs/legacy\",\"target\":\"/packages/test/echo/actions/echo\",\"metadata\":{}}',
+                  '{\"metadata\":{\"state\":\"available\"},\"spec\":{}}');
+
+                 INSERT INTO events(event_type,resource_path,revision,value_json,created_at)
+                 VALUES('created','/packages/test/echo/resources/source/runs/legacy',0,'{}','2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+
+        migrate_connection(&connection).unwrap();
+        let resources: u64 = connection
+            .query_row("SELECT COUNT(*) FROM resources", db_params![], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let events: u64 = connection
+            .query_row("SELECT COUNT(*) FROM events", db_params![], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let index: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='runs_by_subject_action_request'",
+                db_params![],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resources, 0);
+        assert_eq!(events, 0);
+        assert_eq!(index, 1);
     }
 }

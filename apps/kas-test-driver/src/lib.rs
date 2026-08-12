@@ -66,7 +66,7 @@ mod tests {
         }))
         .unwrap();
         let run: Resource = serde_json::from_value(json!({
-            "path": "/packages/test/echo/resources/source/runs/echo-1",
+            "path": "/packages/kas/run/runs/11111111111111111111111111111111/22222222222222222222222222222222/10000000000000000000000000000001",
             "metadata": {
                 "manifest": "/packages/kas/run/manifest",
                 "name": "echo-1",
@@ -80,6 +80,7 @@ mod tests {
             },
             "spec": {
                 "request_id": "10000000-0000-0000-0000-000000000001",
+                "subject": "/packages/kas/user/users/e2e-admin",
                 "resource": "/packages/test/echo/resources/source",
                 "action": "/packages/test/echo/actions/echo",
                 "driver": "/packages/test/echo/driver",
@@ -89,6 +90,7 @@ mod tests {
                 "metadata": {"state": "running"},
                 "spec": {
                     "request_id": "10000000-0000-0000-0000-000000000001",
+                    "subject": "/packages/kas/user/users/e2e-admin",
                     "resource": "/packages/test/echo/resources/source",
                     "action": "/packages/test/echo/actions/echo",
                     "driver": "/packages/test/echo/driver",

@@ -150,7 +150,10 @@ relationship and may connect any two Resources:
 
 An Action describes an operation available for a Resource. A Run records one
 execution of that Action. Both are Resources, so execution history uses the
-same querying, authorization, and relationship model.
+same querying, authorization, and relationship model. Clients create Runs
+through `POST /runs` without supplying a Resource path. KAS derives a stable,
+opaque path from the authenticated Subject, Action, and request ID, then records
+protected Links to the Subject, target Resource, Action, and Driver.
 
 ### Package
 
