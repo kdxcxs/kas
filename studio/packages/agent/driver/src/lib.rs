@@ -19,25 +19,25 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const AGENT_MANIFEST: &str = "/manifests/agent";
-const MESSAGE_MANIFEST: &str = "/manifests/message";
-const FILE_MANIFEST: &str = "/manifests/file";
-const SESSION_MANIFEST: &str = "/manifests/session";
-const APPROVAL_MANIFEST: &str = "/manifests/approval";
-const APPROVAL_RESULT_MANIFEST: &str = "/manifests/approval-result";
-const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
-const LINK_MANIFEST: &str = "/builtin/link";
-const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
-const ROLE_MANIFEST: &str = "/builtin/role";
-const ROLE_BINDING_RELATION: &str = "/builtin/relations/role-binding";
-const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
-const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
-const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
-const THREAD_SESSION: &str = "/manifests/session/relations/thread-session";
-const AGENT_SESSION: &str = "/manifests/session/relations/agent-session";
-const SERVICE_ACCOUNT_RELATION: &str = "/manifests/agent/relations/service-account";
-const AGENT_RUNTIME_ROLE: &str = "/manifests/agent/roles/runtime";
-const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
+const AGENT_MANIFEST: &str = "/packages/studio/agent/manifest";
+const MESSAGE_MANIFEST: &str = "/packages/studio/message/manifest";
+const FILE_MANIFEST: &str = "/packages/studio/file/manifest";
+const SESSION_MANIFEST: &str = "/packages/studio/session/manifest";
+const APPROVAL_MANIFEST: &str = "/packages/studio/approval/manifest";
+const APPROVAL_RESULT_MANIFEST: &str = "/packages/studio/approval-result/manifest";
+const MESSAGE_ACTION: &str = "/packages/studio/agent/actions/message";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+const SERVICE_ACCOUNT_MANIFEST: &str = "/packages/kas/service-account/manifest";
+const ROLE_MANIFEST: &str = "/packages/kas/role/manifest";
+const ROLE_BINDING_RELATION: &str = "/packages/kas/link/relations/role-binding";
+const AUTHORED_BY: &str = "/packages/studio/message/relations/authored-by";
+const REPLIES_TO: &str = "/packages/studio/message/relations/replies-to";
+const MESSAGE_THREAD: &str = "/packages/studio/message/relations/message-thread";
+const THREAD_SESSION: &str = "/packages/studio/session/relations/thread-session";
+const AGENT_SESSION: &str = "/packages/studio/session/relations/agent-session";
+const SERVICE_ACCOUNT_RELATION: &str = "/packages/studio/agent/relations/service-account";
+const AGENT_RUNTIME_ROLE: &str = "/packages/studio/agent/roles/runtime";
+const ATTACHED_TO: &str = "/packages/studio/file/relations/attached-to";
 
 #[derive(Debug, Clone)]
 pub struct AgentDriver {
@@ -591,9 +591,10 @@ impl AgentDriver {
     }
 
     fn identity_mutations(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
-        let service_account_path = format!("{}/service-account", resource.path);
+        let agent_name = resource_name(&resource.path);
+        let service_account_path = format!("/packages/studio/agent/service-accounts/{agent_name}");
         let role_link_path = format!("{}/links/runtime-role", resource.path);
-        let skill_role_path = format!("{}/skill-role", resource.path);
+        let skill_role_path = format!("/packages/studio/agent/roles/{agent_name}-skills");
         let skill_role_link_path = format!("{}/links/skill-role", resource.path);
         let link_path = format!("{}/links/service-account", resource.path);
         let kas_skill_link_path = format!("{}/links/skills/kas", resource.path);
@@ -655,21 +656,23 @@ impl AgentDriver {
                             RbacRuleSpec {
                                 manifests: vec![SKILL_MANIFEST.into()],
                                 verbs: vec!["get".into(), "list".into()],
-                                paths: vec![
-                                    "/skills/**".into(),
-                                    "/users/**/skills/**".into(),
-                                    "/agents/**/skills/**".into(),
-                                ],
+                                paths: vec!["/packages/studio/skill/skills/**".into()],
                             },
                             RbacRuleSpec {
                                 manifests: vec![SKILL_MANIFEST.into()],
                                 verbs: vec!["create".into(), "update".into(), "delete".into()],
-                                paths: vec![format!("{}/skills/**", resource.path)],
+                                paths: vec![format!(
+                                    "/packages/studio/skill/skills/agents/{}/**",
+                                    resource_name(&resource.path)
+                                )],
                             },
                             RbacRuleSpec {
                                 manifests: vec![FILE_MANIFEST.into()],
                                 verbs: vec!["upload".into(), "download".into()],
-                                paths: vec![format!("/files{}/skills/**", resource.path)],
+                                paths: vec![format!(
+                                    "/packages/studio/file/files/skills/agents/{}/**",
+                                    resource_name(&resource.path)
+                                )],
                             },
                             RbacRuleSpec {
                                 manifests: vec![LINK_MANIFEST.into()],
@@ -682,21 +685,41 @@ impl AgentDriver {
                                 ],
                                 paths: vec![
                                     format!("{}/links/skills/**", resource.path),
-                                    format!("{}/skills/**", resource.path),
+                                    format!(
+                                        "/packages/studio/skill/skills/agents/{}/**",
+                                        resource_name(&resource.path)
+                                    ),
                                 ],
                             },
                             RbacRuleSpec {
-                                manifests: vec![
-                                    APPROVAL_MANIFEST.into(),
-                                    APPROVAL_RESULT_MANIFEST.into(),
-                                ],
+                                manifests: vec![APPROVAL_MANIFEST.into()],
                                 verbs: vec!["get".into(), "list".into()],
-                                paths: vec![format!("/approvals{}/**", resource.path)],
+                                paths: vec![format!(
+                                    "/packages/studio/approval/approvals{}/**",
+                                    resource.path
+                                )],
+                            },
+                            RbacRuleSpec {
+                                manifests: vec![APPROVAL_RESULT_MANIFEST.into()],
+                                verbs: vec!["get".into(), "list".into()],
+                                paths: vec![format!(
+                                    "/packages/studio/approval-result/results/agents/{}/**",
+                                    resource_name(&resource.path)
+                                )],
                             },
                             RbacRuleSpec {
                                 manifests: vec![LINK_MANIFEST.into()],
                                 verbs: vec!["get".into(), "list".into()],
-                                paths: vec![format!("/approvals{}/**", resource.path)],
+                                paths: vec![
+                                    format!(
+                                        "/packages/studio/approval/approvals{}/**",
+                                        resource.path
+                                    ),
+                                    format!(
+                                        "/packages/studio/approval-result/results/agents/{}/**",
+                                        resource_name(&resource.path)
+                                    ),
+                                ],
                             },
                         ],
                         system_role: None,
@@ -874,9 +897,15 @@ impl Driver for AgentDriver {
                 message_path,
                 session_spec.as_ref().map(|session| session.cursor.as_str()),
             )?;
-            let service_account_path = format!("{}/service-account", resource.path);
+            let service_account_path = format!(
+                "/packages/studio/agent/service-accounts/{}",
+                resource_name(&resource.path)
+            );
             let credential = self_.issue_agent_credential(&service_account_path)?;
-            let reply_path = format!("/messages/{}/assistant", run_spec.request_id);
+            let reply_path = format!(
+                "/packages/studio/message/messages/{}/assistant",
+                run_spec.request_id
+            );
             let codex_run = self_.run_codex(
                 &resource.path,
                 &service_account_path,
@@ -1002,7 +1031,11 @@ fn resource_name(path: &str) -> &str {
 }
 
 fn session_path(thread_path: &str, agent_path: &str) -> String {
-    format!("{thread_path}/sessions/{}", path_slug(agent_path))
+    format!(
+        "/packages/studio/session/sessions/{}-{}",
+        path_slug(thread_path),
+        path_slug(agent_path)
+    )
 }
 
 fn path_slug(path: &str) -> String {
@@ -1069,8 +1102,8 @@ mod tests {
     #[test]
     fn session_path_is_stable_for_a_thread_agent_pair() {
         assert_eq!(
-            session_path("/threads/planning", "/agents/Release Planner"),
-            "/threads/planning/sessions/agents-release-planner"
+            session_path("/packages/studio/thread/threads/planning", "/packages/studio/agent/agents/Release Planner"),
+            "/packages/studio/session/sessions/packages-studio-thread-threads-planning-packages-studio-agent-agents-release-planner"
         );
     }
 
@@ -1088,14 +1121,14 @@ mod tests {
     #[test]
     fn bootstrap_context_identifies_the_kas_environment_before_skill_instructions() {
         let context = kas_bootstrap_context(
-            "/agents/reviewer",
-            "/agents/reviewer/service-account",
-            "/threads/review",
+            "/packages/studio/agent/agents/reviewer",
+            "/packages/studio/agent/service-accounts/reviewer",
+            "/packages/studio/thread/threads/review",
             "$kas",
         );
-        assert!(context.contains("running as KAS Agent /agents/reviewer"));
-        assert!(context.contains("ServiceAccount /agents/reviewer/service-account"));
-        assert!(context.contains("current KAS Thread is /threads/review"));
+        assert!(context.contains("running as KAS Agent /packages/studio/agent/agents/reviewer"));
+        assert!(context.contains("ServiceAccount /packages/studio/agent/service-accounts/reviewer"));
+        assert!(context.contains("current KAS Thread is /packages/studio/thread/threads/review"));
         assert!(context.contains("KAS_APPROVAL_API"));
         assert!(context.contains("KAS_REPLY_PATH"));
         assert!(context.contains("use $kas for the full KAS protocol"));

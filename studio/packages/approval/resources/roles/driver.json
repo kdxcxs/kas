@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "approval-driver"
   },
   "spec": {
@@ -30,12 +30,12 @@
           "delete"
         ],
         "paths": [
-          "/approvals/**"
+          "/packages/studio/approval/approvals/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/approval-result"
+          "/packages/studio/approval-result/manifest"
         ],
         "verbs": [
           "get",
@@ -45,12 +45,12 @@
           "delete"
         ],
         "paths": [
-          "/approvals/**"
+          "/packages/studio/approval-result/results/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
@@ -60,22 +60,23 @@
           "delete"
         ],
         "paths": [
-          "/approvals/**"
+          "/packages/studio/approval/approvals/**",
+          "/packages/studio/approval-result/results/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/user",
-          "/builtin/service-account",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest",
+          "/packages/studio/agent/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/users/**",
-          "/agents/**"
+          "/packages/kas/user/users/**",
+          "/packages/studio/agent/agents/**"
         ]
       }
     ]

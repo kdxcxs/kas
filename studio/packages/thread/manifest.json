@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/thread",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/thread/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "thread",
   "version": 1,
   "description": "A conversation containing Messages and participants.",
+  "paths": ["./threads/*"],
   "states": [],
   "default_state": "available",
   "initial_state": "available",

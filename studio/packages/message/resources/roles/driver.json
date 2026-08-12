@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "message-driver"
   },
   "spec": {
@@ -9,7 +9,7 @@
     "rules": [
       {
         "manifests": [
-          "/manifests/message"
+          "/packages/studio/message/manifest"
         ],
         "verbs": [
           "get",
@@ -17,46 +17,56 @@
           "update"
         ],
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/thread",
-          "/manifests/agent"
+          "/packages/studio/thread/manifest",
+          "/packages/studio/agent/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/threads/**",
-          "/agents/**"
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/agent/agents/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/messages/**",
-          "/threads/**"
+          "/packages/studio/message/messages/**",
+          "/packages/studio/thread/threads/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/run"
+          "/packages/studio/agent/manifest"
         ],
         "verbs": [
-          "get",
-          "create"
+          "invoke"
         ],
         "paths": [
-          "/messages/**/links/mentioned/**/run"
+          "/packages/studio/agent/agents/**"
+        ]
+      },
+      {
+        "manifests": [
+          "/packages/kas/action/manifest"
+        ],
+        "verbs": [
+          "use"
+        ],
+        "paths": [
+          "/packages/studio/agent/actions/message"
         ]
       }
     ]

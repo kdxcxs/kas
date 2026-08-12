@@ -1,11 +1,11 @@
 {
   "path": "./links/driver-role",
   "metadata": {
-    "manifest": "/builtin/link",
+    "manifest": "/packages/kas/link/manifest",
     "name": "skill-driver-role"
   },
   "spec": {
-    "relation": "/builtin/relations/role-binding",
+    "relation": "/packages/kas/link/relations/role-binding",
     "source": "./service-accounts/driver",
     "target": "./roles/driver",
     "metadata": {}

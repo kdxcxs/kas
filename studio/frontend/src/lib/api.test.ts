@@ -9,7 +9,7 @@ describe('FileApi', () => {
   it('uploads multipart content without overriding its boundary', async () => {
     const request = vi.fn().mockResolvedValue(
       new Response(
-        JSON.stringify(resourceDocument('/files/one', '/manifests/file', 'one.txt')),
+        JSON.stringify(resourceDocument('/packages/studio/file/files/one', '/packages/studio/file/manifest', 'one.txt')),
         { status: 201, headers: { 'Content-Type': 'application/json' } }
       )
     );
@@ -18,7 +18,7 @@ describe('FileApi', () => {
 
     const uploaded = await new FileApi('/files-api/', 'secret').upload(file);
 
-    expect(uploaded.path).toBe('/files/one');
+    expect(uploaded.path).toBe('/packages/studio/file/files/one');
     expect(request).toHaveBeenCalledWith('/files-api/files', {
       method: 'POST',
       credentials: 'same-origin',
@@ -37,13 +37,16 @@ describe('FileApi', () => {
     const request = vi.fn().mockResolvedValue(new Response('hello', { status: 200 }));
     vi.stubGlobal('fetch', request);
 
-    const blob = await new FileApi('/files-api', 'secret').download('/files/one');
+    const blob = await new FileApi('/files-api', 'secret').download('/packages/studio/file/files/one');
 
     expect(await blob.text()).toBe('hello');
-    expect(request).toHaveBeenCalledWith('/files-api/files/content?path=%2Ffiles%2Fone', {
+    expect(request).toHaveBeenCalledWith(
+      '/files-api/files/content?path=%2Fpackages%2Fstudio%2Ffile%2Ffiles%2Fone',
+      {
       credentials: 'same-origin',
       headers: { Authorization: 'Bearer secret' }
-    });
+      }
+    );
   });
 });
 
@@ -51,7 +54,7 @@ describe('SkillApi', () => {
   it('creates and replaces immutable Skill bundles with Bearer authentication', async () => {
     const request = vi.fn().mockImplementation(async () =>
       new Response(
-        JSON.stringify(resourceDocument('/skills/demo', '/manifests/skill', 'demo')),
+        JSON.stringify(resourceDocument('/packages/studio/skill/skills/demo', '/packages/studio/skill/manifest', 'demo')),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       )
     );
@@ -61,12 +64,12 @@ describe('SkillApi', () => {
     });
     const api = new SkillApi('/skills-api/', 'secret');
 
-    await api.create('/skills/demo', bundle);
-    await api.update('/skills/demo', 7, bundle);
+    await api.create('/packages/studio/skill/skills/demo', bundle);
+    await api.update('/packages/studio/skill/skills/demo', 7, bundle);
 
     expect(request).toHaveBeenNthCalledWith(
       1,
-      '/skills-api/skills?path=%2Fskills%2Fdemo',
+      '/skills-api/skills?path=%2Fpackages%2Fstudio%2Fskill%2Fskills%2Fdemo',
       expect.objectContaining({
         method: 'POST',
         headers: { Authorization: 'Bearer secret' },
@@ -75,7 +78,7 @@ describe('SkillApi', () => {
     );
     expect(request).toHaveBeenNthCalledWith(
       2,
-      '/skills-api/skills?path=%2Fskills%2Fdemo&expected_revision=7',
+      '/skills-api/skills?path=%2Fpackages%2Fstudio%2Fskill%2Fskills%2Fdemo&expected_revision=7',
       expect.objectContaining({ method: 'PATCH' })
     );
   });
@@ -87,8 +90,8 @@ describe('ApprovalApi', () => {
       new Response(
         JSON.stringify(
           resourceDocument(
-            '/approvals/users/demo/decisions/decision-id',
-            '/manifests/approval',
+            '/packages/studio/approval/approvals/users/demo/decisions/decision-id',
+            '/packages/studio/approval/manifest',
             'approval-decision'
           )
         ),
@@ -98,13 +101,13 @@ describe('ApprovalApi', () => {
     vi.stubGlobal('fetch', request);
 
     await new ApprovalApi('/approvals-api/', 'secret').decide(
-      '/approvals/agents/demo/requests/request-id',
+      '/packages/studio/approval/approvals/agents/demo/requests/request-id',
       4,
       'approve'
     );
 
     expect(request).toHaveBeenCalledWith(
-      '/approvals-api/approvals/decide?path=%2Fapprovals%2Fagents%2Fdemo%2Frequests%2Frequest-id&expected_revision=4',
+      '/approvals-api/approvals/decide?path=%2Fpackages%2Fstudio%2Fapproval%2Fapprovals%2Fagents%2Fdemo%2Frequests%2Frequest-id&expected_revision=4',
       {
         method: 'POST',
         credentials: 'same-origin',
@@ -148,10 +151,10 @@ describe('KasApi', () => {
     );
     vi.stubGlobal('fetch', request);
 
-    await new KasApi('/api', 'secret').listResources('/manifests/agent');
+    await new KasApi('/api', 'secret').listResources('/packages/studio/agent/manifest');
 
     expect(request).toHaveBeenCalledWith(
-      '/api/resources?manifest=%2Fmanifests%2Fagent',
+      '/api/resources?manifest=%2Fpackages%2Fstudio%2Fagent%2Fmanifest',
       expect.any(Object)
     );
   });
@@ -176,9 +179,9 @@ describe('KasApi', () => {
     const request = vi.fn().mockImplementation(async () =>
       new Response(
         JSON.stringify({
-          path: '/agents/demo',
+          path: '/packages/studio/agent/agents/demo',
           metadata: {
-            manifest: '/manifests/agent',
+            manifest: '/packages/studio/agent/manifest',
             name: 'demo',
             state: 'available',
             '[kas]': {
@@ -191,7 +194,7 @@ describe('KasApi', () => {
           spec: { working_directory: '/tmp/demo' },
           status: {
             metadata: {
-              manifest: '/manifests/agent',
+              manifest: '/packages/studio/agent/manifest',
               name: 'demo',
               state: 'available',
               '[kas]': {
@@ -213,15 +216,15 @@ describe('KasApi', () => {
     vi.stubGlobal('fetch', request);
     const api = new KasApi('/api', 'secret');
 
-    await api.updateResource('/agents/demo', {
+    await api.updateResource('/packages/studio/agent/agents/demo', {
       expected_revision: 2,
       spec: { state: 'available', working_directory: '/tmp/demo' }
     });
-    await api.deleteResource('/agents/demo', 3);
+    await api.deleteResource('/packages/studio/agent/agents/demo', 3);
 
     expect(request).toHaveBeenNthCalledWith(
       1,
-      '/api/resources/by-path?path=%2Fagents%2Fdemo',
+      '/api/resources/by-path?path=%2Fpackages%2Fstudio%2Fagent%2Fagents%2Fdemo',
       expect.objectContaining({
         method: 'PATCH',
         body: JSON.stringify({
@@ -232,7 +235,7 @@ describe('KasApi', () => {
     );
     expect(request).toHaveBeenNthCalledWith(
       2,
-      '/api/resources/by-path?path=%2Fagents%2Fdemo&expected_revision=3',
+      '/api/resources/by-path?path=%2Fpackages%2Fstudio%2Fagent%2Fagents%2Fdemo&expected_revision=3',
       expect.objectContaining({ method: 'DELETE' })
     );
   });
@@ -244,8 +247,8 @@ describe('KasApi', () => {
         new Response(
           JSON.stringify([
             resourceDocument(
-              '/agents/demo/service-account',
-              '/builtin/service-account',
+              '/packages/studio/agent/service-accounts/demo',
+              '/packages/kas/service-account/manifest',
               'service-account'
             )
           ]),
@@ -259,8 +262,8 @@ describe('KasApi', () => {
         new Response(
           JSON.stringify([
             resourceDocument(
-              '/agents/demo/service-account',
-              '/builtin/service-account',
+              '/packages/studio/agent/service-accounts/demo',
+              '/packages/kas/service-account/manifest',
               'service-account'
             )
           ]),
@@ -275,7 +278,7 @@ describe('KasApi', () => {
 
     await expect(api.listObjects('service_account')).resolves.toHaveLength(1);
     await expect(
-      api.getObject('service_account', '/agents/demo/service-account')
+      api.getObject('service_account', '/packages/studio/agent/service-accounts/demo')
     ).resolves.toMatchObject({
       kind: 'service_account',
       links: []

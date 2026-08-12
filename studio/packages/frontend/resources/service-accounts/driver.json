@@ -1,7 +1,7 @@
 {
   "path": "./service-accounts/driver",
   "metadata": {
-    "manifest": "/builtin/service-account",
+    "manifest": "/packages/kas/service-account/manifest",
     "name": "frontend-driver"
   },
   "spec": {}

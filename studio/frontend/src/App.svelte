@@ -58,10 +58,10 @@
   const DEFAULT_SKILL_API_BASE = import.meta.env.VITE_KAS_SKILL_API_URL || '/skills-api';
   const DEFAULT_APPROVAL_API_BASE =
     import.meta.env.VITE_KAS_APPROVAL_API_URL || '/approvals-api';
-  const TELEGRAM_MANIFEST = '/manifests/telegram';
-  const TELEGRAM_THREAD_TOPIC = '/manifests/telegram/relations/thread-topic';
-  const TELEGRAM_BINDING_REQUEST = '/manifests/telegram/relations/binding-request';
-  const TELEGRAM_USER_BINDING = '/manifests/telegram/relations/user-binding';
+  const TELEGRAM_MANIFEST = '/packages/studio/telegram/manifest';
+  const TELEGRAM_THREAD_TOPIC = '/packages/studio/telegram/relations/thread-topic';
+  const TELEGRAM_BINDING_REQUEST = '/packages/studio/telegram/relations/binding-request';
+  const TELEGRAM_USER_BINDING = '/packages/studio/telegram/relations/user-binding';
 
   interface Settings {
     apiBase: string;
@@ -97,7 +97,7 @@
   let settings: Settings = {
     apiBase: DEFAULT_API_BASE,
     token: '',
-    userPath: '/users/admin'
+    userPath: '/packages/kas/user/users/admin'
   };
   let draftSettings: Settings = { ...settings };
   let agents: Resource[] = [];
@@ -274,7 +274,7 @@
         settings = {
           apiBase: DEFAULT_API_BASE,
           token: '',
-          userPath: context.subject?.path || '/users/admin'
+          userPath: context.subject?.path || '/packages/kas/user/users/admin'
         };
         draftSettings = { ...settings };
         if (context.workspace?.activeThread) {
@@ -348,7 +348,7 @@
         context: {
           apiVersion: 1,
           plugin: selectedPlugin,
-          subject: { path: settings.userPath, manifest: '/builtin/user' },
+          subject: { path: settings.userPath, manifest: '/packages/kas/user/manifest' },
           workspace: {
             activeThread: activeThreadPath,
             selectedResource: selectedObjectPath || undefined,
@@ -812,7 +812,7 @@
   }
 
   async function toggleAgentSkill(skill: Resource, agent: Resource): Promise<void> {
-    if (skill.path === '/skills/kas') return;
+    if (skill.path === '/packages/studio/skill/skills/kas') return;
     savingSkill = true;
     error = '';
     try {
@@ -840,7 +840,7 @@
   }
 
   async function deleteSkill(skill: Resource): Promise<void> {
-    if (skill.path === '/skills/kas' || savingSkill) return;
+    if (skill.path === '/packages/studio/skill/skills/kas' || savingSkill) return;
     savingSkill = true;
     error = '';
     try {
@@ -867,7 +867,7 @@
   }
 
   function updateTelegramCreatePath(): void {
-    createTelegramPath = `/telegram/${slugify(createTelegramName)}`;
+    createTelegramPath = `/packages/studio/telegram/integrations/${slugify(createTelegramName)}`;
   }
 
   function selectTelegramConfiguration(path: string): void {
@@ -1179,7 +1179,7 @@
           (entry) =>
             entry.relation_path === PARTICIPANTS &&
             entry.source.path === managedThread?.path &&
-            entry.target.path.startsWith('/agents/')
+            entry.target.path.startsWith('/packages/studio/agent/agents/')
         ) ?? [];
       const currentPaths = new Set(currentLinks.map((entry) => entry.target.path));
       const nextPaths = new Set(editThreadAgents);
@@ -1434,7 +1434,7 @@
   }
 
   function updateAgentName(): void {
-    createPath = `/agents/${slugify(createName)}`;
+    createPath = `/packages/studio/agent/agents/${slugify(createName)}`;
   }
 
   async function createAgent(): Promise<void> {
@@ -1449,7 +1449,7 @@
     try {
       await client().createResource({
         path,
-        manifest: '/manifests/agent',
+        manifest: '/packages/studio/agent/manifest',
         name,
         spec: {
           working_directory: createWorkingDirectory.trim()
@@ -2186,7 +2186,7 @@
               <input
                 bind:value={createSkillPath}
                 aria-label="New Skill Resource path"
-                placeholder="/skills/example"
+                placeholder="/packages/studio/skill/skills/example"
                 required
               />
               <input
@@ -2225,7 +2225,7 @@
           {#if selectedSkill}
             {@const bundleLink = selectedSkill.links?.find(
               (link) =>
-                link.relation_path === '/manifests/skill/relations/bundle' &&
+                link.relation_path === '/packages/studio/skill/relations/bundle' &&
                 link.source.path === selectedSkill.path
             )}
             <article class="skill-editor">
@@ -2290,7 +2290,7 @@
                     <input
                       type="checkbox"
                       checked={Boolean(skillAssignment(selectedSkill, agent))}
-                      disabled={savingSkill || selectedSkill.path === '/skills/kas'}
+                      disabled={savingSkill || selectedSkill.path === '/packages/studio/skill/skills/kas'}
                       onchange={() => void toggleAgentSkill(selectedSkill, agent)}
                     />
                     <span>
@@ -2302,7 +2302,7 @@
               </fieldset>
 
               <div class="skill-actions">
-                {#if selectedSkill.path === '/skills/kas'}
+                {#if selectedSkill.path === '/packages/studio/skill/skills/kas'}
                   <small>The KAS Skill is always assigned and cannot be deleted.</small>
                 {:else}
                   <button
@@ -2741,7 +2741,11 @@
               </label>
               <label>
                 Resource path
-                <input bind:value={createTelegramPath} placeholder="/telegram/team" required />
+                <input
+                  bind:value={createTelegramPath}
+                  placeholder="/packages/studio/telegram/integrations/team"
+                  required
+                />
               </label>
               <label>
                 Bot token
@@ -3551,7 +3555,7 @@
         </label>
         <label>
           Your User path
-          <input bind:value={draftSettings.userPath} placeholder="/users/admin" required />
+          <input bind:value={draftSettings.userPath} placeholder="/packages/kas/user/users/admin" required />
         </label>
         <div class="modal-actions">
           {#if settings.token}
@@ -3587,7 +3591,7 @@
           </label>
           <label>
             Resource path
-            <input bind:value={createPath} placeholder="/agents/release-planner" required />
+            <input bind:value={createPath} placeholder="/packages/studio/agent/agents/release-planner" required />
           </label>
         </div>
         <label>

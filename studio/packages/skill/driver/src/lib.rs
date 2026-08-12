@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
-pub const SKILL_MANIFEST: &str = "/manifests/skill";
-pub const FILE_MANIFEST: &str = "/manifests/file";
-pub const LINK_MANIFEST: &str = "/builtin/link";
-pub const BUNDLE_RELATION: &str = "/manifests/skill/relations/bundle";
-pub const OWNS_RELATION: &str = "/manifests/skill/relations/owns";
-pub const USES_RELATION: &str = "/manifests/skill/relations/uses";
-pub const KAS_SKILL_PATH: &str = "/skills/kas";
-pub const KAS_BUNDLE_PATH: &str = "/files/skills/kas/bundles/builtin-v1";
+pub const SKILL_MANIFEST: &str = "/packages/studio/skill/manifest";
+pub const FILE_MANIFEST: &str = "/packages/studio/file/manifest";
+pub const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+pub const BUNDLE_RELATION: &str = "/packages/studio/skill/relations/bundle";
+pub const OWNS_RELATION: &str = "/packages/studio/skill/relations/owns";
+pub const USES_RELATION: &str = "/packages/studio/skill/relations/uses";
+pub const KAS_SKILL_PATH: &str = "/packages/studio/skill/skills/kas";
+pub const KAS_BUNDLE_PATH: &str = "/packages/studio/file/files/skills/kas/bundles/builtin-v1";
 pub const SKILL_MEDIA_TYPE: &str = "application/vnd.kas.skill+zip";
 
 const MAX_ENTRIES: usize = 1024;
@@ -180,12 +180,7 @@ impl SkillDriver {
             if skill.manifest != SKILL_MANIFEST {
                 return Ok(Vec::new());
             }
-            return Ok(vec![Mutation::UpdateResource {
-                resource_path: skill.path.clone(),
-                expected_revision: skill.revision,
-                metadata: None,
-                spec: skill.spec,
-            }]);
+            return self.reconcile_blocking(&skill);
         }
         if resource.manifest != SKILL_MANIFEST {
             return Err(execution_error(format!(

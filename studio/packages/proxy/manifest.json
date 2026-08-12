@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/proxy",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/proxy/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "proxy",
   "version": 1,
   "description": "A dynamic Frontend Gateway route to an independently served HTTP API.",
+  "paths": ["./proxies/*"],
   "states": [],
   "default_state": "available",
   "initial_state": "pending",

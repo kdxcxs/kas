@@ -55,84 +55,84 @@ describe('Thread resources', () => {
     const thread = buildThread(
       'thread-1',
       'Release planning',
-      '/users/admin',
-      ['/agents/planner', '/agents/reviewer']
+      '/packages/kas/user/users/admin',
+      ['/packages/studio/agent/agents/planner', '/packages/studio/agent/agents/reviewer']
     );
 
-    expect(thread.path).toBe('/threads/thread-1');
-    expect(thread.manifest).toBe('/manifests/thread');
+    expect(thread.path).toBe('/packages/studio/thread/threads/thread-1');
+    expect(thread.manifest).toBe('/packages/studio/thread/manifest');
     expect(thread.links?.map((link) => link.relation_path)).toEqual([
       PARTICIPANTS,
       PARTICIPANTS,
       PARTICIPANTS
     ]);
     expect(thread.links?.map((link) => link.target.path)).toEqual([
-      '/users/admin',
-      '/agents/planner',
-      '/agents/reviewer'
+      '/packages/kas/user/users/admin',
+      '/packages/studio/agent/agents/planner',
+      '/packages/studio/agent/agents/reviewer'
     ]);
   });
 
   it('filters Threads by Agent participation', () => {
-    const planner = resource('/threads/planning', '/manifests/thread', 'Planning', {
+    const planner = resource('/packages/studio/thread/threads/planning', '/packages/studio/thread/manifest', 'Planning', {
       title: 'Planning'
     });
     planner.links = [
       link(
-        '/threads/planning/links/participants/planner',
+        '/packages/studio/thread/threads/planning/links/participants/planner',
         PARTICIPANTS,
         planner.path,
-        '/agents/planner'
+        '/packages/studio/agent/agents/planner'
       )
     ];
 
-    expect(threadsForAgent([planner], '/agents/planner')).toEqual([planner]);
-    expect(threadsForAgent([planner], '/agents/reviewer')).toEqual([]);
+    expect(threadsForAgent([planner], '/packages/studio/agent/agents/planner')).toEqual([planner]);
+    expect(threadsForAgent([planner], '/packages/studio/agent/agents/reviewer')).toEqual([]);
   });
 
   it('returns Agent participants and builds their stable Link path', () => {
-    const thread = resource('/threads/planning', '/manifests/thread', 'Planning', {
+    const thread = resource('/packages/studio/thread/threads/planning', '/packages/studio/thread/manifest', 'Planning', {
       title: 'Planning'
     });
     thread.links = [
       link(
-        '/threads/planning/links/participants/admin',
+        '/packages/studio/thread/threads/planning/links/participants/admin',
         PARTICIPANTS,
         thread.path,
-        '/users/admin'
+        '/packages/kas/user/users/admin'
       ),
       link(
-        '/threads/planning/links/participants/agents-planner',
+        '/packages/studio/thread/threads/planning/links/participants/agents-planner',
         PARTICIPANTS,
         thread.path,
-        '/agents/planner'
+        '/packages/studio/agent/agents/planner'
       )
     ];
 
-    expect(participantAgentPaths(thread)).toEqual(['/agents/planner']);
-    expect(threadParticipantLink(thread.path, '/agents/reviewer').path).toBe(
-      '/threads/planning/links/participants/agents-reviewer'
+    expect(participantAgentPaths(thread)).toEqual(['/packages/studio/agent/agents/planner']);
+    expect(threadParticipantLink(thread.path, '/packages/studio/agent/agents/reviewer').path).toBe(
+      '/packages/studio/thread/threads/planning/links/participants/packages-studio-agent-agents-reviewer'
     );
   });
 
   it('addresses one Session per Thread-Agent pair', () => {
     const session = resource(
-      '/threads/planning/sessions/agents-planner',
-      '/manifests/session',
+      '/packages/studio/session/sessions/packages-studio-thread-threads-planning-packages-studio-agent-agents-planner',
+      '/packages/studio/session/manifest',
       'planning-planner',
       {
         provider: 'codex',
         session_id: 'session-1',
-        cursor: '/messages/one'
+        cursor: '/packages/studio/message/messages/one'
       }
     );
 
-    expect(sessionPath('/threads/planning', '/agents/planner')).toBe(session.path);
+    expect(sessionPath('/packages/studio/thread/threads/planning', '/packages/studio/agent/agents/planner')).toBe(session.path);
     expect(
-      sessionForThreadAgent([session], '/threads/planning', '/agents/planner')
+      sessionForThreadAgent([session], '/packages/studio/thread/threads/planning', '/packages/studio/agent/agents/planner')
     ).toBe(session);
     expect(
-      sessionForThreadAgent([session], '/threads/planning', '/agents/reviewer')
+      sessionForThreadAgent([session], '/packages/studio/thread/threads/planning', '/packages/studio/agent/agents/reviewer')
     ).toBeNull();
   });
 });
@@ -142,11 +142,11 @@ describe('Message resources', () => {
     const message = buildUserMessage(
       'message-1',
       '@planner hello',
-      '/users/admin',
-      '/threads/planning',
-      ['/agents/planner'],
-      '/messages/previous',
-      ['/files/one']
+      '/packages/kas/user/users/admin',
+      '/packages/studio/thread/threads/planning',
+      ['/packages/studio/agent/agents/planner'],
+      '/packages/studio/message/messages/previous',
+      ['/packages/studio/file/files/one']
     );
 
     expect(message.links?.map((entry) => entry.relation_path)).toEqual([
@@ -157,51 +157,51 @@ describe('Message resources', () => {
       MENTIONED
     ]);
     expect(message.links?.find((entry) => entry.relation_path === ATTACHED_TO)).toMatchObject({
-      source: { path: '/files/one' },
-      target: { path: '/messages/message-1' }
+      source: { path: '/packages/studio/file/files/one' },
+      target: { path: '/packages/studio/message/messages/message-1' }
     });
     expect(message.links?.find((entry) => entry.relation_path === MESSAGE_THREAD)?.target.path).toBe(
-      '/threads/planning'
+      '/packages/studio/thread/threads/planning'
     );
-    expect(mentionRunPath(message.path, '/agents/planner')).toBe(
-      '/messages/message-1/links/mentioned/agents-planner/run'
+    expect(mentionRunPath(message.path, '/packages/studio/agent/agents/planner')).toBe(
+      '/packages/studio/message/messages/message-1/links/mentioned/packages-studio-agent-agents-planner/run'
     );
   });
 
   it('selects Messages using message-thread instead of a root Message', () => {
-    const message = resource('/messages/one', '/manifests/message', 'one', {
+    const message = resource('/packages/studio/message/messages/one', '/packages/studio/message/manifest', 'one', {
       role: 'user',
       body: 'hello'
     });
     message.links = [
       link(
-        '/messages/one/links/message-thread',
+        '/packages/studio/message/messages/one/links/message-thread',
         MESSAGE_THREAD,
         message.path,
-        '/threads/planning'
+        '/packages/studio/thread/threads/planning'
       )
     ];
 
-    expect(messagesForThread([message], '/threads/planning')).toEqual([message]);
-    expect(messagesForThread([message], '/threads/other')).toEqual([]);
+    expect(messagesForThread([message], '/packages/studio/thread/threads/planning')).toEqual([message]);
+    expect(messagesForThread([message], '/packages/studio/thread/threads/other')).toEqual([]);
   });
 });
 
 describe('@Agent mentions', () => {
-  const planner = resource('/agents/planner', '/manifests/agent', 'Planner', {});
-  const reviewer = resource('/agents/reviewer', '/manifests/agent', 'Reviewer', {});
+  const planner = resource('/packages/studio/agent/agents/planner', '/packages/studio/agent/manifest', 'Planner', {});
+  const reviewer = resource('/packages/studio/agent/agents/reviewer', '/packages/studio/agent/manifest', 'Reviewer', {});
 
   it('returns only explicitly mentioned Thread participants', () => {
     expect(
       mentionedAgentPaths('@planner please plan; reviewer can wait', [planner, reviewer])
-    ).toEqual(['/agents/planner']);
+    ).toEqual(['/packages/studio/agent/agents/planner']);
     expect(mentionedAgentPaths('@outsider hello', [planner, reviewer])).toEqual([]);
   });
 
   it('supports multiple mentions', () => {
     expect(mentionedAgentPaths('@planner plan, @reviewer review', [planner, reviewer])).toEqual([
-      '/agents/planner',
-      '/agents/reviewer'
+      '/packages/studio/agent/agents/planner',
+      '/packages/studio/agent/agents/reviewer'
     ]);
   });
 });

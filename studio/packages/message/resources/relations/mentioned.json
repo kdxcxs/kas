@@ -1,7 +1,7 @@
 {
   "path": "./relations/mentioned",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "mentioned"
   },
   "spec": {
@@ -10,15 +10,15 @@
       {
         "manifest": ".",
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       }
     ],
     "targets": [
       {
-        "manifest": "/manifests/agent",
+        "manifest": "/packages/studio/agent/manifest",
         "paths": [
-          "/agents/**"
+          "/packages/studio/agent/agents/**"
         ]
       }
     ],

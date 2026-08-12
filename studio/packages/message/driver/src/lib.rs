@@ -1,22 +1,20 @@
 use async_trait::async_trait;
-use kas_core::{
-    LinkSpec, Mutation, PlannedResource, PlannedResourceMetadata, Resource, ResourceStatus,
-};
+use kas_core::{run_path, CreateRun, LinkSpec, Mutation, Resource, ResourceStatus};
 use kas_driver::{Driver, DriverError};
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use serde_json::json;
 use uuid::Uuid;
 
-const MESSAGE_MANIFEST: &str = "/manifests/message";
-const THREAD_MANIFEST: &str = "/manifests/thread";
-const AGENT_MANIFEST: &str = "/manifests/agent";
-const LINK_MANIFEST: &str = "/builtin/link";
-const RUN_MANIFEST: &str = "/builtin/run";
-const MESSAGE_ACTION: &str = "/manifests/agent/actions/message";
-const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
-const MENTIONED: &str = "/manifests/message/relations/mentioned";
-const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
-const PARTICIPANTS: &str = "/manifests/thread/relations/participants";
+const MESSAGE_MANIFEST: &str = "/packages/studio/message/manifest";
+const THREAD_MANIFEST: &str = "/packages/studio/thread/manifest";
+const AGENT_MANIFEST: &str = "/packages/studio/agent/manifest";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+const DRIVER_SUBJECT: &str = "/packages/studio/message/service-accounts/driver";
+const MESSAGE_ACTION: &str = "/packages/studio/agent/actions/message";
+const MESSAGE_THREAD: &str = "/packages/studio/message/relations/message-thread";
+const MENTIONED: &str = "/packages/studio/message/relations/mentioned";
+const ATTACHED_TO: &str = "/packages/studio/file/relations/attached-to";
+const PARTICIPANTS: &str = "/packages/studio/thread/relations/participants";
 
 #[derive(Debug, Clone)]
 pub struct MessageDriver {
@@ -90,6 +88,24 @@ impl MessageDriver {
         })
     }
 
+    fn create_run(&self, input: CreateRun) -> Result<Resource, DriverError> {
+        let api = self.api.clone();
+        let token = self.token.clone();
+        std::thread::spawn(move || {
+            reqwest::blocking::Client::new()
+                .post(format!("{api}/runs"))
+                .bearer_auth(token)
+                .json(&input)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .and_then(reqwest::blocking::Response::json)
+                .map_err(|error| format!("could not create Agent Run: {error}"))
+        })
+        .join()
+        .map_err(|_| execution_error("Run REST worker panicked"))?
+        .map_err(execution_error)
+    }
+
     fn reconcile_message(&self, resource: &Resource) -> Result<Vec<Mutation>, DriverError> {
         let body = resource
             .spec
@@ -122,7 +138,6 @@ impl MessageDriver {
 
     fn fanout_ready_mentions(&self) -> Result<Vec<Mutation>, DriverError> {
         let links = self.list_links()?;
-        let mut mutations = Vec::new();
         for mention_resource in links
             .iter()
             .filter(|resource| resource.metadata.state != kas_core::STATE_DELETED)
@@ -154,29 +169,23 @@ impl MessageDriver {
             {
                 continue;
             }
-            let run_path = format!("{}/run", mention_resource.path);
-            if self.fetch_resource(&run_path)?.is_some() {
+            let request_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, mention_resource.path.as_bytes());
+            let expected_run = run_path(DRIVER_SUBJECT, MESSAGE_ACTION, request_id)
+                .map_err(|error| execution_error(error.to_string()))?;
+            if self.fetch_resource(&expected_run)?.is_some() {
                 continue;
             }
-            let request_id = Uuid::new_v4();
-            mutations.push(Mutation::CreateResource {
-                resource: planned(
-                    run_path,
-                    RUN_MANIFEST,
-                    request_id.to_string(),
-                    json!({
-                        "request_id": request_id,
-                        "resource": agent.path,
-                        "action": MESSAGE_ACTION,
-                        "input": {
-                            "message_path": message.path,
-                            "thread_path": thread.path
-                        }
-                    }),
-                ),
-            });
+            self.create_run(CreateRun {
+                request_id,
+                resource: agent.path,
+                action: MESSAGE_ACTION.into(),
+                input: json!({
+                    "message_path": message.path,
+                    "thread_path": thread.path
+                }),
+            })?;
         }
-        Ok(mutations)
+        Ok(Vec::new())
     }
 }
 
@@ -191,6 +200,9 @@ impl Driver for MessageDriver {
             return self.reconcile_message(resource);
         }
         if resource.manifest == LINK_MANIFEST {
+            if resource.metadata.state == kas_core::STATE_DELETED {
+                return Ok(Vec::new());
+            }
             let Ok(link) = serde_json::from_value::<LinkSpec>(resource.spec.clone()) else {
                 return Ok(Vec::new());
             };
@@ -219,36 +231,24 @@ impl Driver for MessageDriver {
     }
 }
 
-fn planned(
-    path: impl Into<String>,
-    manifest: impl Into<String>,
-    name: impl Into<String>,
-    spec: Value,
-) -> PlannedResource {
-    PlannedResource {
-        path: path.into(),
-        metadata: PlannedResourceMetadata {
-            manifest: manifest.into(),
-            name: name.into(),
-            state: String::new(),
-        },
-        spec,
-        status: ResourceStatus::default(),
-    }
-}
-
 fn execution_error(message: impl Into<String>) -> DriverError {
     DriverError::Execution(message.into())
 }
 
 #[cfg(test)]
 mod tests {
+    use kas_core::run_path;
+    use uuid::Uuid;
+
+    use super::{DRIVER_SUBJECT, MESSAGE_ACTION};
+
     #[test]
     fn mention_run_path_is_stable() {
-        let path = "/messages/one/links/mentioned/reviewer";
+        let path = "/packages/studio/message/messages/one/links/mentioned/reviewer";
+        let request_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, path.as_bytes());
         assert_eq!(
-            format!("{path}/run"),
-            "/messages/one/links/mentioned/reviewer/run"
+            run_path(DRIVER_SUBJECT, MESSAGE_ACTION, request_id).unwrap(),
+            run_path(DRIVER_SUBJECT, MESSAGE_ACTION, request_id).unwrap()
         );
     }
 }

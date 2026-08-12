@@ -230,6 +230,9 @@ async fn update_skill(
         target: new_file.path.clone(),
         metadata: json!({}),
     };
+    // Updating the Skill invalidates dependent Links, so read the Bundle Link's
+    // new revision before replacing its target.
+    let bundle_link = service.get_resource(&bundle_link.path).await?;
     if let Err(error) = service
         .update_resource(
             &bundle_link.path,
@@ -433,17 +436,23 @@ fn authorization(headers: &HeaderMap) -> Result<String, SkillApiError> {
 }
 
 fn owner_path(subject: &str) -> String {
+    if let Some(name) = subject.strip_prefix("/packages/studio/agent/service-accounts/") {
+        return format!("/packages/studio/agent/agents/{name}");
+    }
     subject
         .strip_suffix("/service-account")
-        .filter(|path| path.starts_with("/agents/"))
+        .filter(|path| path.starts_with("/packages/studio/agent/agents/"))
         .unwrap_or(subject)
         .to_owned()
 }
 
 fn bundle_file_path(skill_path: &str) -> String {
+    let relative = skill_path
+        .strip_prefix("/packages/studio/skill/skills/")
+        .unwrap_or_else(|| skill_path.trim_start_matches('/'));
     format!(
-        "/files{}/bundles/{}",
-        skill_path.trim_end_matches('/'),
+        "/packages/studio/file/files/skills/{}/bundles/{}",
+        relative.trim_end_matches('/'),
         Uuid::new_v4()
     )
 }
@@ -510,17 +519,22 @@ mod tests {
     #[test]
     fn maps_agent_service_accounts_to_their_agent_owner() {
         assert_eq!(
-            owner_path("/agents/reviewer/service-account"),
-            "/agents/reviewer"
+            owner_path("/packages/studio/agent/service-accounts/reviewer"),
+            "/packages/studio/agent/agents/reviewer"
         );
-        assert_eq!(owner_path("/users/admin"), "/users/admin");
+        assert_eq!(
+            owner_path("/packages/kas/user/users/admin"),
+            "/packages/kas/user/users/admin"
+        );
     }
 
     #[test]
     fn stores_each_bundle_as_a_new_file() {
-        let first = bundle_file_path("/agents/reviewer/skills/demo");
-        let second = bundle_file_path("/agents/reviewer/skills/demo");
-        assert!(first.starts_with("/files/agents/reviewer/skills/demo/bundles/"));
+        let first = bundle_file_path("/packages/studio/skill/skills/agents/reviewer/demo");
+        let second = bundle_file_path("/packages/studio/skill/skills/agents/reviewer/demo");
+        assert!(
+            first.starts_with("/packages/studio/file/files/skills/agents/reviewer/demo/bundles/")
+        );
         assert_ne!(first, second);
     }
 }

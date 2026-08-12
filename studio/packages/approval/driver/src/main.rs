@@ -163,7 +163,10 @@ async fn request_approval(
             return Err(bad_request("list limit must be between 1 and 1000"));
         }
     }
-    let path = format!("/approvals{requester}/requests/{}", Uuid::new_v4());
+    let path = format!(
+        "/packages/studio/approval/approvals{requester}/requests/{}",
+        Uuid::new_v4()
+    );
     let expires_at = Utc::now() + Duration::seconds(input.expires_in_seconds);
     let spec = ApprovalSpec::Request {
         reason: reason.into(),
@@ -231,7 +234,7 @@ async fn decide_approval(
     }
     let requester = service.requester_for(&approval.path).await?;
     let path = format!(
-        "/approvals{}/decisions/{}",
+        "/packages/studio/approval/approvals{}/decisions/{}",
         auth.subject.path,
         Uuid::new_v4()
     );
@@ -594,7 +597,11 @@ impl ApprovalService {
         decision: &str,
         response: ApprovalResponse,
     ) -> Result<Resource, ApprovalApiError> {
-        let path = format!("/approvals{requester}/results/{}", Uuid::new_v4());
+        let path = format!(
+            "/packages/studio/approval-result/results/{}/{}",
+            requester_result_key(requester),
+            Uuid::new_v4()
+        );
         let result = self
             .create_resource(planned_for(
                 path.clone(),
@@ -772,15 +779,40 @@ impl ApprovalService {
     }
 }
 
+fn requester_result_key(requester: &str) -> String {
+    for (prefix, kind) in [
+        ("/packages/studio/agent/agents/", "agents"),
+        ("/packages/kas/user/users/", "users"),
+    ] {
+        if let Some(name) = requester.strip_prefix(prefix) {
+            if !name.is_empty() && !name.contains('/') {
+                return format!("{kind}/{name}");
+            }
+        }
+    }
+    requester
+        .trim_matches('/')
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+}
+
 fn requester_path(subject: &Subject) -> Result<String, ApprovalApiError> {
     if subject.manifest == USER_MANIFEST {
         return Ok(subject.path.clone());
     }
     if subject.manifest == SERVICE_ACCOUNT_MANIFEST {
-        if let Some(agent) = subject.path.strip_suffix("/service-account") {
-            if agent.starts_with("/agents/") {
-                return Ok(agent.into());
-            }
+        if let Some(agent) = subject
+            .path
+            .strip_prefix("/packages/studio/agent/service-accounts/")
+        {
+            return Ok(format!("/packages/studio/agent/agents/{agent}"));
         }
     }
     Err(ApprovalApiError(
@@ -912,11 +944,11 @@ mod tests {
     fn maps_agent_service_account_to_agent() {
         assert_eq!(
             requester_path(&Subject {
-                path: "/agents/reviewer/service-account".into(),
+                path: "/packages/studio/agent/service-accounts/reviewer".into(),
                 manifest: SERVICE_ACCOUNT_MANIFEST.into(),
             })
             .unwrap(),
-            "/agents/reviewer"
+            "/packages/studio/agent/agents/reviewer"
         );
     }
 
@@ -924,11 +956,11 @@ mod tests {
     fn keeps_user_as_requester() {
         assert_eq!(
             requester_path(&Subject {
-                path: "/users/alice".into(),
+                path: "/packages/kas/user/users/alice".into(),
                 manifest: USER_MANIFEST.into(),
             })
             .unwrap(),
-            "/users/alice"
+            "/packages/kas/user/users/alice"
         );
     }
 

@@ -1,7 +1,7 @@
 {
   "path": "./relations/decided-by",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "decided-by"
   },
   "spec": {
@@ -13,7 +13,7 @@
     ],
     "targets": [
       {
-        "manifest": "/builtin/user"
+        "manifest": "/packages/kas/user/manifest"
       }
     ],
     "on_source_delete": "cascade",

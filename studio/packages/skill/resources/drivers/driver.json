@@ -1,7 +1,7 @@
 {
   "path": "./driver",
   "metadata": {
-    "manifest": "/builtin/driver",
+    "manifest": "/packages/kas/driver/manifest",
     "name": "skill-driver",
     "state": "running"
   },
@@ -15,11 +15,9 @@
     "args": [],
     "watches": [
       {
-        "manifest": "/builtin/link",
+        "manifest": "/packages/kas/link/manifest",
         "paths": [
-          "/skills/**/links/bundle",
-          "/users/**/skills/**/links/bundle",
-          "/agents/**/skills/**/links/bundle"
+          "/packages/studio/skill/skills/**/links/bundle"
         ]
       }
     ],

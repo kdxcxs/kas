@@ -1,24 +1,24 @@
 {
   "path": "./relations/approval-delivery",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "telegram-approval-delivery"
   },
   "spec": {
     "inverse_name": "telegram-approval-recipient",
     "sources": [
       {
-        "manifest": "/manifests/approval",
+        "manifest": "/packages/studio/approval/manifest",
         "paths": [
-          "/approvals/**"
+          "/packages/studio/approval/approvals/**"
         ]
       }
     ],
     "targets": [
       {
-        "manifest": "/builtin/user",
+        "manifest": "/packages/kas/user/manifest",
         "paths": [
-          "/users/**"
+          "/packages/kas/user/users/**"
         ]
       }
     ],
@@ -35,7 +35,7 @@
       "properties": {
         "configuration": {
           "type": "string",
-          "pattern": "^/telegram/"
+          "pattern": "^/packages/studio/telegram/integrations/"
         },
         "telegram_user_id": {
           "type": "integer"

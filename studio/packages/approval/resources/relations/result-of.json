@@ -1,14 +1,14 @@
 {
   "path": "./relations/result-of",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "result-of"
   },
   "spec": {
     "inverse_name": "results",
     "sources": [
       {
-        "manifest": "/manifests/approval-result"
+        "manifest": "/packages/studio/approval-result/manifest"
       }
     ],
     "targets": [

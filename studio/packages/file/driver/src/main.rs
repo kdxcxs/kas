@@ -135,7 +135,7 @@ async fn upload_file(
 ) -> Result<(StatusCode, Json<Resource>), FileApiError> {
     let path = query
         .path
-        .unwrap_or_else(|| format!("/files/{}", Uuid::new_v4()));
+        .unwrap_or_else(|| format!("/packages/studio/file/files/{}", Uuid::new_v4()));
     let subject = service.authorize(&headers, "upload", &path).await?;
     let handle = Uuid::new_v4().to_string();
     let temporary_path = service.blob_dir.join(format!(".{handle}.upload"));
@@ -345,7 +345,7 @@ impl FileService {
         let resource = PlannedResource {
             path: format!("{file_path}/links/uploaded-by"),
             metadata: PlannedResourceMetadata {
-                manifest: "/builtin/link".into(),
+                manifest: "/packages/kas/link/manifest".into(),
                 name: "uploaded-by".into(),
                 state: String::new(),
             },

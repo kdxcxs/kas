@@ -53,11 +53,11 @@ For `get`, provide `path`. For `list`, provide `manifest` and optionally
 
 Tell the user that approval is pending and include the returned Approval path.
 The Request is stored below
-`/approvals{requester-path}/requests/{uuid}`. List your own approval namespace
-and `/builtin/link` Resources below that namespace to follow it. A Decision has
-its own `/approvals{approver-path}/decisions/{uuid}` path and connects to the
+`/packages/studio/approval/approvals{requester-path}/requests/{uuid}`. List your own approval namespace
+and `/packages/kas/link/manifest` Resources below that namespace to follow it. A Decision has
+its own `/packages/studio/approval/approvals{approver-path}/decisions/{uuid}` path and connects to the
 Request through the `decides` Relation. A successful Result has its own
-`/approvals{requester-path}/results/{uuid}` path and connects to the Request
+`/packages/studio/approval/approvals{requester-path}/results/{uuid}` path and connects to the Request
 through `result-of`; `produced-by` connects it to the Decision. Its
 `spec.response` contains the HTTP status, content type, and sanitized response
 body. Studio `[kas]` bookkeeping fields are omitted, but Resource `path`,
@@ -82,7 +82,7 @@ List Resources of one Manifest:
 ```bash
 curl -sS -G \
   -H "Authorization: Bearer $KAS_TOKEN" \
-  --data-urlencode "manifest=/manifests/message" \
+  --data-urlencode "manifest=/packages/studio/message/manifest" \
   "$KAS_API/resources"
 ```
 
@@ -109,7 +109,7 @@ curl -fsS \
   -d "$(jq -n --arg path "$KAS_REPLY_PATH" --arg body "$reply_body" '{
     path: $path,
     metadata: {
-      manifest: "/manifests/message",
+      manifest: "/packages/studio/message/manifest",
       name: "assistant-reply"
     },
     spec: {role: "assistant", body: $body}
@@ -130,7 +130,7 @@ create_reply_link() {
       --arg target "$target_path" '{
         path: $path,
         metadata: {
-          manifest: "/builtin/link",
+          manifest: "/packages/kas/link/manifest",
           name: ($path | split("/") | last)
         },
         spec: {
@@ -145,15 +145,15 @@ create_reply_link() {
 
 create_reply_link \
   authored-by \
-  /manifests/message/relations/authored-by \
+  /packages/studio/message/relations/authored-by \
   "$KAS_AGENT_PATH"
 create_reply_link \
   replies-to \
-  /manifests/message/relations/replies-to \
+  /packages/studio/message/relations/replies-to \
   "$KAS_MESSAGE_PATH"
 create_reply_link \
   message-thread \
-  /manifests/message/relations/message-thread \
+  /packages/studio/message/relations/message-thread \
   "$KAS_THREAD_PATH"
 ```
 
@@ -167,7 +167,7 @@ Upload a new immutable File:
 curl -sS \
   -H "Authorization: Bearer $KAS_TOKEN" \
   -F "content=@<local-path>" \
-  "$KAS_FILE_API/files?path=/files/<new-unique-path>"
+  "$KAS_FILE_API/files?path=/packages/studio/file/files/<new-unique-path>"
 ```
 
 Download File content:
@@ -175,7 +175,7 @@ Download File content:
 ```bash
 curl -sS -G \
   -H "Authorization: Bearer $KAS_TOKEN" \
-  --data-urlencode "path=/files/example" \
+  --data-urlencode "path=/packages/studio/file/files/example" \
   "$KAS_FILE_API/files/content" \
   -o <output-path>
 ```

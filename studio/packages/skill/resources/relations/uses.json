@@ -1,16 +1,16 @@
 {
   "path": "./relations/uses",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "uses"
   },
   "spec": {
     "inverse_name": "agents",
     "sources": [
       {
-        "manifest": "/manifests/agent",
+        "manifest": "/packages/studio/agent/manifest",
         "paths": [
-          "/agents/**"
+          "/packages/studio/agent/agents/**"
         ]
       }
     ],

@@ -1,7 +1,7 @@
 import type { Resource } from './types';
 
-export const FRONTEND_PLUGIN_MANIFEST = '/manifests/frontend-plugin';
-export const FRONTEND_PLUGIN_BUNDLE = '/manifests/frontend-plugin/relations/bundle';
+export const FRONTEND_PLUGIN_MANIFEST = '/packages/studio/frontend/manifest';
+export const FRONTEND_PLUGIN_BUNDLE = '/packages/studio/frontend/relations/bundle';
 
 export interface FrontendPluginEntry {
   pluginPath: string;

@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/skill",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/skill/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "skill",
   "version": 1,
   "description": "A stable Skill identity whose immutable ZIP bundle is stored as a File Resource.",
+  "paths": ["./skills/**"],
   "states": [],
   "default_state": "available",
   "initial_state": "pending",

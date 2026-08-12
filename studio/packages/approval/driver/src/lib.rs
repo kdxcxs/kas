@@ -8,17 +8,17 @@ use kas_driver::{Driver, DriverError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const APPROVAL_MANIFEST: &str = "/manifests/approval";
-pub const APPROVAL_RESULT_MANIFEST: &str = "/manifests/approval-result";
-pub const USER_MANIFEST: &str = "/builtin/user";
-pub const SERVICE_ACCOUNT_MANIFEST: &str = "/builtin/service-account";
-pub const AGENT_MANIFEST: &str = "/manifests/agent";
-pub const LINK_MANIFEST: &str = "/builtin/link";
-pub const REQUESTED_BY_RELATION: &str = "/manifests/approval/relations/requested-by";
-pub const DECIDES_RELATION: &str = "/manifests/approval/relations/decides";
-pub const DECIDED_BY_RELATION: &str = "/manifests/approval/relations/decided-by";
-pub const RESULT_OF_RELATION: &str = "/manifests/approval/relations/result-of";
-pub const PRODUCED_BY_RELATION: &str = "/manifests/approval/relations/produced-by";
+pub const APPROVAL_MANIFEST: &str = "/packages/studio/approval/manifest";
+pub const APPROVAL_RESULT_MANIFEST: &str = "/packages/studio/approval-result/manifest";
+pub const USER_MANIFEST: &str = "/packages/kas/user/manifest";
+pub const SERVICE_ACCOUNT_MANIFEST: &str = "/packages/kas/service-account/manifest";
+pub const AGENT_MANIFEST: &str = "/packages/studio/agent/manifest";
+pub const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+pub const REQUESTED_BY_RELATION: &str = "/packages/studio/approval/relations/requested-by";
+pub const DECIDES_RELATION: &str = "/packages/studio/approval/relations/decides";
+pub const DECIDED_BY_RELATION: &str = "/packages/studio/approval/relations/decided-by";
+pub const RESULT_OF_RELATION: &str = "/packages/studio/approval/relations/result-of";
+pub const PRODUCED_BY_RELATION: &str = "/packages/studio/approval/relations/produced-by";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "snake_case")]
@@ -221,15 +221,18 @@ mod tests {
     fn create_operation_uses_the_resource_path() {
         let operation = ApprovalOperation::Create {
             resource: ApprovalCreateResource {
-                path: "/messages/proof".into(),
+                path: "/packages/studio/message/messages/proof".into(),
                 metadata: PlannedResourceMetadata {
-                    manifest: "/manifests/message".into(),
+                    manifest: "/packages/studio/message/manifest".into(),
                     name: "proof".into(),
                     state: String::new(),
                 },
                 spec: json!({"role": "system", "body": "approved"}),
             },
         };
-        assert_eq!(operation.scope_path(), "/messages/proof");
+        assert_eq!(
+            operation.scope_path(),
+            "/packages/studio/message/messages/proof"
+        );
     }
 }

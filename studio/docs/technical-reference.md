@@ -86,7 +86,7 @@ both Agent and Session Resources. The Agent publishes its own assistant Message
 and required Links through the scoped KAS API; the Driver validates that reply
 and never converts Codex's final terminal output into a Message.
 Agent-to-Skill assignment uses a `uses`
-Link. The built-in KAS operating context is itself the `/skills/kas` Skill and
+Link. The built-in KAS operating context is itself the `/packages/studio/skill/skills/kas` Skill and
 is assigned to every Agent. The fixed Agent prompt contains only enough
 bootstrap context to identify KAS, the Agent's ServiceAccount, and its API
 environment variables; the complete operating instructions live in `$kas`.
@@ -95,21 +95,21 @@ ServiceAccount cannot perform. A User may approve or reject the request. On
 approval, the Driver verifies that the deciding User may perform the exact
 operation and executes it with that request's User credential. Request,
 Decision, and Result are independent Resources whose paths belong to their
-principal namespaces: `/approvals{requester}/requests/{uuid}`,
-`/approvals{approver}/decisions/{uuid}`, and
-`/approvals{requester}/results/{uuid}`. Named Links record `requested-by`,
+principal namespaces: `/packages/studio/approval/approvals{requester}/requests/{uuid}`,
+`/packages/studio/approval/approvals{approver}/decisions/{uuid}`, and
+`/packages/studio/approval/approvals{requester}/results/{uuid}`. Named Links record `requested-by`,
 `decides`, `decided-by`, `result-of`, and `produced-by`; no shared request ID
 or per-request Role or role-binding Link is required. A successful operation creates
-an immutable `/manifests/approval-result` Resource containing the sanitized API
+an immutable `/packages/studio/approval-result/manifest` Resource containing the sanitized API
 response. Plaintext credentials are never stored in KAS Resources.
 
-Threads are independent Resources under `/threads/{id}`. Their `participants`
+Threads are independent Resources under `/packages/studio/thread/threads/{id}`. Their `participants`
 Links may reference multiple Agents, but only Agents referenced by a Message
 `mentioned` Link receive a Run. Message membership uses `message-thread`;
 the old convention where a root Message doubled as a Thread no longer exists.
 
 Each `(Thread, Agent)` pair gets at most one Session Resource at
-`/threads/{thread}/sessions/{agent}`. The first mention starts a persistent
+`/packages/studio/thread/threads/{thread}/packages/studio/session/sessions/{agent}`. The first mention starts a persistent
 Codex CLI session and records the `thread.started.thread_id`; later mentions
 use `codex exec resume`. The Session cursor advances to the latest assistant
 Message, so a resumed Agent receives only Thread Messages created since its
@@ -136,15 +136,15 @@ its environment. Set `KAS_CODEX_BIN` to override its path and
 The File Driver binds `KAS_FILE_ADDRESS` (default `127.0.0.1:3001`) and stores
 content under `KAS_DATA_DIR/file-driver/blobs`. Clients upload multipart
 `content` to `POST /files` and download with
-`GET /files/content?path=/files/...`; both endpoints accept normal KAS Bearer
+`GET /files/content?path=/packages/studio/file/files/...`; both endpoints accept normal KAS Bearer
 Credentials. The Driver forwards that Credential to KAS `/auth/check` using
 the `upload` or `download` verb. `KAS_FILE_MAX_BYTES` sets the upload limit
 (default 1 GiB). Downloads support HEAD and HTTP byte ranges.
 
 The Skill Driver binds `KAS_SKILL_ADDRESS` (default `127.0.0.1:3002`).
 Create a Skill with multipart field `bundle` at
-`POST /skills?path=/skills/{id}` and replace its bundle at
-`PATCH /skills?path=/skills/{id}&expected_revision={revision}`. Both endpoints
+`POST /skills?path=/packages/studio/skill/skills/{id}` and replace its bundle at
+`PATCH /skills?path=/packages/studio/skill/skills/{id}&expected_revision={revision}`. Both endpoints
 authorize the caller through KAS and upload bundle bytes through the File API.
 The Driver validates every ZIP before creating Skill state and validates it
 again before materializing it for an Agent. Bundles require a root
@@ -203,7 +203,7 @@ studio/scripts/build-packages.sh
 The Driver serves the host and acts as a small same-origin reverse proxy.
 `/api/*` is an intrinsic route to the same KAS control plane used by the
 Driver protocol. Every independently served HTTP API is configured as a
-`/manifests/proxy` Resource in KAS. The Frontend Driver reconciles those
+`/packages/studio/proxy/manifest` Resource in KAS. The Frontend Driver reconciles those
 Resources into its live longest-prefix route table, so route changes require
 neither environment configuration nor a process restart. File is the
 foundational external route; Skill and Approval remain compatibility Proxy
@@ -240,7 +240,7 @@ studio/scripts/build-frontend-plugin.sh \
 
 studio/scripts/install-frontend-plugin.sh \
   /tmp/registry.zip \
-  /frontend-plugins/registry \
+  /packages/studio/frontend/plugins/registry \
   registry \
   index.html \
   Objects \

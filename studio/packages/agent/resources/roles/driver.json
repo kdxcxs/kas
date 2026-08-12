@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "agent-driver"
   },
   "spec": {
@@ -9,7 +9,7 @@
     "rules": [
       {
         "manifests": [
-          "/manifests/agent"
+          "/packages/studio/agent/manifest"
         ],
         "verbs": [
           "get",
@@ -17,26 +17,26 @@
           "update"
         ],
         "paths": [
-          "/agents/**"
+          "/packages/studio/agent/agents/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/thread",
-          "/manifests/message"
+          "/packages/studio/thread/manifest",
+          "/packages/studio/message/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/threads/**",
-          "/messages/**"
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/session"
+          "/packages/studio/session/manifest"
         ],
         "verbs": [
           "get",
@@ -45,12 +45,12 @@
           "update"
         ],
         "paths": [
-          "/threads/**/sessions/**"
+          "/packages/studio/session/sessions/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/file"
+          "/packages/studio/file/manifest"
         ],
         "verbs": [
           "get",
@@ -58,26 +58,26 @@
           "download"
         ],
         "paths": [
-          "/files/**"
+          "/packages/studio/file/files/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/skill"
+          "/packages/studio/skill/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/skills/**",
-          "/users/**/skills/**",
-          "/agents/**/skills/**"
+          "/packages/studio/skill/skills/**",
+          "/packages/kas/user/users/**/skills/**",
+          "/packages/studio/agent/agents/**/skills/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
@@ -86,41 +86,44 @@
           "delete"
         ],
         "paths": [
-          "/agents/**",
-          "/threads/**",
-          "/messages/**",
-          "/skills/**",
-          "/users/**/skills/**"
+          "/packages/studio/agent/agents/**",
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**",
+          "/packages/studio/session/sessions/**",
+          "/packages/studio/skill/skills/**",
+          "/packages/kas/user/users/**/skills/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/approval",
-          "/manifests/approval-result"
+          "/packages/studio/approval/manifest",
+          "/packages/studio/approval-result/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/approvals/agents/**"
+          "/packages/studio/approval/approvals/packages/studio/agent/agents/**",
+          "/packages/studio/approval-result/results/agents/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/approvals/agents/**"
+          "/packages/studio/approval/approvals/packages/studio/agent/agents/**",
+          "/packages/studio/approval-result/results/agents/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/service-account"
+          "/packages/kas/service-account/manifest"
         ],
         "verbs": [
           "get",
@@ -130,12 +133,12 @@
           "delete"
         ],
         "paths": [
-          "/agents/**/service-account"
+          "/packages/studio/agent/service-accounts/*"
         ]
       },
       {
         "manifests": [
-          "/builtin/role"
+          "/packages/kas/role/manifest"
         ],
         "verbs": [
           "get",
@@ -144,19 +147,19 @@
           "delete"
         ],
         "paths": [
-          "/agents/**/skill-role"
+          "/packages/studio/agent/roles/*"
         ]
       },
       {
         "manifests": [
-          "/builtin/role"
+          "/packages/kas/role/manifest"
         ],
         "verbs": [
           "bind"
         ],
         "paths": [
-          "/manifests/agent/roles/runtime",
-          "/agents/**/skill-role"
+          "/packages/studio/agent/roles/runtime",
+          "/packages/studio/agent/roles/*"
         ]
       }
     ]

@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/file",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/file/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "file",
   "version": 1,
   "description": "An immutable descriptor for content stored and served by the File Driver.",
+  "paths": ["./files/**"],
   "states": [],
   "default_state": "available",
   "initial_state": "pending",

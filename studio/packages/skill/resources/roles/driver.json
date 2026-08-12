@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "skill-driver"
   },
   "spec": {
@@ -19,14 +19,12 @@
           "delete"
         ],
         "paths": [
-          "/skills/**",
-          "/users/**/skills/**",
-          "/agents/**/skills/**"
+          "/packages/studio/skill/skills/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/file"
+          "/packages/studio/file/manifest"
         ],
         "verbs": [
           "get",
@@ -36,14 +34,12 @@
           "delete"
         ],
         "paths": [
-          "/files/skills/**",
-          "/files/users/**/skills/**",
-          "/files/agents/**/skills/**"
+          "/packages/studio/file/files/skills/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
@@ -53,24 +49,22 @@
           "delete"
         ],
         "paths": [
-          "/skills/**",
-          "/users/**/skills/**",
-          "/agents/**/skills/**"
+          "/packages/studio/skill/skills/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/user",
-          "/builtin/service-account",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest",
+          "/packages/studio/agent/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/users/**",
-          "/agents/**"
+          "/packages/kas/user/users/**",
+          "/packages/studio/agent/agents/**"
         ]
       }
     ]

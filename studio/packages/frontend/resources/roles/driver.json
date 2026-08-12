@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "frontend-driver"
   },
   "spec": {
@@ -9,7 +9,7 @@
     "rules": [
       {
         "manifests": [
-          "/manifests/proxy"
+          "/packages/studio/proxy/manifest"
         ],
         "verbs": [
           "get",
@@ -17,12 +17,12 @@
           "update"
         ],
         "paths": [
-          "/proxies/**"
+          "/packages/studio/proxy/proxies/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/frontend-plugin"
+          "/packages/studio/frontend/manifest"
         ],
         "verbs": [
           "get",
@@ -30,12 +30,12 @@
           "update"
         ],
         "paths": [
-          "/frontend-plugins/**"
+          "/packages/studio/frontend/plugins/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/file"
+          "/packages/studio/file/manifest"
         ],
         "verbs": [
           "get",
@@ -43,19 +43,19 @@
           "download"
         ],
         "paths": [
-          "/files/frontend-plugins/**"
+          "/packages/studio/file/files/packages/studio/frontend/plugins/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
           "list"
         ],
         "paths": [
-          "/frontend-plugins/**"
+          "/packages/studio/frontend/plugins/**"
         ]
       }
     ]

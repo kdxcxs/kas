@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "telegram-driver"
   },
   "spec": {
@@ -9,12 +9,12 @@
     "rules": [
       {
         "manifests": [
-          "/manifests/telegram",
-          "/manifests/thread",
-          "/manifests/message",
-          "/manifests/agent",
-          "/manifests/approval",
-          "/builtin/user"
+          "/packages/studio/telegram/manifest",
+          "/packages/studio/thread/manifest",
+          "/packages/studio/message/manifest",
+          "/packages/studio/agent/manifest",
+          "/packages/studio/approval/manifest",
+          "/packages/kas/user/manifest"
         ],
         "verbs": [
           "get",
@@ -23,29 +23,30 @@
           "update"
         ],
         "paths": [
-          "/telegram/**",
-          "/threads/**",
-          "/messages/**",
-          "/agents/**",
-          "/users/**",
-          "/approvals/**"
+          "/packages/studio/telegram/integrations/**",
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**",
+          "/packages/studio/agent/agents/**",
+          "/packages/kas/user/users/**",
+          "/packages/studio/telegram/users/**",
+          "/packages/studio/approval/approvals/**"
         ]
       },
       {
         "manifests": [
-          "/manifests/file"
+          "/packages/studio/file/manifest"
         ],
         "verbs": [
           "get",
           "download"
         ],
         "paths": [
-          "/files/**"
+          "/packages/studio/file/files/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
@@ -55,11 +56,12 @@
           "delete"
         ],
         "paths": [
-          "/telegram/**",
-          "/threads/**",
-          "/messages/**",
-          "/users/**",
-          "/approvals/**"
+          "/packages/studio/telegram/integrations/**",
+          "/packages/studio/thread/threads/**",
+          "/packages/studio/message/messages/**",
+          "/packages/kas/user/users/**",
+          "/packages/studio/telegram/users/**",
+          "/packages/studio/approval/approvals/**"
         ]
       }
     ]

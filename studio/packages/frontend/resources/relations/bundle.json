@@ -1,7 +1,7 @@
 {
   "path": "./relations/bundle",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "bundle"
   },
   "spec": {
@@ -13,7 +13,7 @@
     ],
     "targets": [
       {
-        "manifest": "/manifests/file"
+        "manifest": "/packages/studio/file/manifest"
       }
     ],
     "on_source_delete": "unlink",

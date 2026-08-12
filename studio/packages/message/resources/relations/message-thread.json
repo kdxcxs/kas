@@ -1,7 +1,7 @@
 {
   "path": "./relations/message-thread",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "message-thread"
   },
   "spec": {
@@ -10,15 +10,15 @@
       {
         "manifest": ".",
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       }
     ],
     "targets": [
       {
-        "manifest": "/manifests/thread",
+        "manifest": "/packages/studio/thread/manifest",
         "paths": [
-          "/threads/**"
+          "/packages/studio/thread/threads/**"
         ]
       }
     ],

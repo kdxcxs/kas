@@ -1,7 +1,7 @@
 {
   "path": "./relations/uploaded-by",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "uploaded-by"
   },
   "spec": {
@@ -10,16 +10,16 @@
       {
         "manifest": ".",
         "paths": [
-          "/files/**"
+          "/packages/studio/file/files/**"
         ]
       }
     ],
     "targets": [
       {
         "manifest": [
-          "/builtin/user",
-          "/builtin/service-account",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/kas/service-account/manifest",
+          "/packages/studio/agent/manifest"
         ]
       }
     ],

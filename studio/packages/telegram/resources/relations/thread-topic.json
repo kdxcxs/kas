@@ -1,16 +1,16 @@
 {
   "path": "./relations/thread-topic",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "telegram-topic"
   },
   "spec": {
     "inverse_name": "kas-thread",
     "sources": [
       {
-        "manifest": "/manifests/thread",
+        "manifest": "/packages/studio/thread/manifest",
         "paths": [
-          "/threads/**"
+          "/packages/studio/thread/threads/**"
         ]
       }
     ],
@@ -18,7 +18,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/telegram/**"
+          "/packages/studio/telegram/integrations/**"
         ]
       }
     ],

@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/message",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/message/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "message",
   "version": 1,
   "description": "An immutable message belonging to a Thread.",
+  "paths": ["./messages/**"],
   "states": [],
   "default_state": "available",
   "initial_state": "pending",

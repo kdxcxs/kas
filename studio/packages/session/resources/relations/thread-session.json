@@ -1,16 +1,16 @@
 {
   "path": "./relations/thread-session",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "thread-session"
   },
   "spec": {
     "inverse_name": "thread",
     "sources": [
       {
-        "manifest": "/manifests/thread",
+        "manifest": "/packages/studio/thread/manifest",
         "paths": [
-          "/threads/**"
+          "/packages/studio/thread/threads/**"
         ]
       }
     ],
@@ -18,7 +18,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/threads/**/sessions/**"
+          "/packages/studio/session/sessions/**"
         ]
       }
     ],

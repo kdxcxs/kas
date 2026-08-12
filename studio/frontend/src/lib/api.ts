@@ -12,20 +12,20 @@ import type {
   UpdateResource
 } from './types';
 
-const LINK_MANIFEST = '/builtin/link';
+const LINK_MANIFEST = '/packages/kas/link/manifest';
 
 const KIND_BY_MANIFEST: Record<string, ObjectKind> = {
-  '/builtin/manifest': 'manifest',
-  '/builtin/action': 'action',
-  '/builtin/relation': 'relation',
-  '/builtin/driver': 'driver',
-  '/builtin/run': 'run',
-  '/builtin/link': 'link',
-  '/builtin/user': 'user',
-  '/builtin/service-account': 'service_account',
-  '/builtin/role': 'role',
-  '/builtin/credential': 'credential',
-  '/builtin/package': 'package'
+  '/packages/kas/manifest/manifest': 'manifest',
+  '/packages/kas/action/manifest': 'action',
+  '/packages/kas/relation/manifest': 'relation',
+  '/packages/kas/driver/manifest': 'driver',
+  '/packages/kas/run/manifest': 'run',
+  '/packages/kas/link/manifest': 'link',
+  '/packages/kas/user/manifest': 'user',
+  '/packages/kas/service-account/manifest': 'service_account',
+  '/packages/kas/role/manifest': 'role',
+  '/packages/kas/credential/manifest': 'credential',
+  '/packages/kas/package/manifest': 'package'
 };
 
 export class KasApiError extends Error {
@@ -112,7 +112,7 @@ export class KasApi {
 
   async getAgentDriver(): Promise<Driver | null> {
     try {
-      const driver = await this.getResource('/manifests/agent/driver');
+      const driver = await this.getResource('/packages/studio/agent/driver');
       return {
         path: driver.path,
         state: driver.status_state as Driver['state']

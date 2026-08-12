@@ -1,7 +1,7 @@
 {
   "path": "./driver",
   "metadata": {
-    "manifest": "/builtin/driver",
+    "manifest": "/packages/kas/driver/manifest",
     "name": "message-driver",
     "state": "running"
   },
@@ -15,12 +15,12 @@
     "args": [],
     "watches": [
       {
-        "manifest": "/builtin/link",
+        "manifest": "/packages/kas/link/manifest",
         "paths": [
-          "/messages/**/links/message-thread",
-          "/messages/**/links/mentioned/*",
-          "/messages/**/links/attachments/*",
-          "/threads/**/links/participants/*"
+          "/packages/studio/message/messages/**/links/message-thread",
+          "/packages/studio/message/messages/**/links/mentioned/*",
+          "/packages/studio/message/messages/**/links/attachments/*",
+          "/packages/studio/thread/threads/**/links/participants/*"
         ]
       }
     ],

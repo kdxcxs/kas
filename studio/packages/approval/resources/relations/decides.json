@@ -1,7 +1,7 @@
 {
   "path": "./relations/decides",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "decides"
   },
   "spec": {

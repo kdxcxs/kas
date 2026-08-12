@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-pub const FILE_MANIFEST: &str = "/manifests/file";
-pub const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
-pub const UPLOADED_BY: &str = "/manifests/file/relations/uploaded-by";
+pub const FILE_MANIFEST: &str = "/packages/studio/file/manifest";
+pub const ATTACHED_TO: &str = "/packages/studio/file/relations/attached-to";
+pub const UPLOADED_BY: &str = "/packages/studio/file/relations/uploaded-by";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FileSpec {

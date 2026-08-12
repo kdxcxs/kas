@@ -5,8 +5,8 @@ import type { Resource } from './types';
 describe('frontend plugins', () => {
   it('expands available sidebar contributions backed by a bundle Link', () => {
     const plugin = {
-      path: '/frontend-plugins/registry',
-      manifest: '/manifests/frontend-plugin',
+      path: '/packages/studio/frontend/plugins/registry',
+      manifest: '/packages/studio/frontend/manifest',
       name: 'Registry',
       state: 'available',
       status_state: 'available',
@@ -31,8 +31,8 @@ describe('frontend plugins', () => {
       links: [
         {
           relation_path: FRONTEND_PLUGIN_BUNDLE,
-          source: { path: '/frontend-plugins/registry' },
-          target: { path: '/files/frontend-plugins/registry/bundle' }
+          source: { path: '/packages/studio/frontend/plugins/registry' },
+          target: { path: '/packages/studio/file/files/packages/studio/frontend/plugins/registry/bundle' }
         }
       ]
     } as unknown as Resource;
@@ -40,7 +40,7 @@ describe('frontend plugins', () => {
     expect(frontendPluginEntries([plugin])).toEqual([
       expect.objectContaining({
         pluginPath: plugin.path,
-        bundlePath: '/files/frontend-plugins/registry/bundle',
+        bundlePath: '/packages/studio/file/files/packages/studio/frontend/plugins/registry/bundle',
         slug: 'registry',
         entrypoint: 'index.html',
         id: 'registry'

@@ -1,24 +1,24 @@
 {
   "path": "./relations/user-binding",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "telegram-user-binding"
   },
   "spec": {
     "inverse_name": "bound-kas-user",
     "sources": [
       {
-        "manifest": "/builtin/user",
+        "manifest": "/packages/kas/user/manifest",
         "paths": [
-          "/users/**"
+          "/packages/kas/user/users/**"
         ]
       }
     ],
     "targets": [
       {
-        "manifest": "/builtin/user",
+        "manifest": "/packages/kas/user/manifest",
         "paths": [
-          "/users/telegram/**"
+          "/packages/studio/telegram/users/**"
         ]
       }
     ],
@@ -35,7 +35,7 @@
       "properties": {
         "configuration": {
           "type": "string",
-          "pattern": "^/telegram/"
+          "pattern": "^/packages/studio/telegram/integrations/"
         },
         "user_id": {
           "type": "integer"

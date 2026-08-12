@@ -1,7 +1,7 @@
 {
   "path": "./relations/attached-to",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "attached-to"
   },
   "spec": {
@@ -10,7 +10,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/files/**"
+          "/packages/studio/file/files/**"
         ]
       }
     ],

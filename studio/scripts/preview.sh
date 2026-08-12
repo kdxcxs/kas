@@ -165,7 +165,7 @@ create_proxy() {
         --arg upstream "$upstream" '{
           path: $path,
           metadata: {
-            manifest: "/manifests/proxy",
+            manifest: "/packages/studio/proxy/manifest",
             name: $name
           },
           spec: {
@@ -178,9 +178,9 @@ create_proxy() {
     )" \
     "$API/resources" >/dev/null
 }
-create_proxy "/proxies/file" "File API" "/files-api" "$FILE_API"
-create_proxy "/proxies/skill" "Skill API" "/skills-api" "$SKILL_API"
-create_proxy "/proxies/approval" "Approval API" "/approvals-api" "$APPROVAL_API"
+create_proxy "/packages/studio/proxy/proxies/file" "File API" "/files-api" "$FILE_API"
+create_proxy "/packages/studio/proxy/proxies/skill" "Skill API" "/skills-api" "$SKILL_API"
+create_proxy "/packages/studio/proxy/proxies/approval" "Approval API" "/approvals-api" "$APPROVAL_API"
 
 wait_for_driver() {
   local path="$1" driver
@@ -200,14 +200,17 @@ wait_for_driver() {
   return 1
 }
 
-wait_for_driver "/manifests/agent/driver"
-wait_for_driver "/manifests/file/driver"
-wait_for_driver "/manifests/frontend-plugin/driver"
-wait_for_driver "/manifests/skill/driver"
-wait_for_driver "/manifests/approval/driver"
-wait_for_driver "/manifests/message/driver"
-wait_for_driver "/manifests/telegram/driver"
-for proxy_path in /proxies/file /proxies/skill /proxies/approval; do
+wait_for_driver "/packages/studio/agent/driver"
+wait_for_driver "/packages/studio/file/driver"
+wait_for_driver "/packages/studio/frontend/driver"
+wait_for_driver "/packages/studio/skill/driver"
+wait_for_driver "/packages/studio/approval/driver"
+wait_for_driver "/packages/studio/message/driver"
+wait_for_driver "/packages/studio/telegram/driver"
+for proxy_path in \
+  /packages/studio/proxy/proxies/file \
+  /packages/studio/proxy/proxies/skill \
+  /packages/studio/proxy/proxies/approval; do
   for _ in $(seq 1 200); do
     proxy="$(
       curl --fail --silent --get \
@@ -246,7 +249,7 @@ install_workspace_plugin() {
   KAS_TOKEN="$ADMIN_TOKEN" \
     "$STUDIO_ROOT/scripts/install-frontend-plugin.sh" \
       "$PREVIEW_DIR/workspace.zip" \
-      "/frontend-plugins/$id" \
+      "/packages/studio/frontend/plugins/$id" \
       "$id" \
       "$id.html" \
       "$label" \
@@ -272,7 +275,7 @@ KAS_FILE_API_URL="$FILE_API" \
 KAS_TOKEN="$ADMIN_TOKEN" \
   "$STUDIO_ROOT/scripts/install-frontend-plugin.sh" \
     "$PREVIEW_DIR/registry.zip" \
-    "/frontend-plugins/registry" \
+    "/packages/studio/frontend/plugins/registry" \
     "registry" \
     "index.html" \
     "Objects" \
@@ -283,7 +286,7 @@ for _ in $(seq 1 200); do
   PLUGIN="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/frontend-plugins/registry" \
+      --data-urlencode "path=/packages/studio/frontend/plugins/registry" \
       "$API/resources/by-path"
   )"
   if [[ "$(jq -r '.status.metadata.state' <<<"$PLUGIN")" == "available" ]]; then
@@ -293,11 +296,11 @@ for _ in $(seq 1 200); do
 done
 jq -e '.status.metadata.state == "available"' <<<"$PLUGIN" >/dev/null
 for plugin_path in \
-  /frontend-plugins/threads \
-  /frontend-plugins/agents \
-  /frontend-plugins/skills \
-  /frontend-plugins/approvals \
-  /frontend-plugins/telegram; do
+  /packages/studio/frontend/plugins/threads \
+  /packages/studio/frontend/plugins/agents \
+  /packages/studio/frontend/plugins/skills \
+  /packages/studio/frontend/plugins/approvals \
+  /packages/studio/frontend/plugins/telegram; do
   for _ in $(seq 1 200); do
     PLUGIN="$(
       curl --fail --silent --get \
@@ -341,9 +344,9 @@ fi
 
 AGENT_PAYLOAD="$(
   jq -n --arg cwd "$ROOT" '{
-    path: "/agents/preview",
+    path: "/packages/studio/agent/agents/preview",
     metadata: {
-      manifest: "/manifests/agent",
+      manifest: "/packages/studio/agent/manifest",
       name: "Preview Agent"
     },
     spec: {
@@ -362,13 +365,13 @@ for _ in $(seq 1 400); do
   AGENT="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/agents/preview" \
+      --data-urlencode "path=/packages/studio/agent/agents/preview" \
       "$API/resources/by-path"
   )"
   LINK="$(
     curl --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/agents/preview/links/service-account" \
+      --data-urlencode "path=/packages/studio/agent/agents/preview/links/service-account" \
       "$API/resources/by-path"
   )"
   if jq -e '
@@ -376,8 +379,8 @@ for _ in $(seq 1 400); do
     and .status.metadata.state == "available"
   ' >/dev/null <<<"$AGENT" &&
     jq -e '
-      .spec.relation == "/manifests/agent/relations/service-account"
-      and .spec.target == "/agents/preview/service-account"
+      .spec.relation == "/packages/studio/agent/relations/service-account"
+      and .spec.target == "/packages/studio/agent/service-accounts/preview"
       and .status.metadata.state == "available"
     ' >/dev/null <<<"$LINK"; then
     agent_ready=true
@@ -392,9 +395,9 @@ fi
 
 THREAD_PAYLOAD="$(
   jq -n '{
-    path: "/threads/preview",
+    path: "/packages/studio/thread/threads/preview",
     metadata: {
-      manifest: "/manifests/thread",
+      manifest: "/packages/studio/thread/manifest",
       name: "Preview Thread"
     },
     spec: {
@@ -419,12 +422,12 @@ create_link() {
         --arg target "$target" '{
           path: $path,
           metadata: {
-            manifest: "/builtin/link",
+            manifest: "/packages/kas/link/manifest",
             name: ($path | split("/") | last)
           },
           spec: {
-            relation: "/manifests/thread/relations/participants",
-            source: "/threads/preview",
+            relation: "/packages/studio/thread/relations/participants",
+            source: "/packages/studio/thread/threads/preview",
             target: $target,
             metadata: {}
           }
@@ -432,13 +435,13 @@ create_link() {
     )" \
     "$API/resources" >/dev/null
 }
-create_link "/threads/preview/links/participants/user" "/users/preview-admin"
-create_link "/threads/preview/links/participants/agent" "/agents/preview"
+create_link "/packages/studio/thread/threads/preview/links/participants/user" "/packages/kas/user/users/preview-admin"
+create_link "/packages/studio/thread/threads/preview/links/participants/agent" "/packages/studio/agent/agents/preview"
 for _ in $(seq 1 200); do
   PARTICIPANT_LINK="$(
     curl --fail --silent --get \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
-      --data-urlencode "path=/threads/preview/links/participants/agent" \
+      --data-urlencode "path=/packages/studio/thread/threads/preview/links/participants/agent" \
       "$API/resources/by-path"
   )"
   if [[ "$(jq -r '.status.metadata.state' <<<"$PARTICIPANT_LINK")" == "available" ]]; then
@@ -473,9 +476,9 @@ echo "File API:  $FILE_API/"
 echo "Skill API: $SKILL_API/"
 echo "Approval:  $APPROVAL_API/"
 echo "API base:  /api"
-echo "User path: /users/preview-admin"
+echo "User path: /packages/kas/user/users/preview-admin"
 echo "Token:     $ADMIN_TOKEN"
-echo "Agent:     Preview Agent (/agents/preview)"
+echo "Agent:     Preview Agent (/packages/studio/agent/agents/preview)"
 echo "Logs:      $PREVIEW_DIR"
 echo
 echo "Press Ctrl-C to stop the preview."

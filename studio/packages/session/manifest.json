@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/session",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/session/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "session",
   "version": 1,
   "description": "A persistent provider session for one Agent participating in one Thread.",
+  "paths": ["./sessions/*"],
   "states": [],
   "default_state": "available",
   "initial_state": "available",

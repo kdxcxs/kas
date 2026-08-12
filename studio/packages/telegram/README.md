@@ -2,7 +2,7 @@
 
 This package bridges KAS Threads to topics in one Telegram forum group.
 
-Each `/manifests/telegram` Resource configures one bot and one group. Creating a
+Each `/packages/studio/telegram/manifest` Resource configures one bot and one group. Creating a
 managed `thread-topic` Link asks the Driver to create a new Telegram topic for
 that KAS Thread. The Driver stores Telegram's returned topic ID on the Link.
 Incoming Telegram messages become KAS Message Resources, and KAS Messages in a
@@ -22,7 +22,7 @@ Link between that KAS User and the Telegram identity.
 After binding:
 
 - incoming Telegram Messages are attributed to the bound KAS User instead of
-  the fallback `/users/telegram/{id}` identity;
+  the fallback `/packages/studio/telegram/users/{id}` identity;
 - pending Approval requests are delivered to the user's private Telegram chat;
 - the binding can be removed from the Studio UI without deleting either
   identity.

@@ -1,7 +1,7 @@
 {
   "path": "./relations/authored-by",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "authored-by"
   },
   "spec": {
@@ -10,15 +10,15 @@
       {
         "manifest": ".",
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       }
     ],
     "targets": [
       {
         "manifest": [
-          "/builtin/user",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
         ]
       }
     ],

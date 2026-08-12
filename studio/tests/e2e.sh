@@ -125,7 +125,7 @@ create_link() {
       --argjson metadata "$metadata" '{
         path: $path,
         metadata: {
-          manifest: "/builtin/link",
+          manifest: "/packages/kas/link/manifest",
           name: ($path | split("/") | last)
         },
         spec: {
@@ -138,10 +138,24 @@ create_link() {
   )" >/dev/null
 }
 
-wait_for_run() {
-  local path="$1" value="" state=""
+find_run() {
+  local message_path="$1" agent_path="$2"
+  request --fail --silent --get \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-urlencode "manifest=/packages/kas/run/manifest" \
+    "$API/resources" 2>/dev/null |
+    jq -c --arg message "$message_path" --arg agent "$agent_path" '
+      [.[] | select(
+        .spec.resource == $agent
+        and .spec.input.message_path == $message
+      )] | last // empty
+    '
+}
+
+wait_for_matching_run() {
+  local message_path="$1" agent_path="$2" value="" state=""
   for _ in $(seq 1 3600); do
-    value="$(get_resource "$path" 2>/dev/null || true)"
+    value="$(find_run "$message_path" "$agent_path" || true)"
     state="$(jq -r '.status.metadata.state // empty' <<<"$value")"
     if [[ "$state" =~ ^(succeeded|failed|cancelled)$ ]]; then
       printf '%s\n' "$value"
@@ -247,7 +261,7 @@ TELEGRAM_PACKAGE="$(install_package "$E2E_DIR/packages/telegram.kas")"
 APPROVAL_RESULT_PACKAGE="$(install_package "$E2E_DIR/packages/approval-result.kas")"
 APPROVAL_PACKAGE="$(install_package "$E2E_DIR/packages/approval.kas")"
 for package in "$THREAD_PACKAGE" "$SESSION_PACKAGE" "$FILE_PACKAGE" "$PROXY_PACKAGE" "$FRONTEND_PACKAGE" "$SKILL_PACKAGE" "$AGENT_PACKAGE" "$MESSAGE_PACKAGE" "$TELEGRAM_PACKAGE" "$APPROVAL_RESULT_PACKAGE" "$APPROVAL_PACKAGE"; do
-  jq -e '.metadata.manifest == "/builtin/package"' <<<"$package" >/dev/null
+  jq -e '.metadata.manifest == "/packages/kas/package/manifest"' <<<"$package" >/dev/null
 done
 
 create_proxy() {
@@ -260,7 +274,7 @@ create_proxy() {
       --arg upstream "$upstream" '{
         path: $path,
         metadata: {
-          manifest: "/manifests/proxy",
+          manifest: "/packages/studio/proxy/manifest",
           name: $name
         },
         spec: {
@@ -272,65 +286,65 @@ create_proxy() {
       }'
   )" >/dev/null
 }
-create_proxy "/proxies/file" "File API" "/files-api" "$FILE_API"
-create_proxy "/proxies/skill" "Skill API" "/skills-api" "$SKILL_API"
-create_proxy "/proxies/approval" "Approval API" "/approvals-api" "$APPROVAL_API"
+create_proxy "/packages/studio/proxy/proxies/file" "File API" "/files-api" "$FILE_API"
+create_proxy "/packages/studio/proxy/proxies/skill" "Skill API" "/skills-api" "$SKILL_API"
+create_proxy "/packages/studio/proxy/proxies/approval" "Approval API" "/approvals-api" "$APPROVAL_API"
 
 for path in \
-  /manifests/agent \
-  /manifests/agent/actions/message \
-  /manifests/thread \
-  /manifests/thread/relations/participants \
-  /manifests/session \
-  /manifests/session/relations/thread-session \
-  /manifests/session/relations/agent-session \
-  /manifests/file \
-  /manifests/file/relations/attached-to \
-  /manifests/file/relations/uploaded-by \
-  /manifests/proxy \
-  /proxies/file \
-  /proxies/skill \
-  /proxies/approval \
-  /manifests/frontend-plugin \
-  /manifests/frontend-plugin/relations/bundle \
-  /manifests/skill \
-  /manifests/skill/relations/bundle \
-  /manifests/skill/relations/owns \
-  /manifests/skill/relations/uses \
-  /skills/kas \
-  /manifests/message \
-  /manifests/message/relations/authored-by \
-  /manifests/message/relations/message-thread \
-  /manifests/message/relations/mentioned \
-  /manifests/message/relations/replies-to \
-  /manifests/telegram \
-  /manifests/telegram/relations/thread-topic \
-  /manifests/telegram/relations/message-copy \
-  /manifests/telegram/relations/identity \
-  /manifests/approval \
-  /manifests/approval-result \
-  /manifests/approval/relations/requested-by \
-  /manifests/approval/relations/decides \
-  /manifests/approval/relations/decided-by \
-  /manifests/approval/relations/result-of \
-  /manifests/approval/relations/produced-by; do
+  /packages/studio/agent/manifest \
+  /packages/studio/agent/actions/message \
+  /packages/studio/thread/manifest \
+  /packages/studio/thread/relations/participants \
+  /packages/studio/session/manifest \
+  /packages/studio/session/relations/thread-session \
+  /packages/studio/session/relations/agent-session \
+  /packages/studio/file/manifest \
+  /packages/studio/file/relations/attached-to \
+  /packages/studio/file/relations/uploaded-by \
+  /packages/studio/proxy/manifest \
+  /packages/studio/proxy/proxies/file \
+  /packages/studio/proxy/proxies/skill \
+  /packages/studio/proxy/proxies/approval \
+  /packages/studio/frontend/manifest \
+  /packages/studio/frontend/relations/bundle \
+  /packages/studio/skill/manifest \
+  /packages/studio/skill/relations/bundle \
+  /packages/studio/skill/relations/owns \
+  /packages/studio/skill/relations/uses \
+  /packages/studio/skill/skills/kas \
+  /packages/studio/message/manifest \
+  /packages/studio/message/relations/authored-by \
+  /packages/studio/message/relations/message-thread \
+  /packages/studio/message/relations/mentioned \
+  /packages/studio/message/relations/replies-to \
+  /packages/studio/telegram/manifest \
+  /packages/studio/telegram/relations/thread-topic \
+  /packages/studio/telegram/relations/message-copy \
+  /packages/studio/telegram/relations/identity \
+  /packages/studio/approval/manifest \
+  /packages/studio/approval-result/manifest \
+  /packages/studio/approval/relations/requested-by \
+  /packages/studio/approval/relations/decides \
+  /packages/studio/approval/relations/decided-by \
+  /packages/studio/approval/relations/result-of \
+  /packages/studio/approval/relations/produced-by; do
   get_resource "$path" >/dev/null
 done
-if get_resource "/manifests/message/relations/thread-root" >/dev/null 2>&1; then
+if get_resource "/packages/studio/message/relations/thread-root" >/dev/null 2>&1; then
   echo "obsolete thread-root Relation still exists" >&2
   false
 fi
 
-AGENT_DRIVER="$(wait_for_state "/manifests/agent/driver" running)"
-FILE_DRIVER="$(wait_for_state "/manifests/file/driver" running)"
-FRONTEND_DRIVER="$(wait_for_state "/manifests/frontend-plugin/driver" running)"
-SKILL_DRIVER="$(wait_for_state "/manifests/skill/driver" running)"
-MESSAGE_DRIVER="$(wait_for_state "/manifests/message/driver" running)"
-TELEGRAM_DRIVER="$(wait_for_state "/manifests/telegram/driver" running)"
-APPROVAL_DRIVER="$(wait_for_state "/manifests/approval/driver" running)"
-FILE_PROXY="$(wait_for_state "/proxies/file" available)"
-SKILL_PROXY="$(wait_for_state "/proxies/skill" available)"
-APPROVAL_PROXY="$(wait_for_state "/proxies/approval" available)"
+AGENT_DRIVER="$(wait_for_state "/packages/studio/agent/driver" running)"
+FILE_DRIVER="$(wait_for_state "/packages/studio/file/driver" running)"
+FRONTEND_DRIVER="$(wait_for_state "/packages/studio/frontend/driver" running)"
+SKILL_DRIVER="$(wait_for_state "/packages/studio/skill/driver" running)"
+MESSAGE_DRIVER="$(wait_for_state "/packages/studio/message/driver" running)"
+TELEGRAM_DRIVER="$(wait_for_state "/packages/studio/telegram/driver" running)"
+APPROVAL_DRIVER="$(wait_for_state "/packages/studio/approval/driver" running)"
+FILE_PROXY="$(wait_for_state "/packages/studio/proxy/proxies/file" available)"
+SKILL_PROXY="$(wait_for_state "/packages/studio/proxy/proxies/skill" available)"
+APPROVAL_PROXY="$(wait_for_state "/packages/studio/proxy/proxies/approval" available)"
 jq -e '.spec == .status.spec' <<<"$AGENT_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FILE_DRIVER" >/dev/null
 jq -e '.spec == .status.spec' <<<"$FRONTEND_DRIVER" >/dev/null
@@ -358,7 +372,7 @@ install_workspace_plugin() {
   KAS_TOKEN="$ADMIN_TOKEN" \
     "$STUDIO_ROOT/scripts/install-frontend-plugin.sh" \
       "$E2E_DIR/workspace.zip" \
-      "/frontend-plugins/$id" \
+      "/packages/studio/frontend/plugins/$id" \
       "$id" \
       "$id.html" \
       "$label" \
@@ -371,10 +385,10 @@ install_workspace_plugin agents Agents A 20
 install_workspace_plugin skills Skills "⌁" 30
 install_workspace_plugin approvals Approvals "✓" 40
 for plugin_path in \
-  /frontend-plugins/threads \
-  /frontend-plugins/agents \
-  /frontend-plugins/skills \
-  /frontend-plugins/approvals; do
+  /packages/studio/frontend/plugins/threads \
+  /packages/studio/frontend/plugins/agents \
+  /packages/studio/frontend/plugins/skills \
+  /packages/studio/frontend/plugins/approvals; do
   wait_for_state "$plugin_path" available >/dev/null
 done
 "$STUDIO_ROOT/scripts/build-frontend-plugin.sh" \
@@ -385,21 +399,21 @@ KAS_FILE_API_URL="$FILE_API" \
 KAS_TOKEN="$ADMIN_TOKEN" \
   "$STUDIO_ROOT/scripts/install-frontend-plugin.sh" \
     "$E2E_DIR/registry.zip" \
-    "/frontend-plugins/e2e-registry" \
+    "/packages/studio/frontend/plugins/e2e-registry" \
     "e2e-registry" \
     "index.html" \
     "E2E Registry" \
     "◇" \
     "50" \
     "/e2e-registry" >/dev/null
-FRONTEND_PLUGIN="$(wait_for_state "/frontend-plugins/e2e-registry" available)"
+FRONTEND_PLUGIN="$(wait_for_state "/packages/studio/frontend/plugins/e2e-registry" available)"
 jq -e '
-  .metadata.manifest == "/manifests/frontend-plugin"
+  .metadata.manifest == "/packages/studio/frontend/manifest"
   and .metadata.state == "available"
   and .status.metadata.state == "available"
   and .spec.api_version == 1
 ' <<<"$FRONTEND_PLUGIN" >/dev/null
-FRONTEND_PLUGIN_LINK="$(get_resource "/frontend-plugins/e2e-registry/links/bundle")"
+FRONTEND_PLUGIN_LINK="$(get_resource "/packages/studio/frontend/plugins/e2e-registry/links/bundle")"
 FRONTEND_PLUGIN_FILE="$(jq -r '.spec.target' <<<"$FRONTEND_PLUGIN_LINK")"
 get_resource "$FRONTEND_PLUGIN_FILE" >/dev/null
 for _ in $(seq 1 200); do
@@ -439,7 +453,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 command curl --fail --silent "$APPROVAL_API/health" | jq -e '.ok == true' >/dev/null
-KAS_SKILL="$(wait_for_state "/skills/kas" available)"
+KAS_SKILL="$(wait_for_state "/packages/studio/skill/skills/kas" available)"
 jq -e '
   .metadata.state == "available"
   and .status.metadata.state == "available"
@@ -447,11 +461,15 @@ jq -e '
 ' <<<"$KAS_SKILL" >/dev/null
 
 mkdir -p "$E2E_DIR/workspace"
-AGENT_PATH="/agents/e2e"
-OBSERVER_PATH="/agents/observer"
-PREVIEW_AGENT_PATH="/agents/preview"
-PROOF_PATH="/messages/e2e-agent-network-proof"
-SKILL_PROOF_PATH="/messages/e2e-agent-skill-proof"
+AGENT_PATH="/packages/studio/agent/agents/e2e"
+OBSERVER_PATH="/packages/studio/agent/agents/observer"
+PREVIEW_AGENT_PATH="/packages/studio/agent/agents/preview"
+AGENT_SERVICE_ACCOUNT="/packages/studio/agent/service-accounts/e2e"
+OBSERVER_SERVICE_ACCOUNT="/packages/studio/agent/service-accounts/observer"
+AGENT_SKILL_ROLE="/packages/studio/agent/roles/e2e-skills"
+OBSERVER_SKILL_ROLE="/packages/studio/agent/roles/observer-skills"
+PROOF_PATH="/packages/studio/message/messages/e2e-agent-network-proof"
+SKILL_PROOF_PATH="/packages/studio/message/messages/e2e-agent-skill-proof"
 FILE_PROOF="KAS_FILE_$(uuidgen | tr '[:lower:]' '[:upper:]')"
 SESSION_SECRET="KAS_SESSION_$(uuidgen | tr '[:lower:]' '[:upper:]')"
 printf '%s' "$FILE_PROOF" >"$E2E_DIR/attachment.bin"
@@ -459,11 +477,11 @@ FILE="$(
   request --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -F "content=@$E2E_DIR/attachment.bin;type=application/octet-stream" \
-    "$FILE_API/files?path=/files/e2e-input"
+    "$FILE_API/files?path=/packages/studio/file/files/e2e-input"
 )"
 FILE_PATH="$(jq -r '.path' <<<"$FILE")"
 jq -e --arg path "$FILE_PATH" '
-  .metadata.manifest == "/manifests/file"
+  .metadata.manifest == "/packages/studio/file/manifest"
   and .path == $path
   and .spec.filename == "attachment.bin"
   and .spec.media_type == "application/octet-stream"
@@ -483,12 +501,12 @@ command curl --fail --silent --get \
   --data-urlencode "path=$FILE_PATH" \
   "$FILE_API/files/content" >"$E2E_DIR/range.bin"
 cmp <(printf '%s' "${FILE_PROOF:4:4}") "$E2E_DIR/range.bin"
-FILE_ONLY_MESSAGE="/messages/e2e-file-only"
+FILE_ONLY_MESSAGE="/packages/studio/message/messages/e2e-file-only"
 post_resource "$(
   jq -n --arg path "$FILE_ONLY_MESSAGE" '{
     path: $path,
     metadata: {
-      manifest: "/manifests/message",
+      manifest: "/packages/studio/message/manifest",
       name: "e2e-file-only"
     },
     spec: {
@@ -498,7 +516,7 @@ post_resource "$(
   }'
 )" >/dev/null
 create_link "$FILE_ONLY_MESSAGE/links/attachments/e2e-input" \
-  "/manifests/file/relations/attached-to" "$FILE_PATH" "$FILE_ONLY_MESSAGE"
+  "/packages/studio/file/relations/attached-to" "$FILE_PATH" "$FILE_ONLY_MESSAGE"
 wait_for_state "$FILE_ONLY_MESSAGE" available >/dev/null
 
 SKILL_V1_BUNDLE="$E2E_DIR/e2e-v1.skill"
@@ -515,15 +533,15 @@ INVALID_SKILL_STATUS="$(
   command curl --silent --output "$E2E_DIR/invalid-skill.json" --write-out "%{http_code}" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -F "bundle=@$INVALID_SKILL_BUNDLE;type=application/zip" \
-    "$SKILL_API/skills?path=/skills/invalid"
+    "$SKILL_API/skills?path=/packages/studio/skill/skills/invalid"
 )"
 [[ "$INVALID_SKILL_STATUS" == "400" ]]
-if get_resource "/skills/invalid" >/dev/null 2>&1; then
+if get_resource "/packages/studio/skill/skills/invalid" >/dev/null 2>&1; then
   echo "invalid symlink Skill Bundle created a Skill Resource" >&2
   false
 fi
 
-SKILL_PATH="/skills/e2e-bundle"
+SKILL_PATH="/packages/studio/skill/skills/e2e-bundle"
 SKILL="$(
   request --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -532,7 +550,7 @@ SKILL="$(
 )"
 jq -e --arg path "$SKILL_PATH" '
   .path == $path
-  and .metadata.manifest == "/manifests/skill"
+  and .metadata.manifest == "/packages/studio/skill/manifest"
   and .spec.name == "e2e-bundle"
 ' <<<"$SKILL" >/dev/null
 wait_for_state "$SKILL_PATH" available >/dev/null
@@ -550,7 +568,7 @@ create_agent() {
       --arg cwd "$E2E_DIR/workspace" '{
         path: $path,
         metadata: {
-          manifest: "/manifests/agent",
+          manifest: "/packages/studio/agent/manifest",
           name: $name
         },
         spec: {
@@ -568,15 +586,15 @@ wait_for_state "$OBSERVER_PATH" available >/dev/null
 wait_for_state "$PREVIEW_AGENT_PATH" available >/dev/null
 
 for path in \
-  "$AGENT_PATH/service-account" \
+  "$AGENT_SERVICE_ACCOUNT" \
   "$AGENT_PATH/links/runtime-role" \
-  "$AGENT_PATH/skill-role" \
+  "$AGENT_SKILL_ROLE" \
   "$AGENT_PATH/links/skill-role" \
   "$AGENT_PATH/links/service-account" \
   "$AGENT_PATH/links/skills/kas" \
-  "$OBSERVER_PATH/service-account" \
+  "$OBSERVER_SERVICE_ACCOUNT" \
   "$OBSERVER_PATH/links/runtime-role" \
-  "$OBSERVER_PATH/skill-role" \
+  "$OBSERVER_SKILL_ROLE" \
   "$OBSERVER_PATH/links/skill-role" \
   "$OBSERVER_PATH/links/skills/kas" \
   "$OBSERVER_PATH/links/service-account"; do
@@ -589,11 +607,11 @@ post_resource "$(
     --arg target "$SKILL_PATH" '{
       path: $path,
       metadata: {
-        manifest: "/builtin/link",
+        manifest: "/packages/kas/link/manifest",
         name: "e2e-bundle"
       },
       spec: {
-        relation: "/manifests/skill/relations/uses",
+        relation: "/packages/studio/skill/relations/uses",
         source: $source,
         target: $target,
         metadata: {mode: "available"}
@@ -604,7 +622,7 @@ OBSERVER_TOKEN="$(
   request --fail --silent \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{\"subject\":\"$OBSERVER_PATH/service-account\"}" \
+    -d "{\"subject\":\"$OBSERVER_SERVICE_ACCOUNT\"}" \
     "$API/credentials/issue" |
     jq -r '.token'
 )"
@@ -612,7 +630,7 @@ AGENT_TOKEN="$(
   request --fail --silent \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{\"subject\":\"$AGENT_PATH/service-account\"}" \
+    -d "{\"subject\":\"$AGENT_SERVICE_ACCOUNT\"}" \
     "$API/credentials/issue" |
     jq -r '.token'
 )"
@@ -621,7 +639,8 @@ AGENT_TOKEN="$(
 # topic_id asks the Telegram driver to create the Topic and write the returned ID
 # back to the same Link. Existing, General, and otherwise unknown Topics stay out
 # of KAS.
-TELEGRAM_CONFIG_PATH="/telegram/e2e"
+TELEGRAM_CONFIG_PATH="/packages/studio/telegram/integrations/e2e"
+TELEGRAM_CONFIG_KEY="packages-studio-telegram-integrations-e2e"
 TELEGRAM_TOKEN="123456789:abcdefghijklmnopqrstuvwxyz"
 TELEGRAM_CHAT_ID="-1001234567890"
 post_resource "$(
@@ -632,7 +651,7 @@ post_resource "$(
     --arg api_base "$TELEGRAM_API" '{
       path: $path,
       metadata: {
-        manifest: "/manifests/telegram",
+        manifest: "/packages/studio/telegram/manifest",
         name: "E2E Telegram"
       },
       spec: {
@@ -657,13 +676,13 @@ TELEGRAM_BINDING_TOKEN="telegram-binding-e2e-token"
 TELEGRAM_BINDING_HASH="$(
   printf '%s' "$TELEGRAM_BINDING_TOKEN" | shasum -a 256 | awk '{print $1}'
 )"
-TELEGRAM_BINDING_CHALLENGE="/users/studio-admin/links/telegram-bindings/e2e"
-TELEGRAM_USER_PATH="/users/telegram/$TELEGRAM_USER_ID"
-TELEGRAM_USER_BINDING="/users/studio-admin/links/telegram/telegram-e2e"
+TELEGRAM_BINDING_CHALLENGE="/packages/kas/user/users/studio-admin/links/telegram-bindings/e2e"
+TELEGRAM_USER_PATH="/packages/studio/telegram/users/$TELEGRAM_USER_ID"
+TELEGRAM_USER_BINDING="/packages/kas/user/users/studio-admin/links/telegram/packages-studio-telegram-integrations-e2e"
 create_link \
   "$TELEGRAM_BINDING_CHALLENGE" \
-  "/manifests/telegram/relations/binding-request" \
-  "/users/studio-admin" \
+  "/packages/studio/telegram/relations/binding-request" \
+  "/packages/kas/user/users/studio-admin" \
   "$TELEGRAM_CONFIG_PATH" \
   "$(
     jq -cn \
@@ -709,15 +728,15 @@ jq -e \
   --arg config "$TELEGRAM_CONFIG_PATH" \
   --arg target "$TELEGRAM_USER_PATH" \
   --argjson user_id "$TELEGRAM_USER_ID" '
-    .spec.relation == "/manifests/telegram/relations/user-binding"
-    and .spec.source == "/users/studio-admin"
+    .spec.relation == "/packages/studio/telegram/relations/user-binding"
+    and .spec.source == "/packages/kas/user/users/studio-admin"
     and .spec.target == $target
     and .spec.metadata.configuration == $config
     and .spec.metadata.user_id == $user_id
     and .spec.metadata.private_chat_id == $user_id
   ' <<<"$(get_resource "$TELEGRAM_USER_BINDING")" >/dev/null
 
-TELEGRAM_THREAD_PATH="/threads/telegram-e2e"
+TELEGRAM_THREAD_PATH="/packages/studio/thread/threads/telegram-e2e"
 TELEGRAM_TOPIC_LINK="$TELEGRAM_THREAD_PATH/links/telegram/telegram-e2e"
 TELEGRAM_TOPIC_NAME="E2E Managed Topic"
 post_resource "$(
@@ -726,7 +745,7 @@ post_resource "$(
     --arg title "$TELEGRAM_TOPIC_NAME" '{
       path: $path,
       metadata: {
-        manifest: "/manifests/thread",
+        manifest: "/packages/studio/thread/manifest",
         name: "telegram-e2e"
       },
       spec: {title: $title}
@@ -734,7 +753,7 @@ post_resource "$(
 )" >/dev/null
 create_link \
   "$TELEGRAM_TOPIC_LINK" \
-  "/manifests/telegram/relations/thread-topic" \
+  "/packages/studio/telegram/relations/thread-topic" \
   "$TELEGRAM_THREAD_PATH" \
   "$TELEGRAM_CONFIG_PATH" \
   "$(jq -cn --arg name "$TELEGRAM_TOPIC_NAME" '{managed: true, topic_name: $name}')"
@@ -755,7 +774,7 @@ jq -e \
   --arg config "$TELEGRAM_CONFIG_PATH" \
   --arg name "$TELEGRAM_TOPIC_NAME" \
   --argjson topic "$TELEGRAM_TOPIC_ID" '
-    .spec.relation == "/manifests/telegram/relations/thread-topic"
+    .spec.relation == "/packages/studio/telegram/relations/thread-topic"
     and .spec.source == $thread
     and .spec.target == $config
     and .spec.metadata == {
@@ -836,16 +855,14 @@ request --fail-with-body --silent --show-error \
   )" \
   "$TELEGRAM_API/test/enqueue" >/dev/null
 
-TELEGRAM_GENERAL_MESSAGE_PATH="/messages/telegram/telegram-e2e/$TELEGRAM_GENERAL_MESSAGE_ID"
-TELEGRAM_UNKNOWN_MESSAGE_PATH="/messages/telegram/telegram-e2e/$TELEGRAM_UNKNOWN_MESSAGE_ID"
-TELEGRAM_MESSAGE_PATH="/messages/telegram/telegram-e2e/$TELEGRAM_INBOUND_MESSAGE_ID"
-TELEGRAM_MENTION_LINK="$TELEGRAM_MESSAGE_PATH/links/mentioned/agents-preview"
-TELEGRAM_RUN_PATH="$TELEGRAM_MENTION_LINK/run"
+TELEGRAM_GENERAL_MESSAGE_PATH="/packages/studio/message/messages/telegram/$TELEGRAM_CONFIG_KEY/$TELEGRAM_GENERAL_MESSAGE_ID"
+TELEGRAM_UNKNOWN_MESSAGE_PATH="/packages/studio/message/messages/telegram/$TELEGRAM_CONFIG_KEY/$TELEGRAM_UNKNOWN_MESSAGE_ID"
+TELEGRAM_MESSAGE_PATH="/packages/studio/message/messages/telegram/$TELEGRAM_CONFIG_KEY/$TELEGRAM_INBOUND_MESSAGE_ID"
+TELEGRAM_MENTION_LINK="$TELEGRAM_MESSAGE_PATH/links/mentioned/packages-studio-agent-agents-preview"
 for path in \
   "$TELEGRAM_MESSAGE_PATH" \
   "$TELEGRAM_MENTION_LINK" \
-  "$TELEGRAM_THREAD_PATH/links/participants/agents-preview" \
-  "$TELEGRAM_RUN_PATH"; do
+  "$TELEGRAM_THREAD_PATH/links/participants/packages-studio-agent-agents-preview"; do
   for _ in $(seq 1 800); do
     if get_resource "$path" >/dev/null 2>&1; then
       break
@@ -854,6 +871,8 @@ for path in \
   done
   get_resource "$path" >/dev/null
 done
+TELEGRAM_RUN="$(wait_for_matching_run "$TELEGRAM_MESSAGE_PATH" "$PREVIEW_AGENT_PATH")"
+TELEGRAM_RUN_PATH="$(jq -r '.path' <<<"$TELEGRAM_RUN")"
 if get_resource "$TELEGRAM_GENERAL_MESSAGE_PATH" >/dev/null 2>&1; then
   echo "Telegram General Topic message was unexpectedly imported" >&2
   false
@@ -863,7 +882,7 @@ if get_resource "$TELEGRAM_UNKNOWN_MESSAGE_PATH" >/dev/null 2>&1; then
   false
 fi
 jq -e '
-  .metadata.manifest == "/manifests/message"
+  .metadata.manifest == "/packages/studio/message/manifest"
   and .spec == {
     role: "user",
     body: "hello from Telegram @preview"
@@ -871,15 +890,15 @@ jq -e '
 ' <<<"$(get_resource "$TELEGRAM_MESSAGE_PATH")" >/dev/null
 jq -e \
   --arg message "$TELEGRAM_MESSAGE_PATH" '
-    .spec.relation == "/manifests/message/relations/authored-by"
+    .spec.relation == "/packages/studio/message/relations/authored-by"
     and .spec.source == $message
-    and .spec.target == "/users/studio-admin"
+    and .spec.target == "/packages/kas/user/users/studio-admin"
   ' \
   <<<"$(get_resource "$TELEGRAM_MESSAGE_PATH/links/author")" >/dev/null
 jq -e \
   --arg message "$TELEGRAM_MESSAGE_PATH" \
   --arg agent "$PREVIEW_AGENT_PATH" '
-    .spec.relation == "/manifests/message/relations/mentioned"
+    .spec.relation == "/packages/studio/message/relations/mentioned"
     and .spec.source == $message
     and .spec.target == $agent
   ' <<<"$(get_resource "$TELEGRAM_MENTION_LINK")" >/dev/null
@@ -892,9 +911,9 @@ jq -e \
       message_path: $message,
       thread_path: $thread
     }
-  ' <<<"$(get_resource "$TELEGRAM_RUN_PATH")" >/dev/null
+  ' <<<"$TELEGRAM_RUN" >/dev/null
 
-TELEGRAM_OUTBOUND_PATH="/messages/telegram-e2e-outbound"
+TELEGRAM_OUTBOUND_PATH="/packages/studio/message/messages/telegram-e2e-outbound"
 TELEGRAM_OUTBOUND_BODY="KAS to Telegram E2E"
 post_resource "$(
   jq -n \
@@ -902,7 +921,7 @@ post_resource "$(
     --arg body "$TELEGRAM_OUTBOUND_BODY" '{
       path: $path,
       metadata: {
-        manifest: "/manifests/message",
+        manifest: "/packages/studio/message/manifest",
         name: "telegram-e2e-outbound"
       },
       spec: {
@@ -912,11 +931,11 @@ post_resource "$(
     }'
 )" >/dev/null
 create_link "$TELEGRAM_OUTBOUND_PATH/links/authored-by" \
-  "/manifests/message/relations/authored-by" \
+  "/packages/studio/message/relations/authored-by" \
   "$TELEGRAM_OUTBOUND_PATH" \
-  "/users/studio-admin"
+  "/packages/kas/user/users/studio-admin"
 create_link "$TELEGRAM_OUTBOUND_PATH/links/message-thread" \
-  "/manifests/message/relations/message-thread" \
+  "/packages/studio/message/relations/message-thread" \
   "$TELEGRAM_OUTBOUND_PATH" \
   "$TELEGRAM_THREAD_PATH"
 TELEGRAM_SENT=""
@@ -947,13 +966,13 @@ jq -e \
     )
   ' <<<"$TELEGRAM_SENT" >/dev/null
 wait_for_state \
-  "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e" \
+  "$TELEGRAM_OUTBOUND_PATH/links/telegram/$TELEGRAM_CONFIG_KEY" \
   available >/dev/null
 
 # Attachments may be created after the Message has already been copied. The
 # attachment Link must trigger another reconcile without duplicating the text.
 create_link "$TELEGRAM_OUTBOUND_PATH/links/attachments/e2e-input" \
-  "/manifests/file/relations/attached-to" \
+  "/packages/studio/file/relations/attached-to" \
   "$FILE_PATH" \
   "$TELEGRAM_OUTBOUND_PATH"
 for _ in $(seq 1 800); do
@@ -988,7 +1007,7 @@ jq -e \
   ' <<<"$TELEGRAM_REQUESTS" >/dev/null
 for _ in $(seq 1 800); do
   TELEGRAM_COPY="$(get_resource \
-    "$TELEGRAM_OUTBOUND_PATH/links/telegram/telegram-e2e")"
+    "$TELEGRAM_OUTBOUND_PATH/links/telegram/$TELEGRAM_CONFIG_KEY")"
   if jq -e --arg file "$FILE_PATH" '
     (.spec.metadata.attachment_paths | index($file)) != null
     and (.spec.metadata.message_ids | length) == 2
@@ -1083,7 +1102,7 @@ jq -e \
 approval_links() {
   request --fail-with-body --silent --show-error --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "manifest=/builtin/link" \
+    --data-urlencode "manifest=/packages/kas/link/manifest" \
     "$API/resources"
 }
 
@@ -1121,7 +1140,7 @@ assert_no_per_approval_rbac() {
   local request_path="$1"
   request --fail-with-body --silent --show-error --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "manifest=/builtin/role" \
+    --data-urlencode "manifest=/packages/kas/role/manifest" \
     "$API/resources" |
     jq -e --arg request "$request_path" '
       all(.[];
@@ -1131,12 +1150,12 @@ assert_no_per_approval_rbac() {
     ' >/dev/null
   request --fail-with-body --silent --show-error --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "manifest=/builtin/link" \
+    --data-urlencode "manifest=/packages/kas/link/manifest" \
     "$API/resources" |
     jq -e --arg request "$request_path" '
       all(
         .[]
-        | select(.spec.relation == "/builtin/relations/role-binding");
+        | select(.spec.relation == "/packages/kas/link/relations/role-binding");
         (.path | startswith($request + "/") | not)
         and ((.spec | tostring | contains($request)) | not)
       )
@@ -1145,12 +1164,12 @@ assert_no_per_approval_rbac() {
 
 # An Agent cannot perform this privileged write directly, but may request that
 # an approving User execute the exact operation.
-APPROVAL_TARGET="/approval-proofs/e2e-role"
+APPROVAL_TARGET="/packages/studio/approval/roles/e2e-role"
 APPROVAL_RESOURCE="$(
   jq -n --arg path "$APPROVAL_TARGET" '{
     path: $path,
     metadata: {
-      manifest: "/builtin/role",
+      manifest: "/packages/kas/role/manifest",
       name: "e2e-approved-role"
     },
     spec: {
@@ -1194,7 +1213,7 @@ APPROVAL_PATH="$(jq -r '.path' <<<"$APPROVAL_REQUEST")"
 APPROVAL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$APPROVAL_REQUEST")"
 jq -e \
   --arg target "$APPROVAL_TARGET" '
-    .metadata.manifest == "/manifests/approval"
+    .metadata.manifest == "/packages/studio/approval/manifest"
     and .metadata.state == "pending"
     and .spec.kind == "request"
     and (.spec | has("requested_by") | not)
@@ -1202,9 +1221,9 @@ jq -e \
     and .spec.operation.verb == "create"
     and .spec.operation.resource.path == $target
   ' <<<"$APPROVAL_REQUEST" >/dev/null
-[[ "$APPROVAL_PATH" == "/approvals$OBSERVER_PATH/requests/"* ]]
+[[ "$APPROVAL_PATH" == "/packages/studio/approval/approvals$OBSERVER_PATH/requests/"* ]]
 assert_approval_link \
-  "/manifests/approval/relations/requested-by" \
+  "/packages/studio/approval/relations/requested-by" \
   "$APPROVAL_PATH" \
   "$OBSERVER_PATH"
 assert_no_per_approval_rbac "$APPROVAL_PATH"
@@ -1281,7 +1300,7 @@ APPROVAL_DECISION_PATH=""
 for _ in $(seq 1 800); do
   APPROVAL_DECISION_PATH="$(
     approval_link_source \
-      "/manifests/approval/relations/decides" \
+      "/packages/studio/approval/relations/decides" \
       "$APPROVAL_PATH" 2>/dev/null || true
   )"
   if [[ -n "$APPROVAL_DECISION_PATH" ]]; then
@@ -1299,9 +1318,9 @@ for _ in $(seq 1 800); do
   sleep 0.05
 done
 if ! jq -e \
-  --arg decision_prefix "/approvals/users/studio-admin/decisions/" '
+  --arg decision_prefix "/packages/studio/approval/approvals/packages/kas/user/users/studio-admin/decisions/" '
     (.path | startswith($decision_prefix))
-    and .metadata.manifest == "/manifests/approval"
+    and .metadata.manifest == "/packages/studio/approval/manifest"
     and .spec.kind == "decision"
     and (.spec | has("approval") | not)
     and .spec.outcome == "succeeded"
@@ -1313,7 +1332,24 @@ if ! jq -e \
   jq . <<<"$APPROVAL_DECISION" >&2
   false
 fi
-TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+TELEGRAM_REQUESTS=""
+for _ in $(seq 1 800); do
+  TELEGRAM_REQUESTS="$(request --fail --silent "$TELEGRAM_API/test/requests")"
+  if jq -e '
+    any(.[ ];
+      .method == "answerCallbackQuery"
+      and .request.callback_query_id == "approval-e2e-callback"
+    )
+    and any(.[ ];
+      .method == "editMessageText"
+      and (.request.text | endswith("Result: succeeded"))
+      and .request.reply_markup.inline_keyboard == []
+    )
+  ' <<<"$TELEGRAM_REQUESTS" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
 jq -e '
   any(.[];
     .method == "answerCallbackQuery"
@@ -1327,58 +1363,58 @@ jq -e '
 ' <<<"$TELEGRAM_REQUESTS" >/dev/null
 request --fail-with-body --silent --show-error --get \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-urlencode "manifest=/builtin/credential" \
+  --data-urlencode "manifest=/packages/kas/credential/manifest" \
   "$API/resources" |
   jq -e '
     any(.[];
-      .spec.subject == "/users/studio-admin"
+      .spec.subject == "/packages/kas/user/users/studio-admin"
       and .spec.expires_at != null
       and .spec.revoked_at != null
       and .metadata.state == "revoked"
     )
   ' >/dev/null
 assert_approval_link \
-  "/manifests/approval/relations/decides" \
+  "/packages/studio/approval/relations/decides" \
   "$APPROVAL_DECISION_PATH" \
   "$APPROVAL_PATH"
 assert_approval_link \
-  "/manifests/approval/relations/decided-by" \
+  "/packages/studio/approval/relations/decided-by" \
   "$APPROVAL_DECISION_PATH" \
-  "/users/studio-admin"
+  "/packages/kas/user/users/studio-admin"
 
 APPROVAL_RESULT_PATH="$(
   approval_link_source \
-    "/manifests/approval/relations/result-of" \
+    "/packages/studio/approval/relations/result-of" \
     "$APPROVAL_PATH"
 )"
-[[ "$APPROVAL_RESULT_PATH" == "/approvals$OBSERVER_PATH/results/"* ]]
+[[ "$APPROVAL_RESULT_PATH" == "/packages/studio/approval-result/results/agents/observer/"* ]]
 APPROVAL_RESULT="$(get_resource "$APPROVAL_RESULT_PATH")"
 jq -e \
   --arg result "$APPROVAL_RESULT_PATH" \
   --arg target "$APPROVAL_TARGET" '
     .path == $result
-    and .metadata.manifest == "/manifests/approval-result"
+    and .metadata.manifest == "/packages/studio/approval-result/manifest"
     and (.spec | has("approval") | not)
     and .spec.response.status == 201
     and (.spec.response.content_type | startswith("application/json"))
     and .spec.response.body.path == $target
-    and .spec.response.body.metadata.manifest == "/builtin/role"
+    and .spec.response.body.metadata.manifest == "/packages/kas/role/manifest"
     and .spec.response.body.metadata["[kas]"] == null
     and .spec.response.body.status.metadata["[kas]"] == null
   ' <<<"$APPROVAL_RESULT" >/dev/null
 assert_approval_link \
-  "/manifests/approval/relations/result-of" \
+  "/packages/studio/approval/relations/result-of" \
   "$APPROVAL_RESULT_PATH" \
   "$APPROVAL_PATH"
 assert_approval_link \
-  "/manifests/approval/relations/produced-by" \
+  "/packages/studio/approval/relations/produced-by" \
   "$APPROVAL_RESULT_PATH" \
   "$APPROVAL_DECISION_PATH"
 assert_no_per_approval_rbac "$APPROVAL_PATH"
 
 APPROVED_TARGET="$(get_resource "$APPROVAL_TARGET")"
 jq -e '
-  .metadata.manifest == "/builtin/role"
+  .metadata.manifest == "/packages/kas/role/manifest"
   and .spec.description == "Created only through an approved elevation"
   and .spec.rules == []
 ' <<<"$APPROVED_TARGET" >/dev/null
@@ -1396,7 +1432,7 @@ DUPLICATE_APPROVAL_STATUS="$(
 [[ "$DUPLICATE_APPROVAL_STATUS" == "409" ]]
 
 # Rejection is terminal and creates no target object or Result.
-REJECTED_TARGET="/approval-proofs/rejected-role"
+REJECTED_TARGET="/packages/studio/approval/roles/rejected-role"
 REJECTED_REQUEST="$(
   request --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $OBSERVER_TOKEN" \
@@ -1409,7 +1445,7 @@ REJECTED_REQUEST="$(
           resource: {
             path: $path,
             metadata: {
-              manifest: "/builtin/role",
+              manifest: "/packages/kas/role/manifest",
               name: "e2e-rejected-role"
             },
             spec: {
@@ -1433,7 +1469,7 @@ REJECTED_DECISION="$(
     "$APPROVAL_API/approvals/decide?path=$REJECTED_APPROVAL_PATH&expected_revision=$REJECTED_APPROVAL_REVISION"
 )"
 jq -e \
-  --arg decision_prefix "/approvals/users/studio-admin/decisions/" '
+  --arg decision_prefix "/packages/studio/approval/approvals/packages/kas/user/users/studio-admin/decisions/" '
     (.path | startswith($decision_prefix))
     and .spec.kind == "decision"
     and .spec.outcome == "rejected"
@@ -1445,20 +1481,20 @@ jq -e \
   ' <<<"$REJECTED_DECISION" >/dev/null
 REJECTED_DECISION_PATH="$(jq -r '.path' <<<"$REJECTED_DECISION")"
 assert_approval_link \
-  "/manifests/approval/relations/decides" \
+  "/packages/studio/approval/relations/decides" \
   "$REJECTED_DECISION_PATH" \
   "$REJECTED_APPROVAL_PATH"
 assert_approval_link \
-  "/manifests/approval/relations/decided-by" \
+  "/packages/studio/approval/relations/decided-by" \
   "$REJECTED_DECISION_PATH" \
-  "/users/studio-admin"
+  "/packages/kas/user/users/studio-admin"
 wait_for_state "$REJECTED_APPROVAL_PATH" rejected >/dev/null
 if get_resource "$REJECTED_TARGET" >/dev/null 2>&1; then
   echo "rejected Approval unexpectedly created its target Role" >&2
   false
 fi
 if approval_links | jq -e \
-  --arg relation "/manifests/approval/relations/result-of" \
+  --arg relation "/packages/studio/approval/relations/result-of" \
   --arg request "$REJECTED_APPROVAL_PATH" '
     any(.[];
       .spec.relation == $relation
@@ -1473,12 +1509,12 @@ assert_no_per_approval_rbac "$REJECTED_APPROVAL_PATH"
 # Read approvals store the sanitized API response in a separately protected
 # Approval Result. The requesting Agent may read it, while an unrelated Agent
 # cannot read the request or result. The Decision belongs to the approving User.
-LIMITED_APPROVER_PATH="/users/e2e-limited-approver"
+LIMITED_APPROVER_PATH="/packages/kas/user/users/e2e-limited-approver"
 post_resource "$(
   jq -n --arg path "$LIMITED_APPROVER_PATH" '{
     path: $path,
     metadata: {
-      manifest: "/builtin/user",
+      manifest: "/packages/kas/user/manifest",
       name: "e2e-limited-approver"
     },
     spec: {
@@ -1521,18 +1557,18 @@ INVALID_GET_DECISION="$(
 )"
 INVALID_GET_DECISION_PATH="$(jq -r '.path' <<<"$INVALID_GET_DECISION")"
 jq -e \
-  --arg prefix "/approvals/users/e2e-limited-approver/decisions/" '
+  --arg prefix "/packages/studio/approval/approvals/packages/kas/user/users/e2e-limited-approver/decisions/" '
     (.path | startswith($prefix))
     and .spec.kind == "decision"
     and .spec.outcome == "invalid"
     and (.spec.error | length) > 0
   ' <<<"$INVALID_GET_DECISION" >/dev/null
 assert_approval_link \
-  "/manifests/approval/relations/decides" \
+  "/packages/studio/approval/relations/decides" \
   "$INVALID_GET_DECISION_PATH" \
   "$GET_APPROVAL_PATH"
 assert_approval_link \
-  "/manifests/approval/relations/decided-by" \
+  "/packages/studio/approval/relations/decided-by" \
   "$INVALID_GET_DECISION_PATH" \
   "$LIMITED_APPROVER_PATH"
 jq -e '
@@ -1540,7 +1576,7 @@ jq -e '
   and .status.metadata.state == "pending"
 ' <<<"$(get_resource "$GET_APPROVAL_PATH")" >/dev/null
 if approval_links | jq -e \
-  --arg relation "/manifests/approval/relations/result-of" \
+  --arg relation "/packages/studio/approval/relations/result-of" \
   --arg request "$GET_APPROVAL_PATH" '
     any(.[];
       .spec.relation == $relation
@@ -1559,17 +1595,17 @@ GET_APPROVAL_DECISION="$(
     "$APPROVAL_API/approvals/decide?path=$GET_APPROVAL_PATH&expected_revision=$GET_APPROVAL_REVISION"
 )"
 GET_APPROVAL_DECISION_PATH="$(jq -r '.path' <<<"$GET_APPROVAL_DECISION")"
-[[ "$GET_APPROVAL_DECISION_PATH" == "/approvals/users/studio-admin/decisions/"* ]]
+[[ "$GET_APPROVAL_DECISION_PATH" == "/packages/studio/approval/approvals/packages/kas/user/users/studio-admin/decisions/"* ]]
 assert_approval_link \
-  "/manifests/approval/relations/decides" \
+  "/packages/studio/approval/relations/decides" \
   "$GET_APPROVAL_DECISION_PATH" \
   "$GET_APPROVAL_PATH"
 GET_APPROVAL_RESULT_PATH="$(
   approval_link_source \
-    "/manifests/approval/relations/result-of" \
+    "/packages/studio/approval/relations/result-of" \
     "$GET_APPROVAL_PATH"
 )"
-[[ "$GET_APPROVAL_RESULT_PATH" == "/approvals$OBSERVER_PATH/results/"* ]]
+[[ "$GET_APPROVAL_RESULT_PATH" == "/packages/studio/approval-result/results/agents/observer/"* ]]
 GET_APPROVAL_RESULT="$(
   request --fail-with-body --silent --show-error --get \
     -H "Authorization: Bearer $OBSERVER_TOKEN" \
@@ -1578,16 +1614,16 @@ GET_APPROVAL_RESULT="$(
 )"
 jq -e \
   --arg target "$APPROVAL_TARGET" '
-    .metadata.manifest == "/manifests/approval-result"
+    .metadata.manifest == "/packages/studio/approval-result/manifest"
     and .spec.response.status == 200
     and (.spec.response.content_type | startswith("application/json"))
     and .spec.response.body.path == $target
-    and .spec.response.body.metadata.manifest == "/builtin/role"
+    and .spec.response.body.metadata.manifest == "/packages/kas/role/manifest"
     and .spec.response.body.metadata["[kas]"] == null
     and .spec.response.body.status.metadata["[kas]"] == null
   ' <<<"$GET_APPROVAL_RESULT" >/dev/null
 assert_approval_link \
-  "/manifests/approval/relations/produced-by" \
+  "/packages/studio/approval/relations/produced-by" \
   "$GET_APPROVAL_RESULT_PATH" \
   "$GET_APPROVAL_DECISION_PATH"
 
@@ -1637,8 +1673,8 @@ LIST_APPROVAL_REQUEST="$(
         reason: "E2E privileged list proof",
         operation: {
           verb: "list",
-          manifest: "/builtin/role",
-          path_prefix: "/approval-proofs/",
+          manifest: "/packages/kas/role/manifest",
+          path_prefix: "/packages/studio/approval/roles/",
           limit: 1
         },
         expires_in_seconds: 300
@@ -1658,11 +1694,11 @@ LIST_APPROVAL_DECISION="$(
 LIST_APPROVAL_DECISION_PATH="$(jq -r '.path' <<<"$LIST_APPROVAL_DECISION")"
 LIST_APPROVAL_RESULT_PATH="$(
   approval_link_source \
-    "/manifests/approval/relations/result-of" \
+    "/packages/studio/approval/relations/result-of" \
     "$LIST_APPROVAL_PATH"
 )"
 assert_approval_link \
-  "/manifests/approval/relations/produced-by" \
+  "/packages/studio/approval/relations/produced-by" \
   "$LIST_APPROVAL_RESULT_PATH" \
   "$LIST_APPROVAL_DECISION_PATH"
 LIST_APPROVAL_RESULT="$(
@@ -1672,19 +1708,19 @@ LIST_APPROVAL_RESULT="$(
     "$API/resources/by-path"
 )"
 jq -e '
-  .metadata.manifest == "/manifests/approval-result"
+  .metadata.manifest == "/packages/studio/approval-result/manifest"
   and .spec.response.status == 200
   and (.spec.response.content_type | startswith("application/json"))
   and (.spec.response.body | length) == 1
   and all(.spec.response.body[];
-    (.path | startswith("/approval-proofs/"))
-    and .metadata.manifest == "/builtin/role"
+    (.path | startswith("/packages/studio/approval/roles/"))
+    and .metadata.manifest == "/packages/kas/role/manifest"
     and .metadata["[kas]"] == null
     and .status.metadata["[kas]"] == null)
 ' <<<"$LIST_APPROVAL_RESULT" >/dev/null
 assert_no_per_approval_rbac "$LIST_APPROVAL_PATH"
 
-OBSERVER_SKILL_PATH="$OBSERVER_PATH/skills/self-created"
+OBSERVER_SKILL_PATH="/packages/studio/skill/skills/agents/observer/self-created"
 OBSERVER_SKILL="$(
   request --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $OBSERVER_TOKEN" \
@@ -1692,7 +1728,7 @@ OBSERVER_SKILL="$(
     "$SKILL_API/skills?path=$OBSERVER_SKILL_PATH"
 )"
 jq -e --arg path "$OBSERVER_SKILL_PATH" '
-  .path == $path and .metadata.manifest == "/manifests/skill"
+  .path == $path and .metadata.manifest == "/packages/studio/skill/manifest"
 ' <<<"$OBSERVER_SKILL" >/dev/null
 wait_for_state "$OBSERVER_SKILL_PATH" available >/dev/null
 jq -e --arg owner "$OBSERVER_PATH" '.spec.source == $owner' \
@@ -1701,7 +1737,7 @@ CROSS_AGENT_SKILL_STATUS="$(
   command curl --silent --output "$E2E_DIR/cross-agent-skill.json" --write-out "%{http_code}" \
     -H "Authorization: Bearer $OBSERVER_TOKEN" \
     -F "bundle=@$SKILL_V1_BUNDLE;type=application/zip" \
-    "$SKILL_API/skills?path=$AGENT_PATH/skills/forbidden"
+    "$SKILL_API/skills?path=/packages/studio/skill/skills/agents/e2e/forbidden"
 )"
 [[ "$CROSS_AGENT_SKILL_STATUS" == "403" ]]
 command curl --fail --silent --get \
@@ -1709,7 +1745,7 @@ command curl --fail --silent --get \
   --data-urlencode "path=$FILE_PATH" \
   "$FILE_API/files/content" >"$E2E_DIR/observer-download.bin"
 cmp "$E2E_DIR/attachment.bin" "$E2E_DIR/observer-download.bin"
-AGENT_UPLOAD_PATH="/files/agent-upload"
+AGENT_UPLOAD_PATH="/packages/studio/file/files/agent-upload"
 AGENT_UPLOAD="$(
   command curl --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $OBSERVER_TOKEN" \
@@ -1717,7 +1753,7 @@ AGENT_UPLOAD="$(
     "$FILE_API/files?path=$AGENT_UPLOAD_PATH"
 )"
 jq -e --arg path "$AGENT_UPLOAD_PATH" '
-  .path == $path and .metadata.manifest == "/manifests/file"
+  .path == $path and .metadata.manifest == "/packages/studio/file/manifest"
 ' <<<"$AGENT_UPLOAD" >/dev/null
 OVERWRITE_STATUS="$(
   command curl --silent --output "$E2E_DIR/upload-conflict.json" --write-out "%{http_code}" \
@@ -1732,30 +1768,30 @@ command curl --fail --silent --get \
   "$FILE_API/files/content" >"$E2E_DIR/agent-upload-download.bin"
 cmp "$E2E_DIR/attachment.bin" "$E2E_DIR/agent-upload-download.bin"
 
-THREAD_PATH="/threads/e2e"
+THREAD_PATH="/packages/studio/thread/threads/e2e"
 post_resource "$(
   jq -n --arg path "$THREAD_PATH" '{
     path: $path,
     metadata: {
-      manifest: "/manifests/thread",
+      manifest: "/packages/studio/thread/manifest",
       name: "e2e-thread"
     },
     spec: {title: "E2E multi-Agent Thread"}
   }'
 )" >/dev/null
 create_link "$THREAD_PATH/links/participants/user" \
-  "/manifests/thread/relations/participants" "$THREAD_PATH" "/users/studio-admin"
+  "/packages/studio/thread/relations/participants" "$THREAD_PATH" "/packages/kas/user/users/studio-admin"
 create_link "$THREAD_PATH/links/participants/observer" \
-  "/manifests/thread/relations/participants" "$THREAD_PATH" "$OBSERVER_PATH"
+  "/packages/studio/thread/relations/participants" "$THREAD_PATH" "$OBSERVER_PATH"
 
-MESSAGE_PATH="/messages/e2e-user"
+MESSAGE_PATH="/packages/studio/message/messages/e2e-user"
 post_resource "$(
   jq -n \
     --arg path "$MESSAGE_PATH" \
     --arg body "@e2e Use \$e2e-bundle and remember $SESSION_SECRET. Download the attached File using the provided KAS_FILE_API command and read the downloaded bytes. Then use curl with \$KAS_API and \$KAS_TOKEN to POST a Message Resource at $PROOF_PATH with name e2e-agent-network-proof and spec.role system. Set spec.body to the actual exact text you read from the downloaded file. Also POST a Message Resource at $SKILL_PROOF_PATH with name e2e-agent-skill-proof, spec.role system, and spec.body set to the exact Skill bundle marker supplied by \$e2e-bundle. After both POST requests succeed, read both Resources back and verify their bodies, then publish the assistant reply CREATED through the KAS API exactly as required by \$kas. Do not rely on your final terminal response." '{
     path: $path,
     metadata: {
-      manifest: "/manifests/message",
+      manifest: "/packages/studio/message/manifest",
       name: "e2e-user-message"
     },
     spec: {
@@ -1765,24 +1801,24 @@ post_resource "$(
   }'
 )" >/dev/null
 create_link "$MESSAGE_PATH/links/authored-by" \
-  "/manifests/message/relations/authored-by" "$MESSAGE_PATH" "/users/studio-admin"
+  "/packages/studio/message/relations/authored-by" "$MESSAGE_PATH" "/packages/kas/user/users/studio-admin"
 create_link "$MESSAGE_PATH/links/attachments/e2e-input" \
-  "/manifests/file/relations/attached-to" "$FILE_PATH" "$MESSAGE_PATH"
+  "/packages/studio/file/relations/attached-to" "$FILE_PATH" "$MESSAGE_PATH"
 MENTION_LINK="$MESSAGE_PATH/links/mentioned/agents-e2e"
 create_link "$MENTION_LINK" \
-  "/manifests/message/relations/mentioned" "$MESSAGE_PATH" "$AGENT_PATH"
+  "/packages/studio/message/relations/mentioned" "$MESSAGE_PATH" "$AGENT_PATH"
 
-RUN_PATH="$MENTION_LINK/run"
 create_link "$MESSAGE_PATH/links/message-thread" \
-  "/manifests/message/relations/message-thread" "$MESSAGE_PATH" "$THREAD_PATH"
-if get_resource "$RUN_PATH" >/dev/null 2>&1; then
+  "/packages/studio/message/relations/message-thread" "$MESSAGE_PATH" "$THREAD_PATH"
+if [[ -n "$(find_run "$MESSAGE_PATH" "$AGENT_PATH")" ]]; then
   echo "Agent received a Run before it became a Thread participant" >&2
   false
 fi
 create_link "$THREAD_PATH/links/participants/e2e" \
-  "/manifests/thread/relations/participants" "$THREAD_PATH" "$AGENT_PATH"
+  "/packages/studio/thread/relations/participants" "$THREAD_PATH" "$AGENT_PATH"
 
-RUN="$(wait_for_run "$RUN_PATH")"
+RUN="$(wait_for_matching_run "$MESSAGE_PATH" "$AGENT_PATH")"
+RUN_PATH="$(jq -r '.path' <<<"$RUN")"
 if [[ "$(jq -r '.status.metadata.state' <<<"$RUN")" != "succeeded" ]]; then
   echo "Agent Run failed: $(jq -c . <<<"$RUN")" >&2
   false
@@ -1792,20 +1828,19 @@ jq -e --arg message "$MESSAGE_PATH" --arg thread "$THREAD_PATH" --arg agent "$AG
   and .spec.input == {message_path: $message, thread_path: $thread}
 ' <<<"$RUN" >/dev/null
 
-OBSERVER_RUN="$MESSAGE_PATH/links/mentioned/agents-observer/run"
-if get_resource "$OBSERVER_RUN" >/dev/null 2>&1; then
+if [[ -n "$(find_run "$MESSAGE_PATH" "$OBSERVER_PATH")" ]]; then
   echo "unmentioned observer Agent received a Run" >&2
   false
 fi
 
 PROOF="$(get_resource "$PROOF_PATH")"
 jq -e --arg proof "$FILE_PROOF" '
-  .metadata.manifest == "/manifests/message"
+  .metadata.manifest == "/packages/studio/message/manifest"
   and .spec == {role: "system", body: $proof}
 ' <<<"$PROOF" >/dev/null
 SKILL_PROOF="$(get_resource "$SKILL_PROOF_PATH")"
 jq -e '
-  .metadata.manifest == "/manifests/message"
+  .metadata.manifest == "/packages/studio/message/manifest"
   and .spec == {role: "system", body: "KAS_SKILL_BUNDLE_V1"}
 ' <<<"$SKILL_PROOF" >/dev/null
 
@@ -1815,20 +1850,20 @@ jq -e '.spec == {role: "assistant", body: "CREATED"}' <<<"$REPLY" >/dev/null
 LINKS="$(
   request --fail --silent --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "manifest=/builtin/link" \
+    --data-urlencode "manifest=/packages/kas/link/manifest" \
     "$API/resources"
 )"
 jq -e --arg reply "$REPLY_PATH" --arg agent "$AGENT_PATH" --arg parent "$MESSAGE_PATH" --arg thread "$THREAD_PATH" '
-  any(.[]; .spec.relation == "/manifests/message/relations/authored-by"
+  any(.[]; .spec.relation == "/packages/studio/message/relations/authored-by"
     and .spec.source == $reply and .spec.target == $agent)
-  and any(.[]; .spec.relation == "/manifests/message/relations/replies-to"
+  and any(.[]; .spec.relation == "/packages/studio/message/relations/replies-to"
     and .spec.source == $reply and .spec.target == $parent)
-  and any(.[]; .spec.relation == "/manifests/message/relations/message-thread"
+  and any(.[]; .spec.relation == "/packages/studio/message/relations/message-thread"
     and .spec.source == $reply and .spec.target == $thread)
-  and ([.[] | select(.spec.relation == "/manifests/message/relations/thread-root")] | length) == 0
+  and ([.[] | select(.spec.relation == "/packages/studio/message/relations/thread-root")] | length) == 0
 ' <<<"$LINKS" >/dev/null
 
-SESSION_PATH="$THREAD_PATH/sessions/agents-e2e"
+SESSION_PATH="/packages/studio/session/sessions/packages-studio-thread-threads-e2e-packages-studio-agent-agents-e2e"
 SESSION="$(wait_for_state "$SESSION_PATH" available)"
 SESSION_ID="$(jq -r '.spec.session_id' <<<"$SESSION")"
 jq -e --arg cursor "$REPLY_PATH" '
@@ -1841,26 +1876,26 @@ for path in "$SESSION_PATH/links/thread" "$SESSION_PATH/links/agent"; do
   wait_for_state "$path" available >/dev/null
 done
 jq -e --arg session "$SESSION_PATH" --arg thread "$THREAD_PATH" --arg agent "$AGENT_PATH" '
-  any(.[]; .spec.relation == "/manifests/session/relations/thread-session"
+  any(.[]; .spec.relation == "/packages/studio/session/relations/thread-session"
     and .spec.source == $thread and .spec.target == $session)
-  and any(.[]; .spec.relation == "/manifests/session/relations/agent-session"
+  and any(.[]; .spec.relation == "/packages/studio/session/relations/agent-session"
     and .spec.source == $agent and .spec.target == $session)
 ' <<<"$(
   request --fail --silent --get \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
-    --data-urlencode "manifest=/builtin/link" \
+    --data-urlencode "manifest=/packages/kas/link/manifest" \
     "$API/resources"
 )" >/dev/null
 
-OBSERVER_SESSION="$THREAD_PATH/sessions/agents-observer"
+OBSERVER_SESSION="/packages/studio/session/sessions/packages-studio-thread-threads-e2e-packages-studio-agent-agents-observer"
 if get_resource "$OBSERVER_SESSION" >/dev/null 2>&1; then
   echo "unmentioned observer Agent received a Session" >&2
   false
 fi
 
 # A Driver restart must not lose the provider Session mapping.
-control_driver "/manifests/agent/driver" stopped
-control_driver "/manifests/agent/driver" running
+control_driver "/packages/studio/agent/driver" stopped
+control_driver "/packages/studio/agent/driver" running
 
 SKILL_BEFORE_UPDATE="$(get_resource "$SKILL_PATH")"
 SKILL_REVISION="$(jq -r '.metadata["[kas]"].revision' <<<"$SKILL_BEFORE_UPDATE")"
@@ -1880,15 +1915,15 @@ UPDATED_SKILL_FILE="$(jq -r '.spec.target' <<<"$UPDATED_SKILL_LINK")"
 [[ "$(jq -r '.path' <<<"$UPDATED_SKILL_LINK")" == "$SKILL_PATH/links/bundle" ]]
 get_resource "$UPDATED_SKILL_FILE" >/dev/null
 
-SECOND_MESSAGE_PATH="/messages/e2e-user-resume"
-UPDATED_SKILL_PROOF_PATH="/messages/e2e-agent-skill-update-proof"
+SECOND_MESSAGE_PATH="/packages/studio/message/messages/e2e-user-resume"
+UPDATED_SKILL_PROOF_PATH="/packages/studio/message/messages/e2e-agent-skill-update-proof"
 post_resource "$(
   jq -n \
     --arg path "$SECOND_MESSAGE_PATH" \
     --arg body "@e2e Use \$e2e-bundle and POST a Message Resource at $UPDATED_SKILL_PROOF_PATH with name e2e-agent-skill-update-proof, spec.role system, and spec.body set to its exact current Skill bundle marker. Then publish an assistant reply through the KAS API containing exactly the secret I asked you to remember in the previous turn; do not add the marker to the reply and do not rely on your final terminal response." '{
       path: $path,
       metadata: {
-        manifest: "/manifests/message",
+        manifest: "/packages/studio/message/manifest",
         name: "e2e-user-resume"
       },
       spec: {
@@ -1898,16 +1933,16 @@ post_resource "$(
     }'
 )" >/dev/null
 create_link "$SECOND_MESSAGE_PATH/links/authored-by" \
-  "/manifests/message/relations/authored-by" "$SECOND_MESSAGE_PATH" "/users/studio-admin"
+  "/packages/studio/message/relations/authored-by" "$SECOND_MESSAGE_PATH" "/packages/kas/user/users/studio-admin"
 create_link "$SECOND_MESSAGE_PATH/links/replies-to" \
-  "/manifests/message/relations/replies-to" "$SECOND_MESSAGE_PATH" "$REPLY_PATH"
+  "/packages/studio/message/relations/replies-to" "$SECOND_MESSAGE_PATH" "$REPLY_PATH"
 create_link "$SECOND_MESSAGE_PATH/links/message-thread" \
-  "/manifests/message/relations/message-thread" "$SECOND_MESSAGE_PATH" "$THREAD_PATH"
+  "/packages/studio/message/relations/message-thread" "$SECOND_MESSAGE_PATH" "$THREAD_PATH"
 SECOND_MENTION_LINK="$SECOND_MESSAGE_PATH/links/mentioned/agents-e2e"
 create_link "$SECOND_MENTION_LINK" \
-  "/manifests/message/relations/mentioned" "$SECOND_MESSAGE_PATH" "$AGENT_PATH"
+  "/packages/studio/message/relations/mentioned" "$SECOND_MESSAGE_PATH" "$AGENT_PATH"
 
-SECOND_RUN="$(wait_for_run "$SECOND_MENTION_LINK/run")"
+SECOND_RUN="$(wait_for_matching_run "$SECOND_MESSAGE_PATH" "$AGENT_PATH")"
 if [[ "$(jq -r '.status.metadata.state' <<<"$SECOND_RUN")" != "succeeded" ]]; then
   echo "resumed Agent Run failed: $(jq -c . <<<"$SECOND_RUN")" >&2
   false
@@ -1919,7 +1954,7 @@ jq -e --arg secret "$SESSION_SECRET" '
 ' <<<"$SECOND_REPLY" >/dev/null
 UPDATED_SKILL_PROOF="$(get_resource "$UPDATED_SKILL_PROOF_PATH")"
 jq -e '
-  .metadata.manifest == "/manifests/message"
+  .metadata.manifest == "/packages/studio/message/manifest"
   and .spec == {role: "system", body: "KAS_SKILL_BUNDLE_V2"}
 ' <<<"$UPDATED_SKILL_PROOF" >/dev/null
 
@@ -1962,18 +1997,18 @@ TABLES="$(sqlite3 "$KAS_DATABASE" \
 [[ "$TABLES" == "events,resources" ]]
 SKILL_EVENT_COUNT="$(
   sqlite3 "$KAS_DATABASE" \
-    "SELECT count(*) FROM events WHERE resource_path IN ('$SKILL_PATH','/skills/kas')"
+    "SELECT count(*) FROM events WHERE resource_path IN ('$SKILL_PATH','/packages/studio/skill/skills/kas')"
 )"
 if (( SKILL_EVENT_COUNT >= 50 )); then
   echo "Skill reconciliation did not converge: $SKILL_EVENT_COUNT Skill events" >&2
   false
 fi
 
-control_driver "/manifests/message/driver" stopped
-control_driver "/manifests/agent/driver" stopped
-control_driver "/manifests/skill/driver" stopped
-control_driver "/manifests/file/driver" stopped
-control_driver "/manifests/approval/driver" stopped
-control_driver "/manifests/telegram/driver" stopped
+control_driver "/packages/studio/message/driver" stopped
+control_driver "/packages/studio/agent/driver" stopped
+control_driver "/packages/studio/skill/driver" stopped
+control_driver "/packages/studio/file/driver" stopped
+control_driver "/packages/studio/approval/driver" stopped
+control_driver "/packages/studio/telegram/driver" stopped
 
 echo "KAS Studio Telegram, Approval, Skill, File, and persistent Session end-to-end test passed"

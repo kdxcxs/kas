@@ -1,7 +1,7 @@
 {
   "path": "./driver",
   "metadata": {
-    "manifest": "/builtin/driver",
+    "manifest": "/packages/kas/driver/manifest",
     "name": "telegram-driver",
     "state": "running"
   },
@@ -15,33 +15,33 @@
     "args": [],
     "watches": [
       {
-        "manifest": "/manifests/message",
+        "manifest": "/packages/studio/message/manifest",
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       },
       {
-        "manifest": "/manifests/thread",
+        "manifest": "/packages/studio/thread/manifest",
         "paths": [
-          "/threads/**"
+          "/packages/studio/thread/threads/**"
         ]
       },
       {
-        "manifest": "/builtin/link",
+        "manifest": "/packages/kas/link/manifest",
         "paths": [
-          "/threads/**/links/telegram/**",
-          "/messages/**/links/telegram/**",
-          "/messages/**/links/message-thread",
-          "/messages/**/links/attachments/*",
-          "/users/**/links/telegram/**",
-          "/users/**/links/telegram-bindings/**",
-          "/approvals/**/links/telegram/**"
+          "/packages/studio/thread/threads/**/links/telegram/**",
+          "/packages/studio/message/messages/**/links/telegram/**",
+          "/packages/studio/message/messages/**/links/message-thread",
+          "/packages/studio/message/messages/**/links/attachments/*",
+          "/packages/kas/user/users/**/links/telegram/**",
+          "/packages/kas/user/users/**/links/telegram-bindings/**",
+          "/packages/studio/approval/approvals/**/links/telegram/**"
         ]
       },
       {
-        "manifest": "/manifests/approval",
+        "manifest": "/packages/studio/approval/manifest",
         "paths": [
-          "/approvals/**"
+          "/packages/studio/approval/approvals/**"
         ]
       }
     ],

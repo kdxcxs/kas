@@ -16,26 +16,26 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const TELEGRAM_MANIFEST: &str = "/manifests/telegram";
-const APPROVAL_MANIFEST: &str = "/manifests/approval";
-const THREAD_MANIFEST: &str = "/manifests/thread";
-const MESSAGE_MANIFEST: &str = "/manifests/message";
-const AGENT_MANIFEST: &str = "/manifests/agent";
-const USER_MANIFEST: &str = "/builtin/user";
-const LINK_MANIFEST: &str = "/builtin/link";
-const MESSAGE_THREAD: &str = "/manifests/message/relations/message-thread";
-const AUTHORED_BY: &str = "/manifests/message/relations/authored-by";
-const REPLIES_TO: &str = "/manifests/message/relations/replies-to";
-const MENTIONED: &str = "/manifests/message/relations/mentioned";
-const PARTICIPANTS: &str = "/manifests/thread/relations/participants";
-const THREAD_TOPIC: &str = "/manifests/telegram/relations/thread-topic";
-const MESSAGE_COPY: &str = "/manifests/telegram/relations/message-copy";
-const FILE_MANIFEST: &str = "/manifests/file";
-const ATTACHED_TO: &str = "/manifests/file/relations/attached-to";
-const TELEGRAM_IDENTITY: &str = "/manifests/telegram/relations/identity";
-const BINDING_REQUEST: &str = "/manifests/telegram/relations/binding-request";
-const USER_BINDING: &str = "/manifests/telegram/relations/user-binding";
-const APPROVAL_DELIVERY: &str = "/manifests/telegram/relations/approval-delivery";
+const TELEGRAM_MANIFEST: &str = "/packages/studio/telegram/manifest";
+const APPROVAL_MANIFEST: &str = "/packages/studio/approval/manifest";
+const THREAD_MANIFEST: &str = "/packages/studio/thread/manifest";
+const MESSAGE_MANIFEST: &str = "/packages/studio/message/manifest";
+const AGENT_MANIFEST: &str = "/packages/studio/agent/manifest";
+const USER_MANIFEST: &str = "/packages/kas/user/manifest";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+const MESSAGE_THREAD: &str = "/packages/studio/message/relations/message-thread";
+const AUTHORED_BY: &str = "/packages/studio/message/relations/authored-by";
+const REPLIES_TO: &str = "/packages/studio/message/relations/replies-to";
+const MENTIONED: &str = "/packages/studio/message/relations/mentioned";
+const PARTICIPANTS: &str = "/packages/studio/thread/relations/participants";
+const THREAD_TOPIC: &str = "/packages/studio/telegram/relations/thread-topic";
+const MESSAGE_COPY: &str = "/packages/studio/telegram/relations/message-copy";
+const FILE_MANIFEST: &str = "/packages/studio/file/manifest";
+const ATTACHED_TO: &str = "/packages/studio/file/relations/attached-to";
+const TELEGRAM_IDENTITY: &str = "/packages/studio/telegram/relations/identity";
+const BINDING_REQUEST: &str = "/packages/studio/telegram/relations/binding-request";
+const USER_BINDING: &str = "/packages/studio/telegram/relations/user-binding";
+const APPROVAL_DELIVERY: &str = "/packages/studio/telegram/relations/approval-delivery";
 
 #[derive(Debug, Clone)]
 pub struct TelegramDriver {
@@ -323,7 +323,7 @@ impl TelegramDriver {
             .from
             .as_ref()
             .ok_or_else(|| "Telegram Message has no sender".to_owned())?;
-        let user_path = format!("/users/telegram/{}", sender.id);
+        let user_path = format!("/packages/studio/telegram/users/{}", sender.id);
         self.ensure_resource(json!({
             "path": user_path,
             "metadata": {
@@ -474,7 +474,10 @@ impl TelegramDriver {
         };
         let challenge_link: LinkSpec = serde_json::from_value(challenge.spec.clone())
             .map_err(|error| format!("invalid binding challenge {}: {error}", challenge.path))?;
-        if challenge_link.source.starts_with("/users/telegram/") {
+        if challenge_link
+            .source
+            .starts_with("/packages/studio/telegram/users/")
+        {
             return Err("a Telegram shadow User cannot initiate a KAS binding".into());
         }
         let kas_user = self
@@ -484,7 +487,7 @@ impl TelegramDriver {
             return Err(format!("{} is not a KAS User", kas_user.path));
         }
 
-        let telegram_user_path = format!("/users/telegram/{}", sender.id);
+        let telegram_user_path = format!("/packages/studio/telegram/users/{}", sender.id);
         self.ensure_resource(json!({
             "path": telegram_user_path,
             "metadata": {
@@ -949,26 +952,36 @@ impl TelegramDriver {
         link: &LinkSpec,
         metadata: Value,
     ) -> Result<(), String> {
-        let response = self
-            .client
-            .patch(format!("{}/resources/by-path", self.kas_api))
-            .bearer_auth(&self.kas_token)
-            .query(&[("path", resource.path.as_str())])
-            .json(&json!({
-                "expected_revision": resource.revision,
-                "spec": {
-                    "relation": link.relation,
-                    "source": link.source,
-                    "target": link.target,
-                    "metadata": metadata
-                }
-            }))
-            .send()
-            .map_err(|error| format!("could not update {}: {error}", resource.path))?;
-        response
-            .error_for_status()
-            .map(|_| ())
-            .map_err(|error| format!("could not update {}: {error}", resource.path))
+        let mut revision = resource.revision;
+        for attempt in 0..3 {
+            let response = self
+                .client
+                .patch(format!("{}/resources/by-path", self.kas_api))
+                .bearer_auth(&self.kas_token)
+                .query(&[("path", resource.path.as_str())])
+                .json(&json!({
+                    "expected_revision": revision,
+                    "spec": {
+                        "relation": link.relation,
+                        "source": link.source,
+                        "target": link.target,
+                        "metadata": metadata.clone()
+                    }
+                }))
+                .send()
+                .map_err(|error| format!("could not update {}: {error}", resource.path))?;
+            if response.status() != reqwest::StatusCode::CONFLICT || attempt == 2 {
+                return response
+                    .error_for_status()
+                    .map(|_| ())
+                    .map_err(|error| format!("could not update {}: {error}", resource.path));
+            }
+            revision = self
+                .get_resource(&resource.path)?
+                .ok_or_else(|| format!("Link {} disappeared during update", resource.path))?
+                .revision;
+        }
+        unreachable!("retry loop always returns")
     }
 
     fn delete_resource(&self, resource: &Resource) -> Result<(), String> {
@@ -1391,7 +1404,7 @@ impl TelegramDriver {
                 .unwrap_or("")
                 .to_owned();
             if let Some(author_path) = link_target(&links, AUTHORED_BY, &resource.path) {
-                if author_path.starts_with("/agents/") {
+                if author_path.starts_with("/packages/studio/agent/agents/") {
                     let handle = author_path
                         .split('/')
                         .rfind(|part| !part.is_empty())
@@ -1536,7 +1549,7 @@ fn default_api_base() -> String {
 
 fn telegram_message_path(configuration: &Resource, message_id: i64) -> String {
     format!(
-        "/messages/telegram/{}/{}",
+        "/packages/studio/message/messages/telegram/{}/{}",
         path_slug(&configuration.path),
         message_id
     )

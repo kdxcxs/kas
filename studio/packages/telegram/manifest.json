@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/telegram",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/telegram/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "telegram",
   "version": 1,
   "description": "A bidirectional bridge between one Telegram forum group and KAS Threads.",
+  "paths": ["./integrations/*"],
   "states": [],
   "default_state": "available",
   "initial_state": "pending",

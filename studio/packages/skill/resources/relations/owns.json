@@ -1,7 +1,7 @@
 {
   "path": "./relations/owns",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "owns"
   },
   "spec": {
@@ -9,8 +9,8 @@
     "sources": [
       {
         "manifest": [
-          "/builtin/user",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
         ]
       }
     ],

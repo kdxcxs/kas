@@ -1,7 +1,7 @@
 {
   "path": "./relations/replies-to",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "replies-to"
   },
   "spec": {
@@ -10,7 +10,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       }
     ],
@@ -18,7 +18,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/messages/**"
+          "/packages/studio/message/messages/**"
         ]
       }
     ],

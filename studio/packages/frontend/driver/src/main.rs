@@ -30,11 +30,11 @@ use tokio::{fs, net::TcpListener, sync::RwLock};
 use uuid::Uuid;
 use zip::ZipArchive;
 
-const FRONTEND_PLUGIN_MANIFEST: &str = "/manifests/frontend-plugin";
-const PROXY_MANIFEST: &str = "/manifests/proxy";
-const FILE_MANIFEST: &str = "/manifests/file";
-const LINK_MANIFEST: &str = "/builtin/link";
-const BUNDLE_RELATION: &str = "/manifests/frontend-plugin/relations/bundle";
+const FRONTEND_PLUGIN_MANIFEST: &str = "/packages/studio/frontend/manifest";
+const PROXY_MANIFEST: &str = "/packages/studio/proxy/manifest";
+const FILE_MANIFEST: &str = "/packages/studio/file/manifest";
+const LINK_MANIFEST: &str = "/packages/kas/link/manifest";
+const BUNDLE_RELATION: &str = "/packages/studio/frontend/relations/bundle";
 const MAX_PLUGIN_FILES: usize = 4096;
 const MAX_PLUGIN_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 

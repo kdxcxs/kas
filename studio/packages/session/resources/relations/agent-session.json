@@ -1,16 +1,16 @@
 {
   "path": "./relations/agent-session",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "agent-session"
   },
   "spec": {
     "inverse_name": "agent",
     "sources": [
       {
-        "manifest": "/manifests/agent",
+        "manifest": "/packages/studio/agent/manifest",
         "paths": [
-          "/agents/**"
+          "/packages/studio/agent/agents/**"
         ]
       }
     ],
@@ -18,7 +18,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/threads/**/sessions/**"
+          "/packages/studio/session/sessions/**"
         ]
       }
     ],

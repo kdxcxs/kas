@@ -1,7 +1,7 @@
 {
   "path": "./roles/driver",
   "metadata": {
-    "manifest": "/builtin/role",
+    "manifest": "/packages/kas/role/manifest",
     "name": "file-driver"
   },
   "spec": {
@@ -19,12 +19,12 @@
           "delete"
         ],
         "paths": [
-          "/files/**"
+          "/packages/studio/file/files/**"
         ]
       },
       {
         "manifests": [
-          "/builtin/link"
+          "/packages/kas/link/manifest"
         ],
         "verbs": [
           "get",
@@ -33,7 +33,7 @@
           "delete"
         ],
         "paths": [
-          "/files/**"
+          "/packages/studio/file/files/**"
         ]
       }
     ]

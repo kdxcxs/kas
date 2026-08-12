@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/frontend-plugin",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/frontend/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "frontend-plugin",
   "version": 1,
   "description": "A ZIP-backed workspace UI contribution maintained by the KAS web gateway.",
+  "paths": ["./plugins/*"],
   "states": ["invalid"],
   "default_state": "available",
   "initial_state": "pending",

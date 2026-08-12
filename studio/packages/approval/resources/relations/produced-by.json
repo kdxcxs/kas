@@ -1,14 +1,14 @@
 {
   "path": "./relations/produced-by",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "produced-by"
   },
   "spec": {
     "inverse_name": "produced-results",
     "sources": [
       {
-        "manifest": "/manifests/approval-result"
+        "manifest": "/packages/studio/approval-result/manifest"
       }
     ],
     "targets": [

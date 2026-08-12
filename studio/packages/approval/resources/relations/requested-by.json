@@ -1,7 +1,7 @@
 {
   "path": "./relations/requested-by",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "requested-by"
   },
   "spec": {
@@ -14,8 +14,8 @@
     "targets": [
       {
         "manifest": [
-          "/builtin/user",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
         ]
       }
     ],

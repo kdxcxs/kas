@@ -86,7 +86,7 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
           --arg upstream "$upstream" '{
             path: $path,
             metadata: {
-              manifest: "/manifests/proxy",
+              manifest: "/packages/studio/proxy/manifest",
               name: $name
             },
             spec: {
@@ -99,9 +99,9 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
       )" \
       "$API/resources" >/dev/null
   }
-  create_proxy "/proxies/file" "File API" "/files-api" "http://127.0.0.1:3001"
-  create_proxy "/proxies/skill" "Skill API" "/skills-api" "http://127.0.0.1:3002"
-  create_proxy "/proxies/approval" "Approval API" "/approvals-api" "http://127.0.0.1:3003"
+  create_proxy "/packages/studio/proxy/proxies/file" "File API" "/files-api" "http://127.0.0.1:3001"
+  create_proxy "/packages/studio/proxy/proxies/skill" "Skill API" "/skills-api" "http://127.0.0.1:3002"
+  create_proxy "/packages/studio/proxy/proxies/approval" "Approval API" "/approvals-api" "http://127.0.0.1:3003"
 
   wait_for_state() {
     local path="$1" state="$2" resource=""
@@ -121,12 +121,12 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
     return 1
   }
 
-  wait_for_state "/manifests/file/driver" running
-  wait_for_state "/manifests/frontend-plugin/driver" running
-  wait_for_state "/manifests/telegram/driver" running
-  wait_for_state "/proxies/file" available
-  wait_for_state "/proxies/skill" available
-  wait_for_state "/proxies/approval" available
+  wait_for_state "/packages/studio/file/driver" running
+  wait_for_state "/packages/studio/frontend/driver" running
+  wait_for_state "/packages/studio/telegram/driver" running
+  wait_for_state "/packages/studio/proxy/proxies/file" available
+  wait_for_state "/packages/studio/proxy/proxies/skill" available
+  wait_for_state "/packages/studio/proxy/proxies/approval" available
   curl --fail --silent "http://127.0.0.1:3001/health" >/dev/null
 
   install_plugin() {
@@ -147,26 +147,26 @@ if [[ ! -f "$INSTALL_MARKER" ]]; then
   }
 
   install_plugin "$PLUGINS_DIR/workspace.zip" \
-    "/frontend-plugins/threads" threads threads.html Threads "#" 10 /threads
+    "/packages/studio/frontend/plugins/threads" threads threads.html Threads "#" 10 /packages/studio/thread/threads
   install_plugin "$PLUGINS_DIR/workspace.zip" \
-    "/frontend-plugins/agents" agents agents.html Agents A 20 /agents
+    "/packages/studio/frontend/plugins/agents" agents agents.html Agents A 20 /packages/studio/agent/agents
   install_plugin "$PLUGINS_DIR/workspace.zip" \
-    "/frontend-plugins/skills" skills skills.html Skills "⌁" 30 /skills
+    "/packages/studio/frontend/plugins/skills" skills skills.html Skills "⌁" 30 /skills
   install_plugin "$PLUGINS_DIR/workspace.zip" \
-    "/frontend-plugins/approvals" approvals approvals.html Approvals "✓" 40 /approvals
+    "/packages/studio/frontend/plugins/approvals" approvals approvals.html Approvals "✓" 40 /approvals
   install_plugin "$PLUGINS_DIR/workspace.zip" \
-    "/frontend-plugins/telegram" telegram telegram.html Telegram "✈" 45 /telegram
+    "/packages/studio/frontend/plugins/telegram" telegram telegram.html Telegram "✈" 45 /telegram
   install_plugin "$PLUGINS_DIR/registry.zip" \
-    "/frontend-plugins/registry" registry index.html Objects "◇" 50 /objects
+    "/packages/studio/frontend/plugins/registry" registry index.html Objects "◇" 50 /objects
 
   for plugin in threads agents skills approvals telegram registry; do
-    wait_for_state "/frontend-plugins/$plugin" available
+    wait_for_state "/packages/studio/frontend/plugins/$plugin" available
   done
 
   touch "$INSTALL_MARKER"
   echo
   echo "KAS Studio initialized."
-  echo "Admin user:  /users/$ADMIN_NAME"
+  echo "Admin user:  /packages/kas/user/users/$ADMIN_NAME"
   echo "Admin token: $ADMIN_TOKEN"
   echo "Save this token now; it will not be printed again."
   echo

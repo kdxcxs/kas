@@ -1,16 +1,16 @@
 {
   "path": "./relations/binding-request",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "telegram-binding-request"
   },
   "spec": {
     "inverse_name": "requested-telegram-binding",
     "sources": [
       {
-        "manifest": "/builtin/user",
+        "manifest": "/packages/kas/user/manifest",
         "paths": [
-          "/users/**"
+          "/packages/kas/user/users/**"
         ]
       }
     ],
@@ -18,7 +18,7 @@
       {
         "manifest": ".",
         "paths": [
-          "/telegram/**"
+          "/packages/studio/telegram/integrations/**"
         ]
       }
     ],

@@ -31,7 +31,7 @@ if [[ ! -f "$ZIP_FILE" ]]; then
   exit 1
 fi
 
-FILE_PATH="/files${PLUGIN_PATH}/bundle"
+FILE_PATH="/packages/studio/file/files${PLUGIN_PATH}/bundle"
 FILE="$(
   curl --fail-with-body --silent --show-error \
     -H "Authorization: Bearer $TOKEN" \
@@ -55,7 +55,7 @@ curl --fail-with-body --silent --show-error \
       --arg route "$ROUTE" '{
         path: $path,
         metadata: {
-          manifest: "/manifests/frontend-plugin",
+          manifest: "/packages/studio/frontend/manifest",
           name: $name
         },
         spec: {
@@ -88,11 +88,11 @@ curl --fail-with-body --silent --show-error \
       --arg target "$(jq -r '.path' <<<"$FILE")" '{
         path: $path,
         metadata: {
-          manifest: "/builtin/link",
+          manifest: "/packages/kas/link/manifest",
           name: "bundle"
         },
         spec: {
-          relation: "/manifests/frontend-plugin/relations/bundle",
+          relation: "/packages/studio/frontend/relations/bundle",
           source: $source,
           target: $target,
           metadata: {}

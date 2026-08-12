@@ -1,9 +1,10 @@
 {
-  "path": "/manifests/approval",
-  "manifest": "/builtin/manifest",
+  "path": "/packages/studio/approval/manifest",
+  "manifest": "/packages/kas/manifest/manifest",
   "name": "approval",
   "version": 1,
   "description": "An immutable elevation request or its auditable user decision.",
+  "paths": ["./approvals/**"],
   "states": [
     "executing",
     "succeeded",

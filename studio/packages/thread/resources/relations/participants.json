@@ -1,7 +1,7 @@
 {
   "path": "./relations/participants",
   "metadata": {
-    "manifest": "/builtin/relation",
+    "manifest": "/packages/kas/relation/manifest",
     "name": "participants"
   },
   "spec": {
@@ -10,15 +10,15 @@
       {
         "manifest": ".",
         "paths": [
-          "/threads/**"
+          "/packages/studio/thread/threads/**"
         ]
       }
     ],
     "targets": [
       {
         "manifest": [
-          "/builtin/user",
-          "/manifests/agent"
+          "/packages/kas/user/manifest",
+          "/packages/studio/agent/manifest"
         ]
       }
     ],

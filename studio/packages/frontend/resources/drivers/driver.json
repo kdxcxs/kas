@@ -1,7 +1,7 @@
 {
   "path": "./driver",
   "metadata": {
-    "manifest": "/builtin/driver",
+    "manifest": "/packages/kas/driver/manifest",
     "name": "frontend-driver",
     "state": "running"
   },
@@ -11,20 +11,20 @@
     "service_account": "./service-accounts/driver",
     "manages": [
       ".",
-      "/manifests/proxy"
+      "/packages/studio/proxy/manifest"
     ],
     "args": [],
     "watches": [
       {
-        "manifest": "/builtin/link",
+        "manifest": "/packages/kas/link/manifest",
         "paths": [
-          "/frontend-plugins/**/links/bundle"
+          "/packages/studio/frontend/plugins/**/links/bundle"
         ]
       },
       {
-        "manifest": "/manifests/file",
+        "manifest": "/packages/studio/file/manifest",
         "paths": [
-          "/files/frontend-plugins/**"
+          "/packages/studio/file/files/packages/studio/frontend/plugins/**"
         ]
       }
     ],

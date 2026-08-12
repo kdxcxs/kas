@@ -1,7 +1,7 @@
 {
   "path": "./actions/message",
   "metadata": {
-    "manifest": "/builtin/action",
+    "manifest": "/packages/kas/action/manifest",
     "name": "message"
   },
   "spec": {

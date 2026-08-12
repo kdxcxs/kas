@@ -1,25 +1,25 @@
 import type { CreateResource, ObjectKind, PlannedLink, Resource } from './types';
 
-export const AGENT_MANIFEST = '/manifests/agent';
-export const THREAD_MANIFEST = '/manifests/thread';
-export const MESSAGE_MANIFEST = '/manifests/message';
-export const FILE_MANIFEST = '/manifests/file';
-export const SESSION_MANIFEST = '/manifests/session';
-export const SKILL_MANIFEST = '/manifests/skill';
-export const APPROVAL_MANIFEST = '/manifests/approval';
-export const APPROVAL_RESULT_MANIFEST = '/manifests/approval-result';
-export const APPROVAL_REQUESTED_BY = '/manifests/approval/relations/requested-by';
-export const APPROVAL_DECIDES = '/manifests/approval/relations/decides';
-export const APPROVAL_DECIDED_BY = '/manifests/approval/relations/decided-by';
-export const APPROVAL_RESULT_OF = '/manifests/approval/relations/result-of';
-export const APPROVAL_PRODUCED_BY = '/manifests/approval/relations/produced-by';
-export const PARTICIPANTS = '/manifests/thread/relations/participants';
-export const AUTHORED_BY = '/manifests/message/relations/authored-by';
-export const MESSAGE_THREAD = '/manifests/message/relations/message-thread';
-export const MENTIONED = '/manifests/message/relations/mentioned';
-export const REPLIES_TO = '/manifests/message/relations/replies-to';
-export const ATTACHED_TO = '/manifests/file/relations/attached-to';
-export const USES_SKILL = '/manifests/skill/relations/uses';
+export const AGENT_MANIFEST = '/packages/studio/agent/manifest';
+export const THREAD_MANIFEST = '/packages/studio/thread/manifest';
+export const MESSAGE_MANIFEST = '/packages/studio/message/manifest';
+export const FILE_MANIFEST = '/packages/studio/file/manifest';
+export const SESSION_MANIFEST = '/packages/studio/session/manifest';
+export const SKILL_MANIFEST = '/packages/studio/skill/manifest';
+export const APPROVAL_MANIFEST = '/packages/studio/approval/manifest';
+export const APPROVAL_RESULT_MANIFEST = '/packages/studio/approval-result/manifest';
+export const APPROVAL_REQUESTED_BY = '/packages/studio/approval/relations/requested-by';
+export const APPROVAL_DECIDES = '/packages/studio/approval/relations/decides';
+export const APPROVAL_DECIDED_BY = '/packages/studio/approval/relations/decided-by';
+export const APPROVAL_RESULT_OF = '/packages/studio/approval/relations/result-of';
+export const APPROVAL_PRODUCED_BY = '/packages/studio/approval/relations/produced-by';
+export const PARTICIPANTS = '/packages/studio/thread/relations/participants';
+export const AUTHORED_BY = '/packages/studio/message/relations/authored-by';
+export const MESSAGE_THREAD = '/packages/studio/message/relations/message-thread';
+export const MENTIONED = '/packages/studio/message/relations/mentioned';
+export const REPLIES_TO = '/packages/studio/message/relations/replies-to';
+export const ATTACHED_TO = '/packages/studio/file/relations/attached-to';
+export const USES_SKILL = '/packages/studio/skill/relations/uses';
 
 export interface ComposerKeyEvent {
   key: string;
@@ -79,7 +79,7 @@ export function participantsForThread(thread: Resource, agents: Resource[]): Res
 }
 
 export function participantAgentPaths(thread: Resource): string[] {
-  return relationTargets(thread, PARTICIPANTS).filter((path) => path.startsWith('/agents/'));
+  return relationTargets(thread, PARTICIPANTS).filter((path) => path.startsWith('/packages/studio/agent/agents/'));
 }
 
 export function mentionHandle(agent: Resource): string {
@@ -102,7 +102,7 @@ export function buildThread(
   userPath: string,
   agentPaths: string[]
 ): CreateResource {
-  const path = `/threads/${id}`;
+  const path = `/packages/studio/thread/threads/${id}`;
   const participants = [userPath, ...agentPaths];
   return {
     path,
@@ -121,13 +121,13 @@ export function threadParticipantLink(
     `${threadPath}/links/participants/${slugify(participantPath)}`,
     threadPath,
     PARTICIPANTS,
-    participantPath.startsWith('/users/') ? 'user' : 'resource',
+    participantPath.startsWith('/packages/kas/user/users/') ? 'user' : 'resource',
     participantPath
   );
 }
 
 export function sessionPath(threadPath: string, agentPath: string): string {
-  return `${threadPath}/sessions/${slugify(agentPath)}`;
+  return `/packages/studio/session/sessions/${slugify(threadPath)}-${slugify(agentPath)}`;
 }
 
 export function sessionForThreadAgent(
@@ -148,7 +148,7 @@ export function buildUserMessage(
   parentPath: string | null,
   attachmentPaths: string[] = []
 ): CreateResource {
-  const path = `/messages/${id}`;
+  const path = `/packages/studio/message/messages/${id}`;
   const links: PlannedLink[] = [
     link(`${path}/links/authored-by`, path, AUTHORED_BY, 'user', userPath),
     link(`${path}/links/message-thread`, path, MESSAGE_THREAD, 'resource', threadPath)
